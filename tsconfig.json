@@ -1,0 +1,10 @@
+{
+  "compilerOptions": {
+    "target": "ES2023", "module": "NodeNext", "moduleResolution": "NodeNext", "moduleDetection": "legacy",
+    "lib": ["ES2023", "DOM"], "types": ["node", "react"],
+    "strict": true, "noUncheckedIndexedAccess": false, "skipLibCheck": true,
+    "rootDir": "src", "outDir": "lib", "declaration": true,
+    "sourceMap": false, "forceConsistentCasingInFileNames": true
+  },
+  "include": ["src/**/*.ts"]
+}
