@@ -92,9 +92,12 @@ try{
  const url=await start();
  const unauthorized=await fetch(`http://127.0.0.1:${port}/session-deletion/api/status`);
  assert.ok([401,403].includes(unauthorized.status),`Unauthenticated status ${unauthorized.status}: ${(await unauthorized.text()).slice(0,400)}`);
+ const unauthorizedReceipt=await fetch(`http://127.0.0.1:${port}/session-deletion/api/receipt`);
+ assert.ok([401,403].includes(unauthorizedReceipt.status));
  browser=await chromium.launch({executablePath:'/opt/google/chrome/chrome',headless:true,args:['--no-sandbox']});
  const context=await browser.newContext({viewport:{width:1440,height:1000}});
  const page=await context.newPage();page.on('pageerror',e=>errors.push(e.message));
+ let receiptRequests=0;page.on('request',request=>{if(new URL(request.url()).pathname==='/session-deletion/api/receipt')receiptRequests++});
  await page.goto(url);await page.waitForTimeout(2000);
  const welcome=page.getByRole('button',{name:'继续',exact:true});if(await welcome.count())await welcome.click();
  await page.getByText('开始使用',{exact:true}).waitFor({timeout:5000});
@@ -102,7 +105,12 @@ try{
  await onboarding.locator('button').first().click();
  await page.addLocatorHandler(page.getByRole('dialog',{name:'开始使用'}),async dialog=>{const close=dialog.locator('button').first();if(await close.isEnabled())await close.click()},{noWaitAfter:true});
  const status=async()=>{const r=await context.request.get(`http://127.0.0.1:${port}/session-deletion/api/status`);assert.equal(r.status(),200);return r.json()};
+ const receipt=async()=>{const r=await context.request.get(`http://127.0.0.1:${port}/session-deletion/api/receipt`);assert.equal(r.status(),200);return r.json()};
  assert.equal((await status()).guardHealthy,true);
+ const initialReceipt=await receipt();
+ assert.deepEqual(initialReceipt,{ok:true,revision:'',deletedIdHashes:[]});
+ assert.deepEqual((await status()).receipt,{revision:'',count:0});
+ assert.equal(receiptRequests,1,'unchanged receipt is fetched only once despite status polling');
  const debugPreview=await context.request.post(`http://127.0.0.1:${port}/session-deletion/api/preview`,{headers:{'X-DSH-Session-Deletion':'1'},data:{sessionId:id}});
  assert.equal(debugPreview.status(),200,'Fixture must be visible to the persistence service');
  // Wait for the real sidebar row, then use the host context menu.
@@ -142,7 +150,7 @@ try{
  await familyRow.hover();await familyRow.locator('xpath=ancestor::*[.//button][1]').locator('button').first().click();
  await page.getByRole('menuitem',{name:'归档并删除',exact:true}).click();
  const familyDialog=page.getByRole('dialog',{name:'归档并删除此会话？',exact:true});
- await familyDialog.getByText('该会话的全部记录将被彻底移除且无法找回（包含与该会话关联的 2 个子代理），已保存的文件与附件不受影响。',{exact:true}).waitFor();
+ await familyDialog.getByText('该会话将被彻底移除（包含与之关联的 2 个子代理），已保存的文件与附件不受影响；如需释放存储空间，可前往左侧「更多」→「清理残留附件与缓存」。',{exact:true}).waitFor();
  assert.equal(await familyDialog.getByRole('checkbox').count(),0);
  assert.equal(await familyDialog.locator('strong').innerText(),'测试含子代理的会话');
  assert.equal(await familyDialog.locator('code').innerText(),family.id);
@@ -191,7 +199,7 @@ try{
  await deletionItem.hover();
  await deletionItem.click({timeout:5000});
  const deletionDialog=page.getByRole('dialog',{name:'归档并删除此会话？',exact:true});
- await deletionDialog.getByText('该会话的全部记录将被彻底移除且无法找回，已保存的文件与附件不受影响。',{exact:true}).waitFor();
+ await deletionDialog.getByText('该会话将被彻底移除，已保存的文件与附件不受影响；如需释放存储空间，可前往左侧「更多」→「清理残留附件与缓存」。',{exact:true}).waitFor();
  assert.equal(await deletionDialog.getByRole('checkbox').count(),0);
  assert.equal(await deletionDialog.locator('strong').innerText(),'Offline deletion integration fixture');
  assert.equal(await deletionDialog.locator('code').innerText(),id);
@@ -222,9 +230,21 @@ try{
  assert.equal((await controls('stage',{id,text:'late upload'})).status(),409,'uploads cannot publish after the target is locked');
  await controls('release-delete');
  await page.getByRole('dialog',{name:/归档并删除此会话|删除此会话/}).waitFor({state:'hidden',timeout:30000});
+ const deletedToast=page.getByRole('alert').filter({hasText:'会话已删除：Offline deletion integration fixture'});
+ await deletedToast.waitFor();
+ assert.match(await deletedToast.getAttribute('class'),/toast/);
+ assert.equal(await deletedToast.evaluate(el=>el.parentElement===document.body),true);
  assert.equal(host.exitCode,null,'DSH must remain running during deletion');
  assert.equal(await exists(log),false,'session log must disappear before DSH exits');
  assert.equal((await status()).pending.length,0);
+ const deletedReceipt=await receipt();
+ assert.notEqual(deletedReceipt.revision,initialReceipt.revision);
+ assert.deepEqual(deletedReceipt.deletedIdHashes,[createHash('sha256').update(id).digest('hex')]);
+ assert.deepEqual((await status()).receipt,{revision:deletedReceipt.revision,count:1});
+ await page.waitForFunction(()=>!document.querySelector('#deletion-lock-probe')?.inert);
+ await page.evaluate(id=>localStorage.setItem('dsh.conversation.'+id,JSON.stringify({draft:'late stale-tab write'})),id);
+ await page.waitForFunction(id=>localStorage.getItem('dsh.conversation.'+id)===null,id);
+ assert.equal(receiptRequests,2,'one new receipt fetch after deletion; late writes use cached tombstones');
  assert.equal(await fs.readFile(join(cwd,'keep.txt'),'utf8'),'project file');
  assert.equal(await exists(join(home,'attachments/v1/objects',exclusive.slice(0,2),exclusive)),true,'private deletion retains all attachments');
  assert.equal(await exists(imageCache),true,'private deletion does not clear the shared image cache');
@@ -241,13 +261,18 @@ try{
  await page.getByText('将移除无关联的本地附件及临时图片缓存以释放空间，操作期间请确保其他会话处于空闲状态。',{exact:true}).waitFor();
  const gcAppearance=await dialogAppearance(page.getByRole('dialog',{name:'清理残留附件与缓存？',exact:true}));
  assert.deepEqual(gcAppearance,nativeAppearance,'GC uses the same modal typography, spacing and buttons as native stop-and-archive');
- await page.getByRole('button',{name:'开始清理',exact:true}).click();
+ await page.getByRole('dialog',{name:'清理残留附件与缓存？',exact:true}).getByRole('button',{name:'取消',exact:true}).click();
+ assert.equal((await status()).gc,null,'cancel does not execute GC');
+ assert.equal(await page.getByRole('alert').filter({hasText:/共清理/}).count(),0);
+ await page.locator('nav').getByRole('button',{name:'更多',exact:true}).click();
+ await page.getByRole('menuitem',{name:'清理残留附件与缓存',exact:true}).click();
+ await page.getByRole('button',{name:'确认清理',exact:true}).click();
  await page.getByRole('dialog',{name:'清理残留附件与缓存？',exact:true}).getByRole('alert').waitFor();
  await page.waitForFunction(()=>[...document.querySelectorAll('.dsh-session-deletion-modal button')].every(button=>!button.disabled));
  assert.equal(await exists(join(home,'attachments/v1/objects',exclusive.slice(0,2),exclusive)),true);
  await controls('clear-input',{id:draftOwner.id});await controls('release-maintenance',{id:draftOwner.id});
  assert.equal((await controls('hold-gc')).status(),200);
- await page.getByRole('button',{name:'开始清理',exact:true}).click();
+ await page.getByRole('button',{name:'确认清理',exact:true}).click();
  for(let i=0;i<100;i++){if((await (await controls('gc-held')).json()).held)break;await delay(50)}
  assert.equal((await (await controls('gc-held')).json()).held,true);
  await page.getByRole('button',{name:'正在清理残留附件与缓存…',exact:true}).waitFor();
@@ -265,22 +290,22 @@ try{
  const duringGc=controls('stage',{id:draftOwner.id,text:'after GC upload'}).then(response=>{uploaded=true;return response});
  await delay(100);assert.equal(uploaded,false,'new uploads queue until GC completes');
  await controls('release-gc');
- const resultDialog=page.getByRole('dialog',{name:'共清理 3 项残留附件与缓存文件。',exact:true});
- await resultDialog.waitFor({timeout:30000});
- assert.equal(await resultDialog.innerText(),'共清理 3 项残留附件与缓存文件。\n关闭','result replaces all pre-cleanup instructions and category breakdowns');
- assert.equal(await resultDialog.locator('p').count(),0);
- assert.equal(await resultDialog.getByRole('button',{name:'开始清理',exact:true}).count(),0);
+ const resultToast=page.getByRole('alert').filter({hasText:'共清理 3 项残留附件与缓存文件。'});
+ await resultToast.waitFor({timeout:30000});
+ assert.equal(await resultToast.innerText(),'共清理 3 项残留附件与缓存文件。');
+ assert.match(await resultToast.getAttribute('class'),/toast/);
+ assert.equal(await resultToast.evaluate(el=>el.parentElement===document.body),true);
+ assert.equal(await page.locator('.dsh-session-deletion-gc').count(),0,'successful GC closes its modal automatically');
  assert.equal((await duringGc).status(),200);
- await page.waitForFunction(()=>[...document.querySelectorAll('.dsh-session-deletion-modal button')].every(button=>!button.disabled));
- await resultDialog.getByRole('button',{name:'关闭',exact:true}).last().click();
- // A second pass has nothing to reclaim and still presents the result stage.
+ await page.waitForFunction(()=>!document.querySelector('#deletion-lock-probe')?.inert);
+ // A second pass has nothing to reclaim and still uses the native Toast.
  await page.locator('nav').getByRole('button',{name:'更多',exact:true}).click();
  await page.getByRole('menuitem',{name:'清理残留附件与缓存',exact:true}).click();
- await page.getByRole('button',{name:'开始清理',exact:true}).click();
- const emptyResult=page.getByRole('dialog',{name:'共清理 0 项残留附件与缓存文件。',exact:true});
+ await page.getByRole('button',{name:'确认清理',exact:true}).click();
+ const emptyResult=page.getByRole('alert').filter({hasText:'共清理 0 项残留附件与缓存文件。'});
  await emptyResult.waitFor({timeout:30000});
- assert.equal(await emptyResult.innerText(),'共清理 0 项残留附件与缓存文件。\n关闭');
- await emptyResult.getByRole('button',{name:'关闭',exact:true}).last().click();
+ assert.equal(await emptyResult.innerText(),'共清理 0 项残留附件与缓存文件。');
+ assert.equal(await page.locator('.dsh-session-deletion-gc').count(),0);
  assert.equal(await exists(join(home,'attachments/v1/objects',exclusive.slice(0,2),exclusive)),false);
  assert.equal(await exists(imageCache),false,'explicit GC clears derived image cache');
  assert.equal(await exists(join(home,'attachments/v1/file-objects',stagedExclusive.slice(0,2),stagedExclusive)),false);
@@ -294,6 +319,7 @@ try{
  assert.equal(coldDeleted.status(),500,'inject a diagnostic write failure after the durable deletion receipt');
  await controls('unblock-status');
  assert.equal(await exists(cold.path),false);
+ assert.ok((await receipt()).deletedIdHashes.includes(createHash('sha256').update(cold.id).digest('hex')),'post-commit diagnostic failure still publishes the new receipt');
  assert.equal((await controls('input',{id:cold.id})).status(),409,'post-commit failure must still install the deleted-session tombstone');
  // A real interrupted private deletion must produce the recovery notice in other tabs.
  assert.equal((await controls('fail-delete',{id:interrupted.id})).status(),200);

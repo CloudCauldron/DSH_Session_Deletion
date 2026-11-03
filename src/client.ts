@@ -12,8 +12,9 @@ interface Window {
 }
 interface PendingDeletion { sessionId: string; queuedAt: string }
 interface GcResult { total: number }
-interface GcDialog { busy?: boolean; error?: string; result?: GcResult }
-interface DeletionStatus { gcRunning?: boolean; deletionRunning?: boolean; pending: PendingDeletion[]; locked: string[]; archived: string[]; guardHealthy: boolean; receipt: { deletedIdHashes: string[] }; cleanup?: { state: string; error?: string } }
+interface GcDialog { busy?: boolean; error?: string }
+interface DeletionReceipt { revision: string; deletedIdHashes: string[] }
+interface DeletionStatus { gcRunning?: boolean; deletionRunning?: boolean; pending: PendingDeletion[]; locked: string[]; archived: string[]; guardHealthy: boolean; receipt: { revision: string; count: number } }
 interface DeletionPreview { count: number; token: string; archived: boolean }
 interface DeletionDialog { id: string; title: string; preview?: DeletionPreview; busy?: boolean; error?: string }
 
@@ -33,7 +34,10 @@ window.__ModuleLoader__.load({ id: 'dsh-session-deletion', factory(require) {
   const listeners = new Set<() => void>();
   let dialog: DeletionDialog | undefined;
   let gcDialog: GcDialog | undefined;
-  let status: DeletionStatus = { pending: [], locked: [], archived: [], guardHealthy: false, receipt: { deletedIdHashes: [] } };
+  let status: DeletionStatus = { pending: [], locked: [], archived: [], guardHealthy: false, receipt: { revision: '', count: 0 } };
+  let receipt: DeletionReceipt | undefined;
+  let toast: { id: number; text: string } | undefined;
+  let toastId = 0;
   let context: DeletionClientContext | undefined;
   let submitting = false;
   let refreshing = false;
@@ -63,8 +67,8 @@ window.__ModuleLoader__.load({ id: 'dsh-session-deletion', factory(require) {
     }
   }
   let generation = 0;
-  let snapshot = { dialog, status, gcDialog };
-  const publish = () => { snapshot = { dialog, status, gcDialog }; for (const listener of listeners) listener(); protectInputs(); };
+  let snapshot = { dialog, status, gcDialog, toast };
+  const publish = () => { snapshot = { dialog, status, gcDialog, toast }; for (const listener of listeners) listener(); protectInputs(); };
   const useSnapshot = () => React.useSyncExternalStore(callback => { listeners.add(callback); return () => { listeners.delete(callback); }; }, () => snapshot);
   async function api<T>(path: string, data?: object): Promise<T> {
     const response = await fetch('/session-deletion/api/' + path, { credentials: 'same-origin', cache: 'no-store',
@@ -124,8 +128,10 @@ window.__ModuleLoader__.load({ id: 'dsh-session-deletion', factory(require) {
     refreshing = true;
     try {
       status = await api<DeletionStatus>('status'); publish();
-      await cleanBrowserState(status.receipt.deletedIdHashes);
-      if (lastMainId && status.receipt.deletedIdHashes.includes(await hash(lastMainId))) {
+      if (!receipt || receipt.revision !== status.receipt.revision) receipt = await api<DeletionReceipt>('receipt');
+      // Keep applying cached tombstones: an old tab may write a deleted session's state back later.
+      await cleanBrowserState(receipt.deletedIdHashes);
+      if (lastMainId && receipt.deletedIdHashes.includes(await hash(lastMainId))) {
         lastMainId = undefined; context?.uiWorkspace.startSession();
       }
     } catch { /* A disconnected host is expected during shutdown. */ }
@@ -146,9 +152,10 @@ window.__ModuleLoader__.load({ id: 'dsh-session-deletion', factory(require) {
   async function confirm(): Promise<void> {
     if (!dialog?.preview || dialog.busy || submitting || status.gcRunning) return;
     const current = dialog;
-    submitting = true; dialog = { ...current, busy: true, error: undefined }; publish();
+    submitting = true; toast = undefined; dialog = { ...current, busy: true, error: undefined }; publish();
     try {
       await api('delete', { sessionId: current.id, token: current.preview!.token, confirmation: 'DELETE_IDLE_SESSION' });
+      toast = { id: ++toastId, text: `会话已删除：${current.title}` };
       close(); await refresh();
     } catch (e) { dialog = { ...current, busy: false, error: e instanceof Error ? e.message : String(e) }; publish(); }
     finally { submitting = false; await refresh(); protectInputs(); }
@@ -179,8 +186,12 @@ window.__ModuleLoader__.load({ id: 'dsh-session-deletion', factory(require) {
   }
   async function collect(): Promise<void> {
     if (gcDialog?.busy || status.gcRunning) return;
-    gcDialog = { busy: true }; publish();
-    try { gcDialog = { result: await api<GcResult>('gc', { confirmation: 'COLLECT_ORPHAN_ATTACHMENTS' }) }; }
+    gcDialog = { busy: true }; toast = undefined; publish();
+    try {
+      const result = await api<GcResult>('gc', { confirmation: 'COLLECT_ORPHAN_ATTACHMENTS' });
+      gcDialog = undefined;
+      toast = { id: ++toastId, text: `共清理 ${result.total} 项残留附件与缓存文件。` };
+    }
     catch (error) { gcDialog = { error: error instanceof Error ? error.message : String(error) }; }
     finally { publish(); await refresh(); }
   }
@@ -192,11 +203,11 @@ window.__ModuleLoader__.load({ id: 'dsh-session-deletion', factory(require) {
     const dismiss = () => { if (!busy) { gcDialog = undefined; publish(); } };
     return h(ui.Modal, {
       open: true, onClose: dismiss, closeLabel: '关闭', className: 'dsh-session-deletion-modal dsh-session-deletion-gc',
-      title: d.result ? `共清理 ${d.result.total} 项残留附件与缓存文件。` : '清理残留附件与缓存？',
-      description: d.result ? undefined : '将移除无关联的本地附件及临时图片缓存以释放空间，操作期间请确保其他会话处于空闲状态。',
+      title: '清理残留附件与缓存？',
+      description: '将移除无关联的本地附件及临时图片缓存以释放空间，操作期间请确保其他会话处于空闲状态。',
       footer: h(React.Fragment, null,
-        h(ui.Button, { variant: 'outline', onClick: dismiss, disabled: busy }, d.result ? '关闭' : '取消'),
-        !d.result ? h(ui.Button, { variant: 'outline', className: 'dsh-session-deletion-danger', onClick: () => { void collect(); }, disabled: busy }, busy ? '正在清理残留附件与缓存…' : '开始清理') : null),
+        h(ui.Button, { variant: 'outline', onClick: dismiss, disabled: busy }, '取消'),
+        h(ui.Button, { variant: 'outline', className: 'dsh-session-deletion-danger', onClick: () => { void collect(); }, disabled: busy }, busy ? '正在清理残留附件与缓存…' : '确认清理')),
       children: d.error ? h('div', { role: 'alert', style: { color: 'var(--dsw-alias-state-error-primary)', marginTop: 8, fontSize: 12, lineHeight: '18px' } }, d.error) : undefined,
     });
   }
@@ -219,14 +230,17 @@ window.__ModuleLoader__.load({ id: 'dsh-session-deletion', factory(require) {
     const noticeText = gcBusy ? '正在清理残留附件与缓存…'
       : recovering ? '清理未完成，将在下次启动时自动恢复'
       : submitting || state.status.deletionRunning || state.status.locked.length ? '正在删除会话…' : undefined;
-    const notice = noticeText ? h(StatusToast, { key: noticeText, text: noticeText, warning: recovering }) : null;
+    const notice = state.toast ? h(ui.Toast, {
+      key: state.toast.id, text: state.toast.text,
+      onDone: () => { if (toast === state.toast) { toast = undefined; publish(); } },
+    }) : noticeText ? h(StatusToast, { key: noticeText, text: noticeText, warning: recovering }) : null;
     if (!d) return h(React.Fragment, null, notice, null);
     const active = context?.sessions.list.getSnapshot().byId[d.id]?.running && !submitting;
     const archived = state.status.archived.includes(d.id);
     const children = Math.max(0, (d.preview?.count ?? 1) - 1);
-    const removalText = '该会话的全部记录将被彻底移除且无法找回'
-      + (children > 0 ? `（包含与该会话关联的 ${children} 个子代理）` : '')
-      + '，已保存的文件与附件不受影响。';
+    const removalText = '该会话将被彻底移除'
+      + (children > 0 ? `（包含与之关联的 ${children} 个子代理）` : '')
+      + '，已保存的文件与附件不受影响；如需释放存储空间，可前往左侧「更多」→「清理残留附件与缓存」。';
     const dismiss = () => { if (!busy) close(); };
     return h(React.Fragment, null, notice,
       h(ui.Modal, {
@@ -267,7 +281,7 @@ window.__ModuleLoader__.load({ id: 'dsh-session-deletion', factory(require) {
       const style = document.createElement('style'); style.textContent = '.dsh-deletion-input-locked{opacity:.45!important;pointer-events:none!important}.dsh-session-deletion-danger:not(:disabled){color:var(--dsw-alias-state-error-primary)}.dsh-session-deletion-modal button[aria-label="关闭"]:disabled{opacity:.4;pointer-events:none}'; document.head.append(style);
       void refresh();
       const timer = setInterval(() => { void refresh(); }, 1000);
-      return () => { clearInterval(timer); unsubscribe(); observer.disconnect(); for (const event of events) window.removeEventListener(event, prevent, true); submitting = false; gcDialog = undefined; status.gcRunning = false; status.locked = []; protectInputs(); style.remove(); listeners.clear(); };
+      return () => { clearInterval(timer); unsubscribe(); observer.disconnect(); for (const event of events) window.removeEventListener(event, prevent, true); submitting = false; gcDialog = undefined; toast = undefined; receipt = undefined; status.gcRunning = false; status.locked = []; protectInputs(); style.remove(); listeners.clear(); };
     }, 'session-deletion status');
   } };
 } });

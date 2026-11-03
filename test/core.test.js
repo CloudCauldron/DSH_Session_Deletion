@@ -1,12 +1,50 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import * as fs from 'node:fs/promises';
+import { readdirSync } from 'node:fs';
 import { join } from 'node:path';
 import { zstdCompressSync } from 'node:zlib';
-import { scanSessions, sweep, collectGarbage, exists, digest, encodeSegment, listRequests, readJSON, stateDir, enqueue, planSessionDeletion } from '../lib/core.js';
+import { scanSessions, sweep, collectGarbage, exists, digest, encodeSegment, listRequests, readJSON, stateDir, enqueue, planSessionDeletion, atomicJSON, birth } from '../lib/core.js';
 import { fixture } from './fixtures.js';
 
 const attachment = (f, hash, kind = 'objects') => join(f.home, 'attachments/v1', kind, hash.slice(0, 2), hash);
+
+test('atomic writes identify their process owner and preserve the committed file when serialization fails', async () => {
+  const f = await fixture();
+  try {
+    const path = join(stateDir(f.home), 'receipt.json');
+    await atomicJSON(path, { committed: true });
+    const prefix = `.session-deletion-write-${process.pid}-${await birth(process.pid)}-`;
+    let temporary;
+    await assert.rejects(atomicJSON(path, { toJSON() {
+      // Serialization runs only after the temporary file has been opened.
+      temporary = readdirSync(stateDir(f.home));
+      throw new Error('serialization interrupted');
+    } }), /serialization interrupted/);
+    assert.ok(temporary.some(name => name.startsWith(prefix)));
+    assert.deepEqual(await readJSON(path), { committed: true });
+    assert.deepEqual(await fs.readdir(stateDir(f.home)), ['receipt.json']);
+  } finally { await f.cleanup(); }
+});
+
+test('receipts retain all hashes and advance revision after each deletion', async () => {
+  const f = await fixture();
+  try {
+    const path = join(stateDir(f.home), 'receipt.json');
+    const previous = Array.from({ length: 4100 }, (_, i) => digest('previous-session-' + i));
+    await atomicJSON(path, { schema: 1, revision: 'a'.repeat(32), deletedIdHashes: previous });
+    await f.queue(); await sweep(f.home);
+    const first = await readJSON(path);
+    assert.deepEqual(first.deletedIdHashes.slice(0, previous.length), previous);
+    assert.equal(first.deletedIdHashes.length, previous.length + 3);
+    assert.match(first.revision, /^[a-f0-9]{32}$/);
+    await enqueue(f.home, f.headers[f.ids.other], await planSessionDeletion(f.home, new Map(Object.entries(f.headers)), f.ids.other));
+    await sweep(f.home);
+    const second = await readJSON(path);
+    assert.notEqual(second.revision, first.revision);
+    assert.deepEqual(second.deletedIdHashes.slice(0, first.deletedIdHashes.length), first.deletedIdHashes);
+  } finally { await f.cleanup(); }
+});
 async function fileSnapshot(root) {
   const files = {};
   async function visit(path) {
@@ -79,7 +117,7 @@ test('target symlink or changed lifecycle refuses private deletion', async () =>
   } finally { await f.cleanup(); }
 });
 
-test('plan validation rejects legacy attachment-deleting requests and traversal', async () => {
+test('plan validation rejects invalid schemas and traversal', async () => {
   const f = await fixture();
   try {
     assert.equal(encodeSegment('../outside'), '..~002Foutside');
@@ -88,7 +126,7 @@ test('plan validation rejects legacy attachment-deleting requests and traversal'
     await f.queue();
     const path = join(stateDir(f.home), 'pending', digest(f.ids.main) + '.json');
     const request = await readJSON(path);
-    await f.write(path, JSON.stringify({ ...request, schema: 2 }));
+    await f.write(path, JSON.stringify({ ...request, schema: 'invalid' }));
     await assert.rejects(sweep(f.home), /Invalid deletion request/);
     plan.directories[0].path = '../outside';
     await f.write(path, JSON.stringify({ ...request, plan }));
@@ -101,7 +139,7 @@ test('uncommitted requests are ignored and never authorize deletion', async () =
   try {
     await f.queue();
     const committed = join(stateDir(f.home), 'pending', digest(f.ids.main) + '.json');
-    const temp = join(stateDir(f.home), 'pending', '.session-deletion-write-' + 'a'.repeat(24));
+    const temp = join(stateDir(f.home), 'pending', `.session-deletion-write-${process.pid}-0-${'a'.repeat(24)}`);
     await fs.rename(committed, temp);
     assert.deepEqual(await listRequests(f.home), []); assert.equal(await exists(temp), true);
     await sweep(f.home);

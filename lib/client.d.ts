@@ -46,7 +46,10 @@ interface GcResult {
 interface GcDialog {
     busy?: boolean;
     error?: string;
-    result?: GcResult;
+}
+interface DeletionReceipt {
+    revision: string;
+    deletedIdHashes: string[];
 }
 interface DeletionStatus {
     gcRunning?: boolean;
@@ -56,11 +59,8 @@ interface DeletionStatus {
     archived: string[];
     guardHealthy: boolean;
     receipt: {
-        deletedIdHashes: string[];
-    };
-    cleanup?: {
-        state: string;
-        error?: string;
+        revision: string;
+        count: number;
     };
 }
 interface DeletionPreview {

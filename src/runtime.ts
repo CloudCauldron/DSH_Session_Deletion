@@ -64,6 +64,7 @@ export class DeletionRuntime {
   private handles = new Map<string, Handle>();
   private operations = new Map<string, number>();
   private deleted = new Set<string>();
+  private receiptRevision = '';
   private cacheWrites = new Map<string, Set<Promise<unknown>>>();
   private restorers: (() => void)[] = [];
   private agentRestorers = new Map<Agent, (() => void)[]>();
@@ -77,6 +78,8 @@ export class DeletionRuntime {
   get deletionRunning(): boolean { return this.maintenance === 'delete'; }
   constructor(readonly ctx: Dynamic, private unwrap: (value: any) => any, private UploadIndex: new(path: string) => Dynamic) {}
   get home(): string { return (this.ctx.sessionDeletionGate as Gate).home; }
+  get receiptSummary() { return { revision: this.receiptRevision, count: this.deleted.size }; }
+  get receipt() { return { revision: this.receiptRevision, deletedIdHashes: [...this.deleted] }; }
   isLocked(id: string): boolean { return this.locked.has(id) || this.deleted.has(digest(id)); }
   private assertAllowed(ids: string[]): void {
     if (ids.some(id => this.isLocked(id))) throw new DeletionRefused('此会话正在删除或已经删除，不能再接收输入。');
@@ -140,9 +143,15 @@ export class DeletionRuntime {
       });
     });
   }
-  async initialize(): Promise<void> {
-    const receipt = await readJSON<Receipt>(join(stateDir(this.home), 'receipt.json'), { schema: 1, deletedIdHashes: [] });
+  private installReceipt(receipt: Receipt): void {
     this.deleted = new Set(receipt.deletedIdHashes);
+    this.receiptRevision = receipt.revision;
+  }
+  private async loadReceipt(): Promise<void> {
+    this.installReceipt(await readJSON<Receipt>(join(stateDir(this.home), 'receipt.json'), { schema: 1, revision: '', deletedIdHashes: [] }));
+  }
+  async initialize(): Promise<void> {
+    await this.loadReceipt();
     const runtime = this;
     if (this.ctx.attachments.root !== join(this.home, 'attachments', 'v1')
       || this.ctx.attachments.cacheRoot !== join(this.home, 'cache', 'attachments')) throw new Error('Unsupported attachment storage');
@@ -341,7 +350,7 @@ export class DeletionRuntime {
     // No await between publishing these locks: other tabs and background input
     // are rejected before the asynchronous authoritative activity checks begin.
     for (const member of ids) this.locked.add(member);
-    let journaled = false;
+    let journaled = false; let committed = false;
     const writerLocks: FileHandle[] = [];
     try {
       const excluded = await waitingHosts(stateDir(this.home)); excluded.add(process.pid);
@@ -371,6 +380,7 @@ export class DeletionRuntime {
       }
       const result = await sweep(this.home, { hooks: {
         onlySessionId: id,
+        receiptCommitted: receipt => { this.installReceipt(receipt); committed = true; },
         applyEdit: async (edit, targets) => {
           const path = relative(this.home, edit.path);
           if (path === 'storages/workspace.json') {
@@ -393,9 +403,9 @@ export class DeletionRuntime {
       if (journaled) {
         // A request unlink/fsync or diagnostic write can fail after commit.
         // Install every tombstone before notifying fallible downstream listeners.
-        const receipt = await readJSON<Receipt>(join(stateDir(this.home), 'receipt.json'), { schema: 1, deletedIdHashes: [] });
-        const completed = ids.filter(member => receipt.deletedIdHashes.includes(digest(member)));
-        for (const member of completed) this.deleted.add(digest(member));
+        // A rename may have succeeded even when its directory sync failed before the commit notification.
+        if (!committed) await this.loadReceipt();
+        const completed = ids.filter(member => this.deleted.has(digest(member)));
         for (const member of completed) {
           this.unwrap(this.ctx.sessionPersistence).coldLogMemo?.delete(member);
           this.unwrap(this.ctx.sessionQuery)._observations?.cache?.delete(member);

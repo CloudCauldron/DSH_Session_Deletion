@@ -6,7 +6,6 @@ export interface GuardOptions {
     hostBirth?: string;
     startupTimeoutMs?: number;
 }
-export declare function birth(pid: number): Promise<string | undefined>;
 export declare function waitingHosts(state: string): Promise<Set<number>>;
 export declare function otherHosts(home: string, excluded: Set<number>): Promise<number[]>;
 /** Kernel lock, held on an open inode and automatically released on process death. */

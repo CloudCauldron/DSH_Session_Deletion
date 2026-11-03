@@ -16,10 +16,12 @@ function browserStorage(values) {
   return storage;
 }
 
-async function refreshClient(localStorage, sessionStorage, deletedId) {
+async function refreshClient(localStorage, sessionStorage, deletedId, verify = async () => {}) {
   let plugin;
   let cleanup;
   let finish;
+  let poll, receiptRequests = 0, failReceipt = false;
+  let receipt = { revision: 'first', deletedIdHashes: [createHash('sha256').update(deletedId).digest('hex')] };
   const finished = new Promise(resolve => { finish = resolve; });
   const sandbox = {
     TextEncoder,
@@ -35,14 +37,16 @@ async function refreshClient(localStorage, sessionStorage, deletedId) {
       createElement: () => ({ remove() {} }),
     },
     MutationObserver: class { observe() {} disconnect() {} },
-    setInterval() { return 1; }, clearInterval() {},
-    fetch: async () => ({
-      ok: true,
-      json: async () => ({
-        pending: [], locked: [], archived: [], guardHealthy: true,
-        receipt: { deletedIdHashes: [createHash('sha256').update(deletedId).digest('hex')] },
-      }),
-    }),
+    setInterval(callback) { poll = callback; return 1; }, clearInterval() {},
+    fetch: async url => {
+      if (url.endsWith('/receipt')) {
+        receiptRequests++;
+        if (failReceipt) { failReceipt = false; return { ok: false, status: 503, json: async () => ({ error: 'retry' }) }; }
+        return { ok: true, json: async () => receipt };
+      }
+      return { ok: true, json: async () => ({ pending: [], locked: [], archived: [], guardHealthy: true,
+        receipt: { revision: receipt.revision, count: receipt.deletedIdHashes.length } }) };
+    },
   };
   vm.runInNewContext(await readFile(new URL('../lib/client.js', import.meta.url), 'utf8'), sandbox);
   plugin.apply({
@@ -54,7 +58,15 @@ async function refreshClient(localStorage, sessionStorage, deletedId) {
     uiWorkspace: { startSession() { finish(); } },
     effect(callback) { cleanup = callback(); },
   });
-  try { await finished; }
+  try {
+    await finished;
+    await verify({
+      poll: async () => { poll(); await new Promise(setImmediate); },
+      get receiptRequests() { return receiptRequests; },
+      update: value => { receipt = value; },
+      failNextReceipt: () => { failReceipt = true; },
+    });
+  }
   finally { cleanup?.(); }
 }
 
@@ -88,6 +100,28 @@ test('browser cleanup removes only owned session keys and preserves another draf
   }
 });
 
+test('receipt sync fetches only on revision changes, retries failures and keeps cleaning late browser writes', { timeout: 2000 }, async () => {
+  const first = 'deleted-first', second = 'deleted-second';
+  const local = browserStorage({});
+  await refreshClient(local, browserStorage({}), first, async client => {
+    assert.equal(client.receiptRequests, 1);
+    local.setItem('dsh.conversation.' + first, 'late old-tab draft');
+    await client.poll();
+    assert.equal(local.getItem('dsh.conversation.' + first), null);
+    assert.equal(client.receiptRequests, 1);
+    local.setItem('dsh.conversation.' + second, 'second draft');
+    client.update({ revision: 'second', deletedIdHashes: [first, second].map(id => createHash('sha256').update(id).digest('hex')) });
+    client.failNextReceipt();
+    await client.poll();
+    assert.equal(local.getItem('dsh.conversation.' + second), 'second draft');
+    await client.poll();
+    assert.equal(local.getItem('dsh.conversation.' + second), null);
+    assert.equal(client.receiptRequests, 3);
+    await client.poll();
+    assert.equal(client.receiptRequests, 3);
+  });
+});
+
 test('deletion checks show the selected copy and refuse confirmation if the session starts running', async () => {
   const id = 'session-copy-test';
   const rows = { [id]: { id, running: false, retainedBy: { mainView: 1 } } };
@@ -106,7 +140,9 @@ test('deletion checks show the selected copy and refuse confirmation if the sess
     window: { __ModuleLoader__: { load(definition) { plugin = definition.factory(name => name === 'react' ? react : ui); } }, addEventListener() {}, removeEventListener() {} },
     document: { body: {}, head: { append() {} }, querySelectorAll: () => [], createElement: () => ({ remove() {} }) },
     MutationObserver: class { observe() {} disconnect() {} }, setInterval() { return 1; }, clearInterval() {},
-    fetch: async url => ({ ok: true, json: () => url.endsWith('/preview') ? preview : Promise.resolve({ pending: [], locked: [], archived: [], guardHealthy: true, receipt: { deletedIdHashes: [] } }) }),
+    fetch: async url => ({ ok: true, json: () => url.endsWith('/preview') ? preview : Promise.resolve(url.endsWith('/receipt')
+      ? { revision: 'empty', deletedIdHashes: [] }
+      : { pending: [], locked: [], archived: [], guardHealthy: true, receipt: { revision: 'empty', count: 0 } }) }),
   };
   vm.runInNewContext(await readFile(new URL('../lib/client.js', import.meta.url), 'utf8'), sandbox);
   plugin.apply({

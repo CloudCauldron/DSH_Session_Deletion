@@ -2,7 +2,7 @@ import type { IncomingMessage, ServerResponse } from 'node:http';
 import type { WebServer } from '@deepseek-ai/dsh-host-webserver';
 import { join, resolve } from 'node:path';
 import { randomBytes, timingSafeEqual } from 'node:crypto';
-import { listRequests, readJSON, stateDir, type Receipt } from './core.js';
+import { listRequests, readJSON, stateDir } from './core.js';
 import { DeletionRefused, type DeletionRuntime } from './runtime.js';
 import type { Gate } from './gate.js';
 
@@ -51,9 +51,12 @@ export async function apply(ctx: HostContext): Promise<void> {
         send(res, 200, { ok: true, mode: 'private-delete-and-gc', version: gate.version, guardHealthy: gate.healthy(), gcRunning: runtime.gcRunning, deletionRunning: runtime.deletionRunning,
           archived: runtime.archivedIds, locked: [...runtime.locked],
           pending: (await listRequests(gate.home)).map(r => ({ sessionId: r.sessionId, queuedAt: r.queuedAt })),
-          receipt: await readJSON<Receipt>(join(stateDir(gate.home), 'receipt.json'), { schema: 1, deletedIdHashes: [] }),
+          receipt: runtime.receiptSummary,
           gc: await readJSON<unknown>(join(stateDir(gate.home), 'gc.json'), null),
           cleanup: await readJSON<unknown>(join(stateDir(gate.home), 'status.json'), null) }); return;
+      }
+      if (req.method === 'GET' && path === '/session-deletion/api/receipt') {
+        send(res, 200, { ok: true, ...runtime.receipt }); return;
       }
       if (req.method !== 'POST') throw new HttpError(405, 'Method not allowed');
       const data = await body(req);

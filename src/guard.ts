@@ -6,7 +6,7 @@ import { basename, join, resolve } from 'node:path';
 import { pathToFileURL } from 'node:url';
 import { setTimeout as delay } from 'node:timers/promises';
 import koffi from 'koffi';
-import { atomicJSON, exists, privateDir, readJSON, safePath, stateDir, sweep } from './core.js';
+import { atomicJSON, birth, cleanAtomicTemps, exists, privateDir, readJSON, safePath, stateDir, sweep } from './core.js';
 
 // libc is an operating-system component, not an additional executable or interpreter.
 const libc = koffi.load('libc.so.6');
@@ -15,13 +15,6 @@ const LOCK_EX = 2; const LOCK_NB = 4;
 interface HostMarker { pid: number; birth: string; phase: 'waiting' | 'running' }
 export interface GuardOptions { home: string; hostPid?: number; hostBirth?: string; startupTimeoutMs?: number }
 
-export async function birth(pid: number): Promise<string | undefined> {
-  try {
-    const text = await fs.readFile(`/proc/${pid}/stat`, 'utf8');
-    const fields = text.slice(text.lastIndexOf(')') + 2).split(' ');
-    return fields[0] === 'Z' ? undefined : fields[19];
-  } catch (e) { if (['ENOENT', 'ESRCH'].includes((e as NodeJS.ErrnoException).code || '')) return; throw e; }
-}
 export async function waitingHosts(state: string): Promise<Set<number>> {
   const waiting = new Set<number>();
   for (const name of await fs.readdir(join(state, 'hosts'))) {
@@ -71,11 +64,11 @@ async function offline(options: GuardOptions): Promise<void> {
   const excluded = await waitingHosts(state); excluded.add(process.pid);
   if (options.hostPid && await birth(options.hostPid) === options.hostBirth) excluded.add(options.hostPid);
   if ((await otherHosts(options.home, excluded)).length) throw new Error('Another DSH process is using this home; cleanup deferred');
-  if (!(await exists(pending)) || !(await fs.readdir(pending)).length) return;
+  const hasPending = await exists(pending) && (await fs.readdir(pending)).length > 0;
   const handles: fs.FileHandle[] = [];
   try {
     const root = join(options.home, 'sessions');
-    if (await exists(root)) for (const project of await fs.readdir(root, { withFileTypes: true })) {
+    if (hasPending && await exists(root)) for (const project of await fs.readdir(root, { withFileTypes: true })) {
       if (!project.isDirectory()) continue;
       for (const session of await fs.readdir(join(root, project.name), { withFileTypes: true })) {
         if (!session.isDirectory()) continue;
@@ -86,6 +79,10 @@ async function offline(options: GuardOptions): Promise<void> {
         handles.push(lock);
       }
     }
+    await cleanAtomicTemps(state);
+    await cleanAtomicTemps(join(options.home, 'storages'));
+    // Waiting guards publish before acquiring the lifecycle lock. Their writers may still be live.
+    await cleanAtomicTemps(join(state, 'hosts'));
     await sweep(options.home);
   } finally { await Promise.all(handles.map(h => h.close())); }
 }

@@ -1,9 +1,12 @@
 import {test}from'node:test';
 import assert from'node:assert/strict';
+import fs from 'node:fs/promises';
+import { syncBuiltinESMExports } from 'node:module';
+import { join } from 'node:path';
 import{setTimeout as delay}from'node:timers/promises';
 import{PublicationBarrier,DeletionRuntime}from'../lib/runtime.js';
 import { fixture } from './fixtures.js';
-import { listRequests } from '../lib/core.js';
+import { listRequests, stateDir } from '../lib/core.js';
 
 test('publication barrier drains existing work, permits reentrant calls and queues new work',async()=>{
  const gate=new PublicationBarrier();const order=[];
@@ -85,4 +88,52 @@ test('submissions queued behind GC do not make its global idle check fail', asyn
  assert.equal(published, false);
  release(); await exclusive; await queued;
  assert.equal(published, true);
+});
+
+for (const failure of ['receipt-read', 'receipt-rename']) test(`deletion publishes tombstones despite ${failure} failure`, async () => {
+ const f = await fixture();
+ const readFile = fs.readFile, rename = fs.rename;
+ try {
+  await fs.mkdir(join(stateDir(f.home), 'hosts'), { recursive: true });
+  // This case exercises real log removal and receipt I/O, without unrelated workspace services.
+  await fs.rm(join(f.home, 'storages/workspace.json'));
+  await fs.rm(join(f.home, 'storages/schedule.json'));
+  const runtime = new DeletionRuntime({
+   sessionDeletionGate: { home: f.home, healthy: () => true },
+   workspaceRegistry: { archiveSession: async () => {}, archivedSessionIds: [f.ids.main] },
+   agents: { get: () => undefined }, sessions: { get: () => undefined },
+   sessionProjectionCache: { table: { delete: async () => {} } },
+   sessionPersistence: {}, sessionQuery: {}, emit() {},
+  }, value => value, class {});
+  const headers = new Map(Object.entries(f.headers));
+  runtime.headers = async () => headers;
+  runtime.quiescence = async () => ({ busy: false, reasons: [] });
+  const path = join(stateDir(f.home), 'receipt.json');
+  let receiptReads = 0;
+  fs.readFile = async function (file, ...args) {
+   if (file === path) {
+    receiptReads++;
+    if (failure === 'receipt-read') throw Object.assign(new Error('Injected receipt read failure'), { code: 'EIO' });
+   }
+   return readFile.call(this, file, ...args);
+  };
+  fs.rename = async function (from, to) {
+   await rename.call(this, from, to);
+   if (to === path && failure === 'receipt-rename') throw Object.assign(new Error('Injected post-rename failure'), { code: 'EIO' });
+  };
+  syncBuiltinESMExports();
+  const ids = runtime.family(headers, f.ids.main);
+  const removal = runtime.remove(f.ids.main, f.headers[f.ids.main].createdAt, ids);
+  if (failure === 'receipt-read') assert.deepEqual(await removal, { deleted: 3 });
+  else await assert.rejects(removal, /Injected post-rename failure/);
+  const persisted = JSON.parse(await readFile.call(fs, path, 'utf8'));
+  assert.equal(persisted.deletedIdHashes.length, 3);
+  assert.deepEqual(runtime.receipt, { revision: persisted.revision, deletedIdHashes: persisted.deletedIdHashes });
+  assert.ok(ids.every(id => runtime.isLocked(id)));
+  assert.equal(receiptReads, failure === 'receipt-read' ? 0 : 1);
+  assert.equal((await listRequests(f.home)).length, failure === 'receipt-read' ? 0 : 1);
+ } finally {
+  fs.readFile = readFile; fs.rename = rename; syncBuiltinESMExports();
+  await f.cleanup();
+ }
 });

@@ -27,6 +27,7 @@ export declare class DeletionRuntime {
     private handles;
     private operations;
     private deleted;
+    private receiptRevision;
     private cacheWrites;
     private restorers;
     private agentRestorers;
@@ -40,12 +41,22 @@ export declare class DeletionRuntime {
     get deletionRunning(): boolean;
     constructor(ctx: Dynamic, unwrap: (value: any) => any, UploadIndex: new (path: string) => Dynamic);
     get home(): string;
+    get receiptSummary(): {
+        revision: string;
+        count: number;
+    };
+    get receipt(): {
+        revision: string;
+        deletedIdHashes: string[];
+    };
     isLocked(id: string): boolean;
     private assertAllowed;
     private operation;
     private patch;
     private trackAgent;
     private captureFactory;
+    private installReceipt;
+    private loadReceipt;
     initialize(): Promise<void>;
     headers(): Promise<Map<string, SessionHeader>>;
     family(headers: Map<string, SessionHeader>, id: string): string[];

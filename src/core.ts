@@ -21,7 +21,7 @@ export interface DeletionRequest {
 }
 export interface Result { sessions: number }
 export interface GcResult { total: number; objects: number; fileLinks: number; cacheFiles: number; uploadMappings: number }
-export interface Receipt { schema: 1; deletedIdHashes: string[]; lastCompletedAt?: string; lastResult?: Result }
+export interface Receipt { schema: 1; revision: string; deletedIdHashes: string[]; lastCompletedAt?: string; lastResult?: Result }
 interface WorkspaceData {
   unit: { name: string; version: number };
   global: { archivedSessionIds: string[]; pinnedSessionIds: string[] };
@@ -34,6 +34,7 @@ export interface LiveSnapshot { header: SessionHeader; events: readonly unknown[
 export interface SweepHooks {
   /** Live owners mutate their own tables, never overwrite them from a disk snapshot. */
   applyEdit?(edit: Edit, ids: ReadonlySet<string>): Promise<void>;
+  receiptCommitted?(receipt: Receipt): void;
   onlySessionId?: string;
 }
 export interface GcHooks {
@@ -98,10 +99,20 @@ async function syncDir(path: string) {
   const h = await fs.open(path, constants.O_RDONLY | constants.O_DIRECTORY | constants.O_NOFOLLOW);
   try { await h.sync(); } finally { await h.close(); }
 }
+export async function birth(pid: number): Promise<string | undefined> {
+  try {
+    const text = await fs.readFile(`/proc/${pid}/stat`, 'utf8');
+    const fields = text.slice(text.lastIndexOf(')') + 2).split(' ');
+    if (!/^\d+$/.test(fields[19] ?? '')) throw new Error('Cannot read process identity');
+    return fields[0] === 'Z' ? undefined : fields[19];
+  } catch (e) { if (['ENOENT', 'ESRCH'].includes((e as NodeJS.ErrnoException).code || '')) return; throw e; }
+}
 export async function atomicJSON(path: string, data: unknown) {
   await safePath(path, { missing: true });
   await privateDir(dirname(path));
-  const temp = join(dirname(path), `.session-deletion-write-${randomBytes(12).toString('hex')}`);
+  const started = await birth(process.pid);
+  if (!started) throw new Error('Cannot identify atomic writer');
+  const temp = join(dirname(path), `.session-deletion-write-${process.pid}-${started}-${randomBytes(12).toString('hex')}`);
   let h;
   try {
     h = await fs.open(temp, constants.O_WRONLY | constants.O_CREAT | constants.O_EXCL | constants.O_NOFOLLOW, 0o600);
@@ -149,7 +160,16 @@ export async function removeOwned(path: string) {
   await syncDir(dirname(path));
 }
 const LOG = /^session(?:\.v([1-9]\d*))?\.jsonl(?:\.zstd)?$/;
-const ATOMIC_TEMP = /^\.session-deletion-write-[a-f0-9]{24}$/;
+const ATOMIC_TEMP = /^\.session-deletion-write-([1-9]\d*)-(\d+)-[a-f0-9]{24}$/;
+export async function cleanAtomicTemps(directory: string) {
+  for (const entry of await entries(directory)) {
+    const owner = ATOMIC_TEMP.exec(entry.name);
+    if (!owner || !entry.isFile()) continue;
+    if (await birth(Number(owner[1])) === owner[2]) continue;
+    try { await removeOwned(join(directory, entry.name)); }
+    catch (e) { if ((e as NodeJS.ErrnoException).code !== 'ENOENT') throw e; }
+  }
+}
 const HASH = /(?:sha256:|\/(?:objects|file-objects|files)\/[a-f0-9]{2}\/)([a-f0-9]{64})(?![a-f0-9])/g;
 function references(value: unknown, refs: References) {
   if (typeof value === 'string') {
@@ -297,9 +317,8 @@ export async function listRequests(home: string): Promise<DeletionRequest[]> {
     if (!/^[a-f0-9]{64}\.json$/.test(e.name)) throw new Error('Unexpected pending queue file');
     const r = await readJSON<DeletionRequest | undefined>(join(stateDir(home), 'pending', e.name));
     if (r === undefined) continue;
-    // Never replay old requests that included attachment or temporary-file deletion.
     if (r.schema !== 3 || digest(r.sessionId) + '.json' !== e.name || r.dshVersion !== SUPPORTED_DSH)
-      throw new Error('Invalid deletion request; older cleanup requests require review');
+      throw new Error('Invalid deletion request');
     validatePlan(home, r.sessionId, r.plan);
     out.push(r);
   }
@@ -384,17 +403,17 @@ export async function sweep(home: string, { failAfter, hooks }: { failAfter?: nu
     for (const row of plan.directories) if (await exists(join(home, row.path))) throw new Error('Post-deletion session audit failed');
     // Do not prune the shared project directory: another conversation may be creating its first log.
     const receiptPath = join(stateDir(home), 'receipt.json');
-    const receipt = await readJSON<Receipt>(receiptPath, { schema: 1, deletedIdHashes: [] });
+    const receipt = await readJSON<Receipt>(receiptPath, { schema: 1, revision: '', deletedIdHashes: [] });
     receipt.deletedIdHashes = [...new Set([...receipt.deletedIdHashes, ...plan.ids.map(digest)])];
+    receipt.revision = randomBytes(16).toString('hex');
     receipt.lastCompletedAt = new Date().toISOString(); receipt.lastResult = { sessions: ids.size };
-    await atomicJSON(receiptPath, receipt); checkpoint();
+    await atomicJSON(receiptPath, receipt);
+    hooks?.receiptCommitted?.(receipt); checkpoint();
     await removeOwned(requestPath(home, request.sessionId)); checkpoint();
     completed.push(receipt.lastResult);
   }
   // Only our request temporaries can be stale here. Never touch active storage or attachment writers.
-  for (const entry of await entries(join(stateDir(home), 'pending'))) {
-    if (entry.isFile() && ATOMIC_TEMP.test(entry.name)) await removeOwned(join(stateDir(home), 'pending', entry.name));
-  }
+  await cleanAtomicTemps(join(stateDir(home), 'pending'));
   await atomicJSON(join(stateDir(home), 'status.json'), { schema: 1, state: 'clean', checkedAt: new Date().toISOString(), completed: completed.length });
   return completed;
 }

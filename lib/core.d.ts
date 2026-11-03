@@ -46,6 +46,7 @@ export interface GcResult {
 }
 export interface Receipt {
     schema: 1;
+    revision: string;
     deletedIdHashes: string[];
     lastCompletedAt?: string;
     lastResult?: Result;
@@ -61,6 +62,7 @@ export interface LiveSnapshot {
 export interface SweepHooks {
     /** Live owners mutate their own tables, never overwrite them from a disk snapshot. */
     applyEdit?(edit: Edit, ids: ReadonlySet<string>): Promise<void>;
+    receiptCommitted?(receipt: Receipt): void;
     onlySessionId?: string;
 }
 export interface GcHooks {
@@ -79,9 +81,11 @@ export declare function safePath(path: string, { missing, directory }?: {
     directory?: boolean;
 }): Promise<void>;
 export declare function privateDir(path: string): Promise<void>;
+export declare function birth(pid: number): Promise<string | undefined>;
 export declare function atomicJSON(path: string, data: unknown): Promise<void>;
 export declare function readJSON<T>(path: string, fallback?: T): Promise<T>;
 export declare function removeOwned(path: string): Promise<void>;
+export declare function cleanAtomicTemps(directory: string): Promise<void>;
 export declare function readLog(path: string, headerOnly?: boolean): Promise<{
     header: SessionHeader;
     refs: References;

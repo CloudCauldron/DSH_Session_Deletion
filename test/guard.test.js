@@ -5,8 +5,8 @@ import { join, resolve } from 'node:path';
 import { spawn } from 'node:child_process';
 import { once } from 'node:events';
 import { setTimeout as delay } from 'node:timers/promises';
-import { birth, tryLock, runGuard, otherHosts } from '../lib/guard.js';
-import { exists, listRequests, stateDir, atomicJSON, readJSON } from '../lib/core.js';
+import { tryLock, runGuard, otherHosts } from '../lib/guard.js';
+import { exists, listRequests, stateDir, atomicJSON, readJSON, birth } from '../lib/core.js';
 import { fixture } from './fixtures.js';
 
 function finished(child) { return new Promise(resolve => child.once('exit', (code, signal) => resolve({ code, signal }))); }
@@ -129,15 +129,54 @@ test('an empty recovery queue still refuses another DSH host using the same home
   const done = finished(host);
   try {
     await once(host, 'spawn');
+    const temp = join(stateDir(f.home), `.session-deletion-write-${process.pid}-0-${'a'.repeat(24)}`);
+    await f.write(temp, 'uncommitted');
     assert.deepEqual(await listRequests(f.home), []);
     assert.ok((await otherHosts(f.home, new Set([process.pid]))).includes(host.pid));
     const announced = [];
     await assert.rejects(runGuard({ home: f.home }, line => announced.push(line)), /Another DSH process/);
     assert.ok(!announced.includes('READY') && !announced.includes('Cleanup verified'));
     assert.equal(await exists(join(f.home, 'sessions/project', f.ids.main)), true);
+    assert.equal(await exists(temp), true, 'refused startup must not sweep temporary files');
   } finally {
     host.kill('SIGTERM');
     await done;
     await f.cleanup();
   }
+});
+
+test('empty recovery refreshes blocked diagnostics and safely reclaims only abandoned atomic writes', async () => {
+  const f = await fixture();
+  const writer = spawn(process.execPath, ['-e', 'setInterval(()=>{},1000)'], { stdio: 'ignore' });
+  const done = finished(writer);
+  try {
+    const started = await birth(writer.pid);
+    assert.ok(started);
+    const status = join(stateDir(f.home), 'status.json');
+    await atomicJSON(status, { state: 'blocked', error: 'old failure' });
+    const alive = `.session-deletion-write-${writer.pid}-${started}-${'b'.repeat(24)}`;
+    const reused = `.session-deletion-write-${writer.pid}-${BigInt(started) + 1n}-${'c'.repeat(24)}`;
+    const directories = [stateDir(f.home), join(stateDir(f.home), 'pending'), join(stateDir(f.home), 'hosts'), join(f.home, 'storages')];
+    for (const directory of directories) {
+      for (const name of [alive, reused]) await f.write(join(directory, name), 'uncommitted');
+    }
+    const link = join(stateDir(f.home), `.session-deletion-write-${process.pid}-0-${'d'.repeat(24)}`);
+    await fs.symlink(f.projectFile, link);
+    await runGuard({ home: f.home }, () => {});
+    const clean = await readJSON(status);
+    assert.equal(clean.state, 'clean');
+    assert.equal(clean.completed, 0);
+    assert.ok(clean.checkedAt);
+    assert.equal(clean.error, undefined);
+    for (const directory of directories) {
+      assert.equal(await exists(join(directory, alive)), true, 'a live atomic writer must survive');
+      assert.equal(await exists(join(directory, reused)), false, 'PID reuse must not protect an abandoned write');
+    }
+    assert.equal((await fs.lstat(link)).isSymbolicLink(), true);
+    assert.equal(await fs.readFile(f.projectFile, 'utf8'), 'user project must survive');
+    writer.kill('SIGKILL'); await done;
+    await runGuard({ home: f.home }, () => {});
+    for (const directory of directories) assert.equal(await exists(join(directory, alive)), false);
+    assert.equal((await readJSON(status)).state, 'clean');
+  } finally { writer.kill(); await done; await f.cleanup(); }
 });
