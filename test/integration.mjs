@@ -8,9 +8,13 @@ import { zstdCompressSync } from 'node:zlib';
 import { setTimeout as delay } from 'node:timers/promises';
 import { chromium } from 'playwright-core';
 import { exists } from '../lib/core.js';
+import { tryLock } from '../lib/guard.js';
 
 const repo=resolve('.');
 const base=await fs.mkdtemp(join(tmpdir(),'dsh-deletion-integration-'));
+const temporary=join(base,'tmp');await fs.mkdir(temporary,{mode:0o700});
+// Keep browser profiles, DSH spills and package-manager scratch data inside the fixture.
+process.env.TMPDIR=temporary;
 const home=join(base,'home');
 await fs.mkdir(join(home,'profiles/web'),{recursive:true,mode:0o700});
 if(!(await exists(join(home,'profiles/web/package.json')))){
@@ -19,7 +23,7 @@ if(!(await exists(join(home,'profiles/web/package.json')))){
   await fs.writeFile(join(home,'profiles/web/cordis.yml'),'[]\n');
   await fs.writeFile(join(home,'profiles/web/cordis.patch.yml'),'[]\n');
 }
-const env={...process.env,DSH_HOME:home,DSH_TELEMETRY_DISABLED:'1'};
+const env={...process.env,DSH_HOME:home,DSH_TELEMETRY_DISABLED:'1',pnpm_config_store_dir:join(base,'pnpm-store')};
 const install=spawn('dsh',['plugin','--profile','web','add','file:'+repo],{env,stdio:['ignore','pipe','pipe']});
 let installText='';install.stdout.on('data',d=>{installText+=d});install.stderr.on('data',d=>{installText+=d});
 assert.equal(await new Promise(r=>install.on('exit',r)),0,'Install failed: '+installText);
@@ -57,7 +61,6 @@ await fs.mkdir(join(home,'llm-deepseek'),{recursive:true,mode:0o700});
 await fs.writeFile(join(home,'llm-deepseek/files-v3.json'),JSON.stringify({formatVersion:3,records:[exclusive,shared].map(hash=>({scope:'c'.repeat(64),attachmentId:'sha256:'+hash,variantId:'sha256:'+hash,fileId:'file-'+hash.slice(0,8),bytes:18,createdAt:Date.now(),expiresAt:Date.now()+3600000}))}));
 const imageCache=join(home,'cache/attachments/request-images/aa/fixture');
 await fs.mkdir(join(imageCache,'..'),{recursive:true,mode:0o700});await fs.writeFile(imageCache,'derived fixture image');
-await fs.mkdir('test-results',{recursive:true});
 let host;let browser;let bootLog='';let exited;let port='0';
 const errors=[];
 async function start(){
@@ -72,7 +75,19 @@ async function start(){
  }
  throw new Error('Boot timeout: '+bootLog.replace(/token=[^\s]+/g,'token=[redacted]'));
 }
-async function stop(){if(host&&host.exitCode===null){host.kill('SIGINT');await Promise.race([exited,delay(15000,undefined,{ref:false}).then(()=>{throw new Error('Host did not exit')})]);}}
+async function stop(){
+ if(!host)return;
+ if(host.exitCode===null&&host.signalCode===null){host.kill('SIGINT');await Promise.race([exited,delay(15000,undefined,{ref:false}).then(()=>{throw new Error('Host did not exit')})]);}
+ const path=join(home,'session-deletion/lifecycle.lock');
+ if(!(await exists(path)))return;
+ const deadline=Date.now()+15000;
+ for(;;){
+  const lock=await tryLock(path);
+  if(lock){await lock.close();return;}
+  if(Date.now()>=deadline)throw new Error('Recovery guard has not finished; retain the fixture until it exits');
+  await delay(50);
+ }
+}
 try{
  const url=await start();
  const unauthorized=await fetch(`http://127.0.0.1:${port}/session-deletion/api/status`);
@@ -119,7 +134,6 @@ try{
  const nativeDialog=page.getByRole('dialog',{name:'停止并归档此会话？',exact:true});
  await nativeDialog.waitFor();
  const nativeAppearance=await dialogAppearance(nativeDialog);
- await page.screenshot({path:'test-results/native-archive-dialog.png',animations:'disabled'});
  await nativeDialog.getByRole('button',{name:'取消',exact:true}).click();
  await controls('visual-activity',{});
  // The count excludes the root, includes recursive subagents, and cancellation preserves all records.
@@ -133,7 +147,6 @@ try{
  assert.equal(await familyDialog.locator('strong').innerText(),'测试含子代理的会话');
  assert.equal(await familyDialog.locator('code').innerText(),family.id);
  assert.equal(await familyDialog.getByRole('button',{name:'确认归档并删除',exact:true}).isEnabled(),true);
- await page.screenshot({path:'test-results/deletion-with-subagents.png',animations:'disabled'});
  await controls('archive-probe',{id:family.id});
  const archivedDialog=page.getByRole('dialog',{name:'删除此会话？',exact:true});
  await archivedDialog.getByRole('button',{name:'确认删除',exact:true}).waitFor();
@@ -175,7 +188,7 @@ try{
  assert.equal(await menuItems.last().innerText(),'归档并删除','delete is the final native menu row');
  assert.equal(await deletionItem.locator('svg').count(),1);
  assert.equal(await deletionItem.evaluate(el=>getComputedStyle(el).fontSize),await menuItems.first().evaluate(el=>getComputedStyle(el).fontSize));
- await deletionItem.hover();await page.screenshot({path:'test-results/native-menu.png'});
+ await deletionItem.hover();
  await deletionItem.click({timeout:5000});
  const deletionDialog=page.getByRole('dialog',{name:'归档并删除此会话？',exact:true});
  await deletionDialog.getByText('该会话的全部记录将被彻底移除且无法找回，已保存的文件与附件不受影响。',{exact:true}).waitFor();
@@ -185,7 +198,6 @@ try{
  assert.equal((await deletionDialog.innerText()).includes('子代理'),false,'no zero-subagent boilerplate');
  const deletionAppearance=await dialogAppearance(deletionDialog);
  assert.deepEqual(deletionAppearance,nativeAppearance,'private deletion uses the actual native modal and button styles');
- await page.screenshot({path:'test-results/confirmation.png',animations:'disabled'});
  await page.getByRole('button',{name:'确认归档并删除',exact:true}).click();
  for(let i=0;i<100;i++){if((await (await controls('held')).json()).held)break;await delay(50)}
  assert.equal((await (await controls('held')).json()).held,true,'test must pause after the backend locks the target');
@@ -196,7 +208,6 @@ try{
  await otherPage.waitForFunction(()=>[...document.querySelectorAll('[role="alert"]')].some(el=>el.textContent==='正在删除会话…'));
  assert.equal((await status()).deletionRunning,true);
  assert.equal(await otherPage.getByText('清理未完成，将在下次启动时自动恢复',{exact:true}).count(),0,'a pending journal is not an interruption while the server is deleting');
- await page.screenshot({path:'test-results/native-deletion-toast.png'});
  const deletingDialog=page.getByRole('dialog',{name:/归档并删除此会话|删除此会话/});
  assert.equal(await deletingDialog.locator('button').evaluateAll(buttons=>buttons.every(button=>button.disabled)),true);
  await page.keyboard.press('Escape');
@@ -230,8 +241,6 @@ try{
  await page.getByText('将移除无关联的本地附件及临时图片缓存以释放空间，操作期间请确保其他会话处于空闲状态。',{exact:true}).waitFor();
  const gcAppearance=await dialogAppearance(page.getByRole('dialog',{name:'清理残留附件与缓存？',exact:true}));
  assert.deepEqual(gcAppearance,nativeAppearance,'GC uses the same modal typography, spacing and buttons as native stop-and-archive');
- await fs.writeFile('test-results/dialog-style.json',JSON.stringify({native:nativeAppearance,gc:gcAppearance,deletion:deletionAppearance},null,2));
- await page.screenshot({path:'test-results/gc-confirmation.png',animations:'disabled'});
  await page.getByRole('button',{name:'开始清理',exact:true}).click();
  await page.getByRole('dialog',{name:'清理残留附件与缓存？',exact:true}).getByRole('alert').waitFor();
  await page.waitForFunction(()=>[...document.querySelectorAll('.dsh-session-deletion-modal button')].every(button=>!button.disabled));
@@ -250,7 +259,6 @@ try{
  await page.mouse.click(5,5); // Native backdrop dismissal is also blocked.
  await page.keyboard.press('Escape');
  assert.equal(await page.getByRole('dialog',{name:'清理残留附件与缓存？',exact:true}).count(),1,'busy GC cannot be dismissed through native Modal keyboard handling');
- await page.screenshot({path:'test-results/gc-busy.png',animations:'disabled'});
  await independentPage.waitForFunction(()=>document.querySelector('#deletion-lock-probe')?.inert===true);
  assert.equal((await controls('direct-input',{id:draftOwner.id})).status(),409,'GC blocks synchronous background publication');
  let uploaded=false;
@@ -264,7 +272,6 @@ try{
  assert.equal(await resultDialog.getByRole('button',{name:'开始清理',exact:true}).count(),0);
  assert.equal((await duringGc).status(),200);
  await page.waitForFunction(()=>[...document.querySelectorAll('.dsh-session-deletion-modal button')].every(button=>!button.disabled));
- await page.screenshot({path:'test-results/gc-result.png',animations:'disabled'});
  await resultDialog.getByRole('button',{name:'关闭',exact:true}).last().click();
  // A second pass has nothing to reclaim and still presents the result stage.
  await page.locator('nav').getByRole('button',{name:'更多',exact:true}).click();
@@ -273,7 +280,6 @@ try{
  const emptyResult=page.getByRole('dialog',{name:'共清理 0 项残留附件与缓存文件。',exact:true});
  await emptyResult.waitFor({timeout:30000});
  assert.equal(await emptyResult.innerText(),'共清理 0 项残留附件与缓存文件。\n关闭');
- await page.screenshot({path:'test-results/gc-empty-result.png',animations:'disabled'});
  await emptyResult.getByRole('button',{name:'关闭',exact:true}).last().click();
  assert.equal(await exists(join(home,'attachments/v1/objects',exclusive.slice(0,2),exclusive)),false);
  assert.equal(await exists(imageCache),false,'explicit GC clears derived image cache');
@@ -300,7 +306,6 @@ try{
  await recoveryToast.waitFor();
  assert.equal(await recoveryToast.locator('svg').count(),1,'recovery uses the native warning icon');
  await page.waitForFunction(()=>[...document.querySelectorAll('[role="alert"]')].some(el=>el.textContent==='清理未完成，将在下次启动时自动恢复'&&getComputedStyle(el).opacity==='1'));
- await page.screenshot({path:'test-results/native-recovery-toast.png'});
  await recoveryToast.waitFor({state:'detached',timeout:12000});
  await delay(1200);
  assert.equal(await recoveryToast.count(),0,'polling an unchanged state must not reopen an expired Toast');
@@ -314,12 +319,12 @@ try{
  assert.deepEqual(errors,[]);
  console.log('INTEGRATION PASS: native menu and GC entry, private deletion during other maintenance/uploads, target-only locking, explicit idle GC, staged/shared references, GC publication barrier, recovery and restart');
 }catch(e){
- if(browser){const pages=browser.contexts().flatMap(c=>c.pages());if(pages[0]){await pages[0].screenshot({path:'test-results/failure.png'});console.error((await pages[0].locator('body').innerText()).slice(0,6000));}}
+ if(browser){const pages=browser.contexts().flatMap(c=>c.pages());if(pages[0]){await fs.mkdir('test-results',{recursive:true});await pages[0].screenshot({path:'test-results/failure.png'});console.error((await pages[0].locator('body').innerText()).slice(0,6000));}}
  console.error('Browser errors:',errors);
  console.error('Profile manifest:',await fs.readFile(join(home,'profiles/web/package.json'),'utf8'));
  console.error('Host log:',bootLog.replace(/token=[^\s]+/g,'token=[redacted]').slice(-6000));throw e;
 }finally{
  await browser?.close();await stop();
- // Keep only failure diagnostics, never the synthetic session or its temporary profile.
+ // Both the host and its recovery guard have finished before the fixture is removed.
  await fs.rm(base,{recursive:true,force:true});
 }

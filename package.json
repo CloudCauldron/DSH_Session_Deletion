@@ -48,8 +48,6 @@
     "lib/",
     "cordis.patch.yml",
     "README.md",
-    "LICENSE",
-    "UPSTREAM_AUDIT.md",
-    "REVIEW.md"
+    "LICENSE"
   ]
 }
