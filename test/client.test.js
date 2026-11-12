@@ -171,3 +171,62 @@ test('deletion checks show the selected copy and refuse confirmation if the sess
     assert.equal(confirm.props.disabled, true);
   } finally { cleanup?.(); }
 });
+
+test('GC menu shows a native spinner, formats binary units and reports failed or invalid size previews', async () => {
+  let plugin, menu, mount, bytes, response, fail = false, requests = 0;
+  const ui = { MenuItemButton: 'NativeMenu', StateDot: 'NativeSpinner' };
+  const react = {
+    Fragment: Symbol('Fragment'),
+    createElement: (type, props, ...children) => ({ type, props: { ...props, ...(children.length ? { children } : {}) } }),
+    useSyncExternalStore: (_, read) => read(),
+    useState: () => [bytes, value => { bytes = value; }],
+    useEffect: callback => { mount = callback; },
+  };
+  vm.runInNewContext(await readFile(new URL('../lib/client.js', import.meta.url), 'utf8'), {
+    window: { __ModuleLoader__: { load(definition) { plugin = definition.factory(name => name === 'react' ? react : ui); } } },
+    fetch: async url => {
+      assert.equal(url, '/session-deletion/api/gc-size'); requests++;
+      if (fail === 'network') throw new Error('Disconnected');
+      return { ok: !fail, json: async () => fail ? { error: 'Cannot scan' } : { bytes: response } };
+    },
+  });
+  plugin.apply({
+    slots: { inject(_, callback) { callback(); }, register(options, component) { if (options.id === 'session-deletion.gc') menu = component; } },
+    effect() {},
+  });
+  const render = () => menu({ onDismiss() {} }).props.children;
+  const text = value => typeof value === 'string' ? value : Array.isArray(value) ? value.map(text).join('') : text(value?.props?.children ?? '');
+  const cases = [
+    [0, '0 B'], [1, '1 B'], [1023, '1023 B'], [1024, '1 KiB'], [1536, '1.5 KiB'], [1264, '1.23 KiB'],
+    [1024 ** 2 - 1, '1024 KiB'], [1024 ** 2, '1 MiB'],
+    [1024 ** 3 - 1, '1024 MiB'], [1024 ** 3, '1 GiB'],
+    [1024 ** 4 - 1, '1024 GiB'], [1024 ** 4, '1 TiB'], [1024 ** 5, '1024 TiB'],
+  ];
+  for (const [value, expected] of cases) {
+    bytes = undefined; response = value;
+    const loading = render().props.children[1];
+    assert.equal(loading.props.role, 'status');
+    assert.equal(loading.props['aria-label'], '正在计算可清理体积');
+    assert.equal(loading.props.children[0].type, ui.StateDot);
+    assert.equal(loading.props.children[0].props.state, 'ongoing');
+    const unmount = mount();
+    await new Promise(setImmediate);
+    assert.equal(text(render()), `清理残留附件与缓存（${expected}）`);
+    unmount();
+  }
+  const failures = [[true, 0], ['network', 0], [false, undefined], [false, null], [false, -1], [false, NaN], [false, Infinity], [false, '1024']];
+  for (const [failure, value] of failures) {
+    bytes = undefined; fail = failure; response = value; render();
+    const unmount = mount();
+    await new Promise(setImmediate);
+    assert.equal(text(render()), '清理残留附件与缓存（无法计算体积）');
+    unmount();
+  }
+  // Closing an unfinished menu must not publish its eventual result.
+  bytes = undefined; fail = false; response = 1024; render();
+  const unmount = mount();
+  unmount();
+  await new Promise(setImmediate);
+  assert.equal(bytes, undefined);
+  assert.equal(requests, cases.length + failures.length + 1, 'each menu opening fetches once; rendering does not rescan');
+});

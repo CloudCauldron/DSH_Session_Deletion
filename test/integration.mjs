@@ -98,6 +98,8 @@ try{
  assert.ok([401,403].includes(unauthorized.status),`Unauthenticated status ${unauthorized.status}: ${(await unauthorized.text()).slice(0,400)}`);
  const unauthorizedReceipt=await fetch(`http://127.0.0.1:${port}/session-deletion/api/receipt`);
  assert.ok([401,403].includes(unauthorizedReceipt.status));
+ const unauthorizedSize=await fetch(`http://127.0.0.1:${port}/session-deletion/api/gc-size`);
+ assert.ok([401,403].includes(unauthorizedSize.status));
  browser=await chromium.launch({executablePath:process.env.CHROME_PATH||(process.platform==='win32'?join(process.env.PROGRAMFILES,'Google/Chrome/Application/chrome.exe'):'/opt/google/chrome/chrome'),headless:true,args:['--no-sandbox']});
  const context=await browser.newContext({viewport:{width:1440,height:1000}});
  const page=await context.newPage();page.on('pageerror',e=>errors.push(e.message));
@@ -264,8 +266,18 @@ try{
  assert.equal(await exists(join(home,'attachments/v1/file-objects',stagedExclusive.slice(0,2),stagedExclusive)),true,'private deletion leaves staged-only uploads for later GC');
  assert.equal((await (await controls('adapters')).json()).ids.includes(id),false,'plugin restoration closures must release deleted agents');
  // GC is separately initiated from the native More menu; busy failure changes no attachments.
+ const reclaimableBytes=Buffer.byteLength('fixture attachment')+Buffer.byteLength('target draft upload')+Buffer.byteLength('derived fixture image');
+ const gcMenuName=`清理残留附件与缓存（${reclaimableBytes} B）`;
+ let releaseSize;
+ const sizeHold=new Promise(resolve=>{releaseSize=resolve});
+ await page.route('**/session-deletion/api/gc-size',async route=>{await sizeHold;await route.continue()},{times:1});
  await page.locator('nav').getByRole('button',{name:'更多',exact:true}).click();
- await page.getByRole('menuitem',{name:'清理残留附件与缓存',exact:true}).click();
+ const sizeLoading=page.getByRole('status',{name:'正在计算可清理体积',exact:true});
+ await sizeLoading.waitFor();
+ assert.equal(await sizeLoading.locator('svg[data-state="ongoing"]').count(),1,'size preview uses the native StateDot spinner');
+ assert.notEqual(await sizeLoading.locator('svg g').evaluate(el=>getComputedStyle(el).animationName),'none','the native loading circle animates');
+ releaseSize();
+ await page.getByRole('menuitem',{name:gcMenuName,exact:true}).click();
  await page.getByRole('dialog',{name:'清理残留附件与缓存？',exact:true}).waitFor();
  await page.getByText('将移除无关联的本地附件及临时图片缓存以释放空间，操作期间请确保其他会话处于空闲状态。',{exact:true}).waitFor();
  const gcAppearance=await dialogAppearance(page.getByRole('dialog',{name:'清理残留附件与缓存？',exact:true}));
@@ -274,8 +286,9 @@ try{
  await page.getByRole('dialog',{name:'清理残留附件与缓存？',exact:true}).getByRole('button',{name:'取消',exact:true}).click();
  assert.equal((await status()).gc,null,'cancel does not execute GC');
  assert.equal(await page.getByRole('alert').filter({hasText:/共清理/}).count(),0);
+ await page.route('**/session-deletion/api/gc-size',route=>route.fulfill({status:500,contentType:'application/json',body:JSON.stringify({error:'Cannot scan'})}),{times:1});
  await page.locator('nav').getByRole('button',{name:'更多',exact:true}).click();
- await page.getByRole('menuitem',{name:'清理残留附件与缓存',exact:true}).click();
+ await page.getByRole('menuitem',{name:'清理残留附件与缓存（无法计算体积）',exact:true}).click();
  await page.getByRole('button',{name:'确认清理',exact:true}).click();
  await page.getByRole('dialog',{name:'清理残留附件与缓存？',exact:true}).getByRole('alert').waitFor();
  await page.waitForFunction(()=>[...document.querySelectorAll('.dsh-session-deletion-modal button')].every(button=>!button.disabled));
@@ -310,7 +323,7 @@ try{
  await page.waitForFunction(()=>!document.querySelector('#deletion-lock-probe')?.inert);
  // A second pass has nothing to reclaim and still uses the native Toast.
  await page.locator('nav').getByRole('button',{name:'更多',exact:true}).click();
- await page.getByRole('menuitem',{name:'清理残留附件与缓存',exact:true}).click();
+ await page.getByRole('menuitem',{name:'清理残留附件与缓存（0 B）',exact:true}).click();
  await page.getByRole('button',{name:'确认清理',exact:true}).click();
  const emptyResult=page.getByRole('alert').filter({hasText:'共清理 0 项残留附件与缓存文件。'});
  await emptyResult.waitFor({timeout:30000});

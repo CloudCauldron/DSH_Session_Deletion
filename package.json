@@ -1,6 +1,6 @@
 {
   "name": "dsh-session-deletion",
-  "version": "0.5.1",
+  "version": "0.5.2",
   "private": true,
   "type": "module",
   "description": "Immediate private session deletion and separately guarded orphan attachment garbage collection for DSH.",

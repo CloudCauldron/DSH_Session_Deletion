@@ -100,6 +100,8 @@ export declare function sweep(home: string, { failAfter, hooks }?: {
     failAfter?: number;
     hooks?: SweepHooks;
 }): Promise<Result[]>;
+/** Read-only estimate using the same reference checks as the actual collection. */
+export declare function garbageSize(home: string, snapshots?: GcHooks['snapshots']): Promise<number>;
 /** Explicit, globally quiescent mark/sweep. Interrupted GC is rescanned, never replayed from a stale manifest. */
 export declare function collectGarbage(home: string, { hooks, failAfter }?: {
     hooks?: GcHooks;

@@ -67,6 +67,7 @@ export declare class DeletionRuntime {
     remove(id: string, createdAt: number, expectedIds: readonly string[]): Promise<{
         deleted: number;
     }>;
+    garbageSize(): Promise<number>;
     gc(): Promise<GcResult>;
     private removeUploadMappings;
     private removeOne;

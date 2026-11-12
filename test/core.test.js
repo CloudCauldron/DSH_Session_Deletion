@@ -1,11 +1,12 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import * as fs from 'node:fs/promises';
+import fs from 'node:fs/promises';
 import { readdirSync } from 'node:fs';
 import { randomBytes } from 'node:crypto';
 import { join } from 'node:path';
 import { zstdCompressSync, constants } from 'node:zlib';
-import { scanSessions, sweep, collectGarbage, exists, digest, encodeSegment, listRequests, readJSON, stateDir, enqueue, planSessionDeletion, atomicJSON, safePath, readLog, SUPPORTED_DSH } from '../lib/core.js';
+import { syncBuiltinESMExports } from 'node:module';
+import { scanSessions, sweep, collectGarbage, garbageSize, exists, digest, encodeSegment, listRequests, readJSON, stateDir, enqueue, planSessionDeletion, atomicJSON, safePath, readLog, SUPPORTED_DSH } from '../lib/core.js';
 import { birth } from '../lib/platform/index.js';
 import { fixture } from './fixtures.js';
 
@@ -202,6 +203,46 @@ test('uncommitted requests are ignored and never authorize deletion', async () =
   } finally { await f.cleanup(); }
 });
 
+test('GC size preview is read-only, excludes live attachments and counts hard-linked aliases once', async () => {
+  const f = await fixture();
+  try {
+    const orphan = digest('never referenced');
+    const object = attachment(f, orphan, 'file-objects');
+    await f.write(object, Buffer.alloc(2048));
+    const aliases = attachment(f, orphan, 'files');
+    await fs.mkdir(aliases, { recursive: true });
+    await fs.link(object, join(aliases, 'first.txt'));
+    await fs.link(object, join(aliases, 'second.txt'));
+    const before = await fileSnapshot(f.home);
+    assert.equal(await garbageSize(f.home), 2048 + Buffer.byteLength('derived image'));
+    assert.deepEqual(await fileSnapshot(f.home), before);
+    await collectGarbage(f.home);
+    assert.equal(await garbageSize(f.home), 0);
+  } finally { await f.cleanup(); }
+});
+
+test('failed size reads stop dispatching and finish outstanding reads before returning', async () => {
+  const f = await fixture(); const lstat = fs.lstat;
+  let started = 0, active = 0;
+  const failure = new Error('Injected size read failure');
+  try {
+    for (let i = 0; i < 32; i++) await f.write(attachment(f, digest('orphan-' + i)), 'orphan');
+    fs.lstat = async function (path, ...args) {
+      if (args[0]?.bigint) {
+        if (++started === 1) throw failure;
+        active++;
+        try { await new Promise(resolve => setTimeout(resolve, 10)); return await lstat.call(this, path, ...args); }
+        finally { active--; }
+      }
+      return lstat.call(this, path, ...args);
+    };
+    syncBuiltinESMExports();
+    await assert.rejects(garbageSize(f.home), error => error === failure);
+    assert.equal(active, 0, 'no I/O may outlive a failed scan');
+    assert.ok(started <= 16, 'failure must stop workers from picking up the remaining files');
+  } finally { fs.lstat = lstat; syncBuiltinESMExports(); await f.cleanup(); }
+});
+
 test('GC removes all unreferenced objects and aliases, including never-referenced orphans', async () => {
   const f = await fixture();
   try {
@@ -225,9 +266,11 @@ test('GC protects staged uploads in a live session without a materialized log', 
   const f = await fixture();
   try {
     await f.queue(); await sweep(f.home);
-    await collectGarbage(f.home, { hooks: { snapshots: async () => new Map([['unsaved', {
+    const hooks = { snapshots: async () => new Map([['unsaved', {
       header: { id: 'unsaved', version: 4, createdAt: 999 }, events: [{ attachmentId: 'sha256:' + f.exclusive }],
-    }]]) } });
+    }]]) };
+    assert.equal(await garbageSize(f.home, hooks.snapshots), Buffer.byteLength('derived image'));
+    await collectGarbage(f.home, { hooks });
     assert.equal(await exists(attachment(f, f.exclusive)), true);
   } finally { await f.cleanup(); }
 });
@@ -244,14 +287,16 @@ for (const separator of ['/', '\\']) test(`GC protects literal attachment paths 
   } finally { await f.cleanup(); }
 });
 
-for (const mode of ['corrupt', 'torn', 'symlink', 'opaque']) test(`GC ${mode} preflight failure deletes nothing`, async () => {
+for (const mode of ['corrupt', 'torn', 'symlink', 'referenced-symlink', 'opaque']) test(`GC ${mode} preflight failure deletes nothing`, async () => {
   const f = await fixture();
   try {
     const log = join(f.home, 'sessions/project', f.ids.other, 'session.v4.jsonl.zstd');
     if (mode === 'corrupt') await fs.writeFile(log, 'corrupt');
     if (mode === 'torn') await fs.appendFile(log, zstdCompressSync('{"tail":true}\n').subarray(0, 7));
     if (mode === 'symlink') await fs.symlink(f.base, join(f.home, 'attachments/v1/objects', 'ff'), 'junction');
+    if (mode === 'referenced-symlink') await fs.symlink(join(f.home, 'attachments/v1/objects'), join(attachment(f, f.exclusive, 'files'), 'bad-link'), 'junction');
     if (mode === 'opaque') await f.write(join(f.home, 'storages/unknown.bin'), 'opaque');
+    await assert.rejects(garbageSize(f.home));
     await assert.rejects(collectGarbage(f.home));
     assert.equal(await exists(attachment(f, f.exclusive)), true);
     assert.equal(await exists(join(f.home, 'cache/attachments/request-images/ab/cache')), true);

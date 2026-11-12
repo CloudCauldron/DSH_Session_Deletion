@@ -4,7 +4,7 @@ import { AsyncLocalStorage } from 'node:async_hooks';
 import { pathToFileURL } from 'node:url';
 import { join, relative } from 'node:path';
 import { setTimeout as delay } from 'node:timers/promises';
-import { digest, enqueue, familyOf, listRequests, readJSON, stateDir, sweep, planSessionDeletion, collectGarbage,
+import { digest, enqueue, familyOf, listRequests, readJSON, stateDir, sweep, planSessionDeletion, collectGarbage, garbageSize,
   type LiveSnapshot, type Receipt, type SessionHeader, type SessionMap, type GcResult } from './core.js';
 import { tryLock, waitingHosts, otherHosts } from './guard.js';
 import type { Lock } from './platform/index.js';
@@ -305,6 +305,21 @@ export class DeletionRuntime {
     this.maintenance = 'delete';
     try { return await this.removeOne(id, createdAt, expectedIds); }
     finally { this.maintenance = undefined; }
+  }
+  async garbageSize(): Promise<number> {
+    if (this.maintenance) throw new DeletionRefused('另一项清理正在进行，请稍后重试。');
+    let changed = false;
+    const subscriptions = ['session/created', 'session/disposed', 'session/event'].map(name => this.ctx.on(name, () => { changed = true; }));
+    // Session events cover log/lifecycle changes; staged uploads can change without an event.
+    const current = () => JSON.stringify([this.receiptRevision, this.ctx.sessions.list().map((session: Dynamic) => [
+      session.id, [...(this.unwrap(this.ctx.fileUploads).stagedFiles.get(session)?.values() || [])].map((upload: Dynamic) => upload.attachment),
+    ])]);
+    try {
+      const before = current();
+      const bytes = await garbageSize(this.home, () => this.snapshots());
+      if (changed || this.maintenance || before !== current()) throw new DeletionRefused('会话或附件已变化，请重新打开菜单计算体积。');
+      return bytes;
+    } finally { for (const dispose of subscriptions) dispose(); }
   }
   async gc(): Promise<GcResult> {
     if (this.maintenance) throw new DeletionRefused('另一项清理正在进行，请稍后重试。');

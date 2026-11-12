@@ -54,6 +54,42 @@ test('GC snapshots retain staged upload references', async () => {
  assert.equal(disposed, true);
 });
 
+for (const change of ['staged', 'session/event', 'transient-session', 'maintenance', 'read-failure']) test(`size preview rejects ${change} changes and releases its subscriptions`, async () => {
+ const f = await fixture(); const readdir = fs.readdir;
+ try {
+  const hash = 'c'.repeat(64), attachment = { attachmentId: 'sha256:' + hash };
+  await f.write(join(f.home, 'attachments/v1/objects', 'cc', hash), Buffer.alloc(2048));
+  const session = { id: 'unsaved', header: { id: 'unsaved', version: 4, createdAt: 1 } };
+  const stagedFiles = new WeakMap(), events = [], listeners = new Map();
+  const emit = name => { for (const listener of listeners.get(name) || []) listener(); };
+  const runtime = new DeletionRuntime({
+   sessionDeletionGate: { home: f.home }, sessions: { list: () => [session] }, fileUploads: { stagedFiles },
+   sessionQuery: { observeSession: async () => ({ header: session.header, events, [Symbol.dispose]() {} }) },
+   on(name, listener) { const group = listeners.get(name) || new Set(); listeners.set(name, group); group.add(listener); return () => group.delete(listener); },
+  }, value => value, class {});
+  let injected = false;
+  fs.readdir = async function (path, ...args) {
+   if (path === join(f.home, 'attachments/v1/objects') && !injected) {
+    injected = true;
+    if (change === 'staged') stagedFiles.set(session, new Map([['receipt', { attachment }]]));
+    if (change === 'session/event') { events.push(attachment); emit('session/event'); }
+    if (change === 'transient-session') {
+     emit('session/created'); await f.session('transient', {}, [attachment]); emit('session/event'); emit('session/disposed');
+    }
+    if (change === 'maintenance') runtime.maintenance = 'gc';
+    if (change === 'read-failure') throw new Error('Injected preview read failure');
+   }
+   return readdir.call(this, path, ...args);
+  };
+  syncBuiltinESMExports();
+  await assert.rejects(runtime.garbageSize(), change === 'read-failure' ? /Injected preview read failure/ : /已变化/);
+  assert.equal([...listeners.values()].reduce((count, group) => count + group.size, 0), 0, 'both success and failure must release the temporary observers');
+  runtime.maintenance = undefined;
+  assert.equal(await runtime.garbageSize(), ['maintenance', 'read-failure'].includes(change) ? 2061 : 13);
+  assert.equal([...listeners.values()].reduce((count, group) => count + group.size, 0), 0);
+ } finally { fs.readdir = readdir; syncBuiltinESMExports(); await f.cleanup(); }
+});
+
 test('publication barrier drains existing work, permits reentrant calls and queues new work',async()=>{
  const gate=new PublicationBarrier();const order=[];
  let release;const hold=new Promise(r=>release=r);

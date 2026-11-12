@@ -440,33 +440,44 @@ export async function sweep(home: string, { failAfter, hooks }: { failAfter?: nu
   return completed;
 }
 
-/** Explicit, globally quiescent mark/sweep. Interrupted GC is rescanned, never replayed from a stale manifest. */
-export async function collectGarbage(home: string, { hooks, failAfter }: { hooks?: GcHooks; failAfter?: number } = {}): Promise<GcResult> {
+/** Bound read-only I/O so large attachment stores do not flood the filesystem queue. */
+async function forEachConcurrent<T>(values: readonly T[], work: (value: T) => Promise<void>): Promise<void> {
+  let next = 0;
+  let failure: { reason: unknown } | undefined;
+  await Promise.all(Array.from({ length: Math.min(16, values.length) }, async () => {
+    for (let i = next++; i < values.length && !failure; i = next++) {
+      try { await work(values[i]); } catch (reason) { failure ??= { reason }; }
+    }
+  }));
+  if (failure) throw failure.reason;
+}
+
+async function scanGarbage(home: string, snapshots?: GcHooks['snapshots']) {
   if ((await listRequests(home)).length) throw new Error('Finish pending session deletions before GC');
-  const sessions = await scanSessions(home, await hooks?.snapshots?.());
+  const sessions = await scanSessions(home, await snapshots?.());
   const refs = newRefs();
   for (const session of sessions.values()) for (const hash of session.refs.hashes) refs.hashes.add(hash);
-  for (const path of await filesUnder(join(home, 'storages'))) {
-    if (ATOMIC_TEMP.test(basename(path))) continue;
+  await forEachConcurrent(await filesUnder(join(home, 'storages')), async path => {
+    if (ATOMIC_TEMP.test(basename(path))) return;
     if (!path.endsWith('.json') && !/\.json\.bak\./.test(path)) throw new Error('Unclassified storage during GC: ' + path);
     references(await readJSON(path), refs);
-  }
-  const candidates: { path: string; kind: string; files: number }[] = [];
+  });
+  const candidates: { path: string; kind: string; files: string[] }[] = [];
   const garbage = new Set<string>();
-  for (const kind of ['objects', 'file-objects', 'files']) {
+  await forEachConcurrent(['objects', 'file-objects', 'files'], async kind => {
     const root = join(home, 'attachments/v1', kind);
-    for (const prefix of await entries(root)) {
+    await forEachConcurrent(await entries(root), async prefix => {
       if (!/^[a-f0-9]{2}$/.test(prefix.name) || !prefix.isDirectory()) throw new Error('Unexpected attachment shard: ' + join(root, prefix.name));
       for (const entry of await entries(join(root, prefix.name))) {
         const hash = entry.name; const path = join(root, prefix.name, hash);
         if (!/^[a-f0-9]{64}$/.test(hash) || hash.slice(0, 2) !== prefix.name) throw new Error('Unexpected attachment object: ' + path);
         await safePath(path);
         if (kind === 'files' ? !entry.isDirectory() : !entry.isFile()) throw new Error('Unexpected attachment object type: ' + path);
-        const files = kind === 'files' ? (await filesUnder(path)).length : 1;
+        const files = kind === 'files' ? await filesUnder(path) : [path];
         if (!refs.hashes.has(hash)) { candidates.push({ path, kind, files }); garbage.add(hash); }
       }
-    }
-  }
+    });
+  });
   const cache = join(home, 'cache/attachments/request-images');
   const cacheFiles = await filesUnder(cache);
   const uploadPath = join(home, 'llm-deepseek/files-v3.json');
@@ -481,7 +492,26 @@ export async function collectGarbage(home: string, { hooks, failAfter }: { hooks
       garbage.add(hash); uploadMappings++; return false;
     });
   }
-  // Complete preflight above before the first destructive operation.
+  return { candidates, garbage, cache, cacheFiles, uploadPath, upload, uploadMappings };
+}
+
+/** Read-only estimate using the same reference checks as the actual collection. */
+export async function garbageSize(home: string, snapshots?: GcHooks['snapshots']): Promise<number> {
+  const { candidates, cacheFiles } = await scanGarbage(home, snapshots);
+  const seen = new Set<string>(); let bytes = 0;
+  await forEachConcurrent([...candidates.flatMap(candidate => candidate.files), ...cacheFiles], async path => {
+    const st = await fs.lstat(path, { bigint: true });
+    // DSH's file aliases are hard links; count their shared content only once.
+    const key = `${st.dev}:${st.ino}`;
+    if (!seen.has(key)) { seen.add(key); bytes += Number(st.size); }
+  });
+  return bytes;
+}
+
+/** Explicit, globally quiescent mark/sweep. Interrupted GC is rescanned, never replayed from a stale manifest. */
+export async function collectGarbage(home: string, { hooks, failAfter }: { hooks?: GcHooks; failAfter?: number } = {}): Promise<GcResult> {
+  // Complete preflight before the first destructive operation; never reuse a size preview.
+  const { candidates, garbage, cache, cacheFiles, uploadPath, upload, uploadMappings } = await scanGarbage(home, hooks?.snapshots);
   let operations = 0;
   const checkpoint = () => { if (failAfter !== undefined && ++operations >= failAfter) throw new Error('Injected GC interruption'); };
   if (uploadMappings) {
@@ -494,7 +524,7 @@ export async function collectGarbage(home: string, { hooks, failAfter }: { hooks
   const result: GcResult = { total: garbage.size + cacheFiles.length, objects: 0, fileLinks: 0, cacheFiles: cacheFiles.length, uploadMappings };
   for (const candidate of candidates) {
     await removeOwned(candidate.path);
-    if (candidate.kind === 'files') result.fileLinks += candidate.files; else result.objects++;
+    if (candidate.kind === 'files') result.fileLinks += candidate.files.length; else result.objects++;
     checkpoint();
   }
   if (await exists(cache)) { await removeOwned(cache); checkpoint(); }
