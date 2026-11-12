@@ -7,14 +7,14 @@ import { randomUUID, createHash } from 'node:crypto';
 import { zstdCompressSync } from 'node:zlib';
 import { setTimeout as delay } from 'node:timers/promises';
 import { chromium } from 'playwright-core';
-import { exists } from '../lib/core.js';
+import { exists, encodeSegment } from '../lib/core.js';
 import { tryLock } from '../lib/guard.js';
 
 const repo=resolve('.');
 const base=await fs.mkdtemp(join(tmpdir(),'dsh-deletion-integration-'));
 const temporary=join(base,'tmp');await fs.mkdir(temporary,{mode:0o700});
 // Keep browser profiles, DSH spills and package-manager scratch data inside the fixture.
-process.env.TMPDIR=temporary;
+process.env.TMP=process.env.TEMP=process.env.TMPDIR=temporary;
 const home=join(base,'home');
 await fs.mkdir(join(home,'profiles/web'),{recursive:true,mode:0o700});
 if(!(await exists(join(home,'profiles/web/package.json')))){
@@ -24,7 +24,10 @@ if(!(await exists(join(home,'profiles/web/package.json')))){
   await fs.writeFile(join(home,'profiles/web/cordis.patch.yml'),'[]\n');
 }
 const env={...process.env,DSH_HOME:home,DSH_TELEMETRY_DISABLED:'1',pnpm_config_store_dir:join(base,'pnpm-store')};
-const install=spawn('dsh',['plugin','--profile','web','add','file:'+repo],{env,stdio:['ignore','pipe','pipe']});
+// Native Windows cannot spawn a .cmd shim directly; an explicit CLI entry also
+// lets either platform test an isolated DSH installation.
+const spawnDsh=args=>spawn(process.env.DSH_CLI?process.execPath:'dsh',[...(process.env.DSH_CLI?[process.env.DSH_CLI]:[]),...args],{env,stdio:['ignore','pipe','pipe']});
+const install=spawnDsh(['plugin','--profile','web','add','file:'+repo]);
 let installText='';install.stdout.on('data',d=>{installText+=d});install.stderr.on('data',d=>{installText+=d});
 assert.equal(await new Promise(r=>install.on('exit',r)),0,'Install failed: '+installText);
 await fs.writeFile(join(home,'profiles/web/cordis.patch.yml'),'- insert:\n    - id: deletion-test-controls\n      name: '+JSON.stringify(join(repo,'test/host-fixture.mjs'))+'\n');
@@ -34,7 +37,7 @@ const id='session-'+randomUUID();
 const exclusive='a'.repeat(64),shared='b'.repeat(64);
 const stagedShared=createHash('sha256').update('other draft upload').digest('hex');
 const stagedExclusive=createHash('sha256').update('target draft upload').digest('hex');
-const projectKey='--'+cwd.replaceAll('/','-').replace(/^-+/,'')+'--';
+const projectKey='--'+encodeSegment(cwd.replace(/[\\/:]+/g,'-').replace(/^-+/,'')||'root').slice(0,251)+'--';
 const sessionDir=join(home,'sessions',projectKey,id);await fs.mkdir(sessionDir,{recursive:true,mode:0o700});
 const log=join(sessionDir,'session.v4.jsonl.zstd');
 const header={type:'session',version:4,id,createdAt:Date.now(),cwd,isSeeded:false,delegationDepth:0};
@@ -42,12 +45,12 @@ const message={type:'user/message',seq:1,time:Date.now(),surfaceOp:'append',data
 const events=[{type:'turn/start',seq:0,time:Date.now(),data:{turn:1}},message,
  {type:'session/title',seq:2,time:Date.now(),data:{title:'Offline deletion integration fixture',messageSeqs:[],source:{kind:'user'}}}];
 await fs.writeFile(log,Buffer.concat([zstdCompressSync(JSON.stringify(header)+'\n'),zstdCompressSync(events.map(e=>JSON.stringify(e)+'\n').join(''))]));
-await fs.writeFile(join(sessionDir,'session.lock'),'');
+if(process.platform!=='win32')await fs.writeFile(join(sessionDir,'session.lock'),'');
 async function extraSession(name,age,attachment,meta={}){
  const extra='session-'+randomUUID();const dir=join(home,'sessions',projectKey,extra);await fs.mkdir(dir,{recursive:true,mode:0o700});
  const extraHeader={...header,id:extra,createdAt:header.createdAt-age,...meta};
  const extraEvents=events.map(e=>({...e,time:e.time-age,data:e.type==='user/message'?{...e.data,id:randomUUID(),content:[{type:'text',text:name+(attachment?' sha256:'+attachment:'')}]}:e.type==='session/title'?{...e.data,title:name}:e.data}));
- const path=join(dir,'session.v4.jsonl.zstd');await fs.writeFile(path,Buffer.concat([zstdCompressSync(JSON.stringify(extraHeader)+'\n'),zstdCompressSync(extraEvents.map(e=>JSON.stringify(e)+'\n').join(''))]));await fs.writeFile(join(dir,'session.lock'),'');return {id:extra,path};
+ const path=join(dir,'session.v4.jsonl.zstd');await fs.writeFile(path,Buffer.concat([zstdCompressSync(JSON.stringify(extraHeader)+'\n'),zstdCompressSync(extraEvents.map(e=>JSON.stringify(e)+'\n').join(''))]));if(process.platform!=='win32')await fs.writeFile(join(dir,'session.lock'),'');return {id:extra,path};
 }
 const preserved=await extraSession('Preserved fixture',20000,shared);const cold=await extraSession('Archived deletion fixture',10000);
 const draftOwner=await extraSession('Draft owner fixture',30000);
@@ -64,7 +67,7 @@ await fs.mkdir(join(imageCache,'..'),{recursive:true,mode:0o700});await fs.write
 let host;let browser;let bootLog='';let exited;let port='0';
 const errors=[];
 async function start(){
- bootLog='';host=spawn('dsh',['web','--no-open','--host','127.0.0.1','--port',port],{env,stdio:['ignore','pipe','pipe']});
+ bootLog='';host=spawnDsh(['web','--no-open','--host','127.0.0.1','--port',port]);
  exited=new Promise(r=>host.on('exit',(code,signal)=>r({code,signal})));
  host.stdout.on('data',d=>{bootLog+=d});host.stderr.on('data',d=>{bootLog+=d});
  for(let i=0;i<200;i++){
@@ -79,7 +82,7 @@ async function stop(){
  if(!host)return;
  if(host.exitCode===null&&host.signalCode===null){host.kill('SIGINT');await Promise.race([exited,delay(15000,undefined,{ref:false}).then(()=>{throw new Error('Host did not exit')})]);}
  const path=join(home,'session-deletion/lifecycle.lock');
- if(!(await exists(path)))return;
+ if(process.platform!=='win32'&&!(await exists(path)))return;
  const deadline=Date.now()+15000;
  for(;;){
   const lock=await tryLock(path);
@@ -94,7 +97,7 @@ try{
  assert.ok([401,403].includes(unauthorized.status),`Unauthenticated status ${unauthorized.status}: ${(await unauthorized.text()).slice(0,400)}`);
  const unauthorizedReceipt=await fetch(`http://127.0.0.1:${port}/session-deletion/api/receipt`);
  assert.ok([401,403].includes(unauthorizedReceipt.status));
- browser=await chromium.launch({executablePath:'/opt/google/chrome/chrome',headless:true,args:['--no-sandbox']});
+ browser=await chromium.launch({executablePath:process.env.CHROME_PATH||(process.platform==='win32'?join(process.env.PROGRAMFILES,'Google/Chrome/Application/chrome.exe'):'/opt/google/chrome/chrome'),headless:true,args:['--no-sandbox']});
  const context=await browser.newContext({viewport:{width:1440,height:1000}});
  const page=await context.newPage();page.on('pageerror',e=>errors.push(e.message));
  let receiptRequests=0;page.on('request',request=>{if(new URL(request.url()).pathname==='/session-deletion/api/receipt')receiptRequests++});
@@ -121,6 +124,9 @@ try{
  for(let i=0;i<100;i++){if((await (await controls('state',{id})).json()).agentResident)break;await delay(50)}
  const archivedProbe=await (await controls('archive-probe',{id})).json();
  assert.deepEqual(archivedProbe,{archived:true,agentResident:true,sessionResident:true,status:'idle',writerOpen:true});
+ const writerLock=await tryLock(join(sessionDir,'session.lock'));
+ if(writerLock)await writerLock.close();
+ assert.equal(writerLock,undefined,'the plugin must contend with the real DSH writer lock');
  console.log('ARCHIVE PROBE: archived=true; Agent, Session and write handle remain resident');
  await controls('unarchive',{id});
  // Compare against the actual native archive dialog, then cancel without stopping anything.

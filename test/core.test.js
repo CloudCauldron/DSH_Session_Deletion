@@ -4,7 +4,8 @@ import * as fs from 'node:fs/promises';
 import { readdirSync } from 'node:fs';
 import { join } from 'node:path';
 import { zstdCompressSync } from 'node:zlib';
-import { scanSessions, sweep, collectGarbage, exists, digest, encodeSegment, listRequests, readJSON, stateDir, enqueue, planSessionDeletion, atomicJSON, birth } from '../lib/core.js';
+import { scanSessions, sweep, collectGarbage, exists, digest, encodeSegment, listRequests, readJSON, stateDir, enqueue, planSessionDeletion, atomicJSON, safePath } from '../lib/core.js';
+import { birth } from '../lib/platform/index.js';
 import { fixture } from './fixtures.js';
 
 const attachment = (f, hash, kind = 'objects') => join(f.home, 'attachments/v1', kind, hash.slice(0, 2), hash);
@@ -108,7 +109,7 @@ test('target symlink or changed lifecycle refuses private deletion', async () =>
   try {
     await f.queue();
     const link = join(f.home, 'sessions/project', f.ids.main, 'external');
-    await fs.symlink(f.projectFile, link);
+    await fs.symlink(f.base, link, 'junction');
     await assert.rejects(sweep(f.home), /symlink/);
     await fs.unlink(link);
     await f.session(f.ids.main, { createdAt: 999 });
@@ -117,11 +118,25 @@ test('target symlink or changed lifecycle refuses private deletion', async () =>
   } finally { await f.cleanup(); }
 });
 
+test('path checks reject symlink/junction ancestors even when the leaf does not exist', async () => {
+  const f = await fixture();
+  try {
+    const link = join(f.home, 'external');
+    await fs.symlink(f.base, link, 'junction');
+    await assert.rejects(safePath(join(link, 'project-file.txt')), /symlink/);
+    await assert.rejects(safePath(join(link, 'missing'), { missing: true }), /symlink/);
+  } finally { await f.cleanup(); }
+});
+
 test('plan validation rejects invalid schemas and traversal', async () => {
   const f = await fixture();
   try {
     assert.equal(encodeSegment('../outside'), '..~002Foutside');
     const plan = await planSessionDeletion(f.home, new Map(Object.entries(f.headers)), f.ids.main);
+    if (process.platform === 'win32') {
+      const outside = { ...plan, directories: plan.directories.map(row => ({ ...row, path: `${f.home[0].toUpperCase() === 'Z' ? 'Y' : 'Z'}:\\${row.id}` })) };
+      await assert.rejects(enqueue(f.home, f.headers[f.ids.main], outside), /Invalid deletion plan path/);
+    }
     await assert.rejects(enqueue(f.home, { ...f.headers[f.ids.main], createdAt: 9 }, plan), /lifecycle/);
     await f.queue();
     const path = join(stateDir(f.home), 'pending', digest(f.ids.main) + '.json');
@@ -177,11 +192,11 @@ test('GC protects staged uploads in a live session without a materialized log', 
   } finally { await f.cleanup(); }
 });
 
-test('GC protects literal attachment paths and non-session storage references', async () => {
+for (const separator of ['/', '\\']) test(`GC protects literal attachment paths using ${separator} and non-session storage references`, async () => {
   const f = await fixture();
   try {
     await f.queue(); await sweep(f.home);
-    await f.session(f.ids.other, {}, [join(attachment(f, f.exclusive, 'files'), 'name.txt')]);
+    await f.session(f.ids.other, {}, [join(attachment(f, f.exclusive, 'files'), 'name.txt').replaceAll('\\', '/').replaceAll('/', separator)]);
     const stored = digest('stored elsewhere'); await f.write(attachment(f, stored), 'keep');
     await f.write(join(f.home, 'storages/other.json'), JSON.stringify({ image: 'sha256:' + stored }));
     await collectGarbage(f.home);
@@ -195,7 +210,7 @@ for (const mode of ['corrupt', 'torn', 'symlink', 'opaque']) test(`GC ${mode} pr
     const log = join(f.home, 'sessions/project', f.ids.other, 'session.v4.jsonl.zstd');
     if (mode === 'corrupt') await fs.writeFile(log, 'corrupt');
     if (mode === 'torn') await fs.appendFile(log, zstdCompressSync('{"tail":true}\n').subarray(0, 7));
-    if (mode === 'symlink') await fs.symlink(f.projectFile, join(f.home, 'attachments/v1/objects', 'ff'));
+    if (mode === 'symlink') await fs.symlink(f.base, join(f.home, 'attachments/v1/objects', 'ff'), 'junction');
     if (mode === 'opaque') await f.write(join(f.home, 'storages/unknown.bin'), 'opaque');
     await assert.rejects(collectGarbage(f.home));
     assert.equal(await exists(attachment(f, f.exclusive)), true);

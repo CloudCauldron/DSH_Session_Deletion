@@ -7,9 +7,9 @@ import { join, relative } from 'node:path';
 import { setTimeout as delay } from 'node:timers/promises';
 import { digest, enqueue, familyOf, listRequests, readJSON, stateDir, sweep, planSessionDeletion, collectGarbage,
   type LiveSnapshot, type Receipt, type SessionHeader, type SessionMap, type GcResult } from './core.js';
-import { tryLock, otherHosts, waitingHosts } from './guard.js';
+import { tryLock, waitingHosts } from './guard.js';
+import { otherHosts, type Lock } from './platform/index.js';
 import type { Gate } from './gate.js';
-import type { FileHandle } from 'node:fs/promises';
 import { realpath } from 'node:fs/promises';
 
 // These dynamic boundaries are intentionally confined to this rc.5 adapter.
@@ -351,7 +351,7 @@ export class DeletionRuntime {
     // are rejected before the asynchronous authoritative activity checks begin.
     for (const member of ids) this.locked.add(member);
     let journaled = false; let committed = false;
-    const writerLocks: FileHandle[] = [];
+    const writerLocks: Lock[] = [];
     try {
       const excluded = await waitingHosts(stateDir(this.home)); excluded.add(process.pid);
       if ((await otherHosts(this.home, excluded)).length) throw new DeletionRefused('另一个 DSH 进程正在使用相同目录，请先关闭它。');
@@ -383,7 +383,7 @@ export class DeletionRuntime {
         receiptCommitted: receipt => { this.installReceipt(receipt); committed = true; },
         applyEdit: async (edit, targets) => {
           const path = relative(this.home, edit.path);
-          if (path === 'storages/workspace.json') {
+          if (path === join('storages', 'workspace.json')) {
             for (const workspace of this.ctx.workspaceRegistry.list()) for (const member of targets) {
               if (workspace.sessionIds.includes(member)) await workspace.detachSession(member);
             }
@@ -392,7 +392,7 @@ export class DeletionRuntime {
               await registry.unpinSession(member); await this.unarchiveForCleanup(member);
               for (const key of ['headers', 'sessionPaths', 'missingSessionPaths', 'invalidSessionPaths']) registry[key]?.delete(member);
             }
-          } else if (path === 'storages/schedule.json') {
+          } else if (path === join('storages', 'schedule.json')) {
             for (const task of await this.schedule!.catalog()) if (targets.has(task.sessionId)) await this.schedule!.delete({ sessionId: task.sessionId, id: task.id });
           } else throw new Error('Unsupported live storage edit: ' + path);
         },

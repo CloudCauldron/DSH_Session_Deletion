@@ -50,7 +50,7 @@
 ## **4 - 环境要求**
 
 - **DeepSeek Harness**：`0.2.1-rc.5`（默认 Web 配置）
-- **操作系统**：Linux
+- **操作系统**：Linux、Windows
 - **Node.js**：`>= 24.9.0`
 
 ## **5 - 安装与配置**
@@ -66,8 +66,22 @@
 
 2. 将插件注册到 DSH 的 Web profile：
 
+    Linux（Bash）：
+
     ```bash
     dsh plugin --profile web add "file:$PWD"
+    ```
+
+    Windows（PowerShell）：
+
+    ```powershell
+    dsh plugin --profile web add "file:$($PWD.Path)"
+    ```
+
+    Windows（Git Bash）：
+
+    ```bash
+    dsh plugin --profile web add "file:$(cygpath -m "$PWD")"
     ```
 
 3. 如果你的工作区 `pnpm-workspace.yaml` 对原生依赖构建有安全限制，请确保允许 `koffi`：

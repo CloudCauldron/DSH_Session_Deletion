@@ -81,7 +81,6 @@ export declare function safePath(path: string, { missing, directory }?: {
     directory?: boolean;
 }): Promise<void>;
 export declare function privateDir(path: string): Promise<void>;
-export declare function birth(pid: number): Promise<string | undefined>;
 export declare function atomicJSON(path: string, data: unknown): Promise<void>;
 export declare function readJSON<T>(path: string, fallback?: T): Promise<T>;
 export declare function removeOwned(path: string): Promise<void>;

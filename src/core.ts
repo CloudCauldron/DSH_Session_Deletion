@@ -3,7 +3,8 @@ import { createReadStream, openSync, constants } from 'node:fs';
 import { createZstdDecompress } from 'node:zlib';
 import { createInterface } from 'node:readline';
 import { createHash, randomBytes } from 'node:crypto';
-import { join, resolve, dirname, basename, relative, sep } from 'node:path';
+import { join, resolve, dirname, basename, relative, sep, parse, isAbsolute } from 'node:path';
+import { assertOwner, mkdir, secureDir, syncDir, rename, birth } from './platform/index.js';
 
 export interface SessionHeader {
   type?: 'session'; version: number; id: string; createdAt: number; cwd?: string;
@@ -62,8 +63,8 @@ export async function exists(path: string): Promise<boolean> {
 }
 export async function safePath(path: string, { missing = false, directory = false }: { missing?: boolean; directory?: boolean } = {}) {
   path = resolve(path);
-  let current = '/';
-  const parts = path.split('/').filter(Boolean);
+  let current = parse(path).root;
+  const parts = path.slice(current.length).split(sep).filter(Boolean);
   for (let i = 0; i < parts.length; i++) {
     current = join(current, parts[i]);
     let st;
@@ -72,40 +73,17 @@ export async function safePath(path: string, { missing = false, directory = fals
     if (st.isSymbolicLink()) throw new Error(`Refusing symlink: ${current}`);
     if (i < parts.length - 1 && !st.isDirectory()) throw new Error(`Not a directory: ${current}`);
     if (i === parts.length - 1) {
-      if (st.uid !== process.getuid!()) throw new Error(`Not owned by this user: ${current}`);
+      assertOwner(current, st.uid);
       if (directory && !st.isDirectory()) throw new Error(`Not a directory: ${current}`);
     }
   }
 }
-const durableDirectories = new Set<string>();
 export async function privateDir(path: string) {
   path = resolve(path);
   await safePath(path, { missing: true });
-  const firstCreated = await fs.mkdir(path, { recursive: true, mode: 0o700 });
+  const firstCreated = await mkdir(path);
   await safePath(path, { directory: true });
-  await fs.chmod(path, 0o700);
-  // A synced request file is insufficient if its newly-created parent entry
-  // can disappear after a power loss. Establish the entire directory chain.
-  let requiredParent = firstCreated ? dirname(resolve(firstCreated)) : undefined;
-  const synced: string[] = [];
-  for (let current = path;; current = dirname(current)) {
-    await syncDir(current); synced.push(current);
-    if (current === requiredParent) requiredParent = undefined;
-    if (dirname(current) === current || (!requiredParent && durableDirectories.has(current))) break;
-  }
-  for (const directory of synced) durableDirectories.add(directory);
-}
-async function syncDir(path: string) {
-  const h = await fs.open(path, constants.O_RDONLY | constants.O_DIRECTORY | constants.O_NOFOLLOW);
-  try { await h.sync(); } finally { await h.close(); }
-}
-export async function birth(pid: number): Promise<string | undefined> {
-  try {
-    const text = await fs.readFile(`/proc/${pid}/stat`, 'utf8');
-    const fields = text.slice(text.lastIndexOf(')') + 2).split(' ');
-    if (!/^\d+$/.test(fields[19] ?? '')) throw new Error('Cannot read process identity');
-    return fields[0] === 'Z' ? undefined : fields[19];
-  } catch (e) { if (['ENOENT', 'ESRCH'].includes((e as NodeJS.ErrnoException).code || '')) return; throw e; }
+  await secureDir(path, firstCreated);
 }
 export async function atomicJSON(path: string, data: unknown) {
   await safePath(path, { missing: true });
@@ -118,7 +96,8 @@ export async function atomicJSON(path: string, data: unknown) {
     h = await fs.open(temp, constants.O_WRONLY | constants.O_CREAT | constants.O_EXCL | constants.O_NOFOLLOW, 0o600);
     await h.writeFile(JSON.stringify(data) + '\n');
     await h.sync(); await h.close(); h = undefined;
-    await fs.rename(temp, path); await syncDir(dirname(path));
+    await rename(temp, path);
+    await syncDir(dirname(path));
   } finally { if (h) await h.close(); await fs.rm(temp, { force: true }); }
 }
 export async function readJSON<T>(path: string, fallback?: T): Promise<T> {
@@ -148,7 +127,7 @@ async function filesUnder(path: string): Promise<string[]> {
 }
 function inside(root: string, path: string) {
   const r = relative(root, path);
-  return r !== '' && r !== '..' && !r.startsWith('..' + sep) && !r.startsWith(sep);
+  return r !== '' && r !== '..' && !r.startsWith('..' + sep) && !isAbsolute(r);
 }
 export async function removeOwned(path: string) {
   if (!(await exists(path))) return;
@@ -170,7 +149,7 @@ export async function cleanAtomicTemps(directory: string) {
     catch (e) { if ((e as NodeJS.ErrnoException).code !== 'ENOENT') throw e; }
   }
 }
-const HASH = /(?:sha256:|\/(?:objects|file-objects|files)\/[a-f0-9]{2}\/)([a-f0-9]{64})(?![a-f0-9])/g;
+const HASH = /(?:sha256:|[\\/](?:objects|file-objects|files)[\\/][a-f0-9]{2}[\\/])([a-f0-9]{64})(?![a-f0-9])/g;
 function references(value: unknown, refs: References) {
   if (typeof value === 'string') {
     for (const match of value.matchAll(HASH)) refs.hashes.add(match[1]);

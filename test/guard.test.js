@@ -5,8 +5,9 @@ import { join, resolve } from 'node:path';
 import { spawn } from 'node:child_process';
 import { once } from 'node:events';
 import { setTimeout as delay } from 'node:timers/promises';
-import { tryLock, runGuard, otherHosts } from '../lib/guard.js';
-import { exists, listRequests, stateDir, atomicJSON, readJSON, birth } from '../lib/core.js';
+import { tryLock, runGuard } from '../lib/guard.js';
+import { exists, listRequests, stateDir, atomicJSON, readJSON } from '../lib/core.js';
+import { birth, otherHosts } from '../lib/platform/index.js';
 import { fixture } from './fixtures.js';
 
 function finished(child) { return new Promise(resolve => child.once('exit', (code, signal) => resolve({ code, signal }))); }
@@ -161,7 +162,7 @@ test('empty recovery refreshes blocked diagnostics and safely reclaims only aban
       for (const name of [alive, reused]) await f.write(join(directory, name), 'uncommitted');
     }
     const link = join(stateDir(f.home), `.session-deletion-write-${process.pid}-0-${'d'.repeat(24)}`);
-    await fs.symlink(f.projectFile, link);
+    await fs.symlink(f.base, link, 'junction');
     await runGuard({ home: f.home }, () => {});
     const clean = await readJSON(status);
     assert.equal(clean.state, 'clean');
@@ -179,4 +180,19 @@ test('empty recovery refreshes blocked diagnostics and safely reclaims only aban
     for (const directory of directories) assert.equal(await exists(join(directory, alive)), false);
     assert.equal((await readJSON(status)).state, 'clean');
   } finally { writer.kill(); await done; await f.cleanup(); }
+});
+
+test('DSH processes using another home do not block cleanup', async () => {
+  const f = await fixture();
+  const host = spawn(process.execPath, ['-e', 'setInterval(()=>{},1000)', '/tmp/@deepseek-ai/dsh/lib/bin.js'], {
+    env: { ...process.env, DSH_HOME: join(f.base, 'another-home') }, stdio: 'ignore',
+  });
+  const done = finished(host);
+  try {
+    await once(host, 'spawn');
+    assert.deepEqual(await otherHosts(f.home, new Set([process.pid])), []);
+    await f.queue();
+    await runGuard({ home: f.home }, () => {});
+    assert.equal((await listRequests(f.home)).length, 0);
+  } finally { host.kill(); await done; await f.cleanup(); }
 });

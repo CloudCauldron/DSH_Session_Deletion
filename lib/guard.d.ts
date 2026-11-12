@@ -1,5 +1,4 @@
-/** Detached Node.js supervisor for interrupted deletion recovery before startup or after exit. */
-import * as fs from 'node:fs/promises';
+import { type Lock } from './platform/index.js';
 export interface GuardOptions {
     home: string;
     hostPid?: number;
@@ -7,7 +6,6 @@ export interface GuardOptions {
     startupTimeoutMs?: number;
 }
 export declare function waitingHosts(state: string): Promise<Set<number>>;
-export declare function otherHosts(home: string, excluded: Set<number>): Promise<number[]>;
-/** Kernel lock, held on an open inode and automatically released on process death. */
-export declare function tryLock(path: string, create?: boolean): Promise<fs.FileHandle | undefined>;
+/** Use the same kernel lock as DSH's session writer on each platform. */
+export declare function tryLock(path: string, create?: boolean): Promise<Lock | undefined>;
 export declare function runGuard(options: GuardOptions, announce?: (line: string) => void): Promise<void>;

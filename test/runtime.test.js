@@ -90,9 +90,9 @@ test('submissions queued behind GC do not make its global idle check fail', asyn
  assert.equal(published, true);
 });
 
-for (const failure of ['receipt-read', 'receipt-rename']) test(`deletion publishes tombstones despite ${failure} failure`, async () => {
+for (const failure of ['receipt-read', 'receipt-cleanup']) test(`deletion publishes tombstones despite ${failure} failure`, async () => {
  const f = await fixture();
- const readFile = fs.readFile, rename = fs.rename;
+ const readFile = fs.readFile, rm = fs.rm;
  try {
   await fs.mkdir(join(stateDir(f.home), 'hosts'), { recursive: true });
   // This case exercises real log removal and receipt I/O, without unrelated workspace services.
@@ -117,9 +117,10 @@ for (const failure of ['receipt-read', 'receipt-rename']) test(`deletion publish
    }
    return readFile.call(this, file, ...args);
   };
-  fs.rename = async function (from, to) {
-   await rename.call(this, from, to);
-   if (to === path && failure === 'receipt-rename') throw Object.assign(new Error('Injected post-rename failure'), { code: 'EIO' });
+  fs.rm = async function (file, ...args) {
+   await rm.call(this, file, ...args);
+   if (failure === 'receipt-cleanup' && String(file).includes('.session-deletion-write-') && await readFile.call(fs, path, 'utf8').catch(() => ''))
+    throw Object.assign(new Error('Injected post-rename failure'), { code: 'EIO' });
   };
   syncBuiltinESMExports();
   const ids = runtime.family(headers, f.ids.main);
@@ -133,7 +134,7 @@ for (const failure of ['receipt-read', 'receipt-rename']) test(`deletion publish
   assert.equal(receiptReads, failure === 'receipt-read' ? 0 : 1);
   assert.equal((await listRequests(f.home)).length, failure === 'receipt-read' ? 0 : 1);
  } finally {
-  fs.readFile = readFile; fs.rename = rename; syncBuiltinESMExports();
+  fs.readFile = readFile; fs.rm = rm; syncBuiltinESMExports();
   await f.cleanup();
  }
 });

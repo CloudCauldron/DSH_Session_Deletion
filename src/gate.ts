@@ -5,6 +5,7 @@ import { resolve, dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { createRequire } from 'node:module';
 import { SUPPORTED_DSH, privateDir, stateDir } from './core.js';
+import { birth } from './platform/index.js';
 
 export interface Gate { home: string; version: string; healthy(): boolean }
 export interface GateContext { provide(name: string, value: Gate): unknown }
@@ -13,7 +14,6 @@ const symbol = Symbol.for('dsh-session-deletion.guard');
 const singletons = globalThis as typeof globalThis & { [symbol]?: Promise<Gate> };
 
 async function start(): Promise<Gate> {
-  if (process.platform !== 'linux') throw new Error('Session Deletion currently supports Linux only');
   const entry = process.argv[1];
   const require = createRequire(entry);
   let version: string;
@@ -22,12 +22,12 @@ async function start(): Promise<Gate> {
   if (version !== SUPPORTED_DSH) throw new Error(`Session Deletion supports DSH ${SUPPORTED_DSH}; found ${version}. Review before upgrading.`);
   const home = resolve(process.env.DSH_HOME || join(homedir(), '.dsh'));
   await privateDir(stateDir(home));
-  const stat = await readFile('/proc/self/stat', 'utf8');
-  const birth = stat.slice(stat.lastIndexOf(')') + 2).split(' ')[19];
+  const started = await birth(process.pid);
+  if (!started) throw new Error('Cannot identify DSH host');
   const project = resolve(dirname(fileURLToPath(import.meta.url)), '..');
   let healthy = true;
-  const child = spawn(process.execPath, [join(project, 'lib', 'guard.js'), home, String(process.pid), birth], {
-    detached: true, stdio: ['ignore', 'pipe', 'pipe'], cwd: project,
+  const child = spawn(process.execPath, [join(project, 'lib', 'guard.js'), home, String(process.pid), started], {
+    detached: true, windowsHide: true, stdio: ['ignore', 'pipe', 'pipe'], cwd: project,
   });
   child.on('exit', () => { healthy = false; });
   await new Promise<void>((accept, reject) => {

@@ -5,7 +5,7 @@ import { zstdCompressSync } from 'node:zlib';
 import { digest, encodeSegment, enqueue, planSessionDeletion } from '../lib/core.js';
 
 export async function fixture() {
-  const base = await fs.mkdtemp(join(tmpdir(), 'dsh-deletion-test-'));
+  const base = await fs.mkdtemp(join(tmpdir(), 'dsh-deletion-测试 空格-'));
   const home = join(base, 'home'); const temporary = join(base, 'tmp');
   await fs.mkdir(home, { mode: 0o700 }); await fs.mkdir(temporary, { mode: 0o700 });
   const exclusive = digest('exclusive attachment'); const shared = digest('shared attachment');
@@ -19,7 +19,7 @@ export async function fixture() {
     // Real persistence uses concatenated independent Zstandard frames.
     await write(path, Buffer.concat([zstdCompressSync(JSON.stringify(header) + '\n'),
       zstdCompressSync(JSON.stringify({ type: 'user/message', seq: 0, data: { content: refs } }) + '\n')]));
-    await write(join(path, '..', 'session.lock'), '');
+    if (process.platform !== 'win32') await write(join(path, '..', 'session.lock'), '');
     await write(join(home, 'storages/session_projcache/sessions', encodeSegment(id) + '.json'), JSON.stringify({ version: 1, record: { title: id, refs } }));
   }
   const spillRoot = await fs.mkdtemp(join(temporary, 'dsh-spill-'));
