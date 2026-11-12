@@ -2,11 +2,51 @@ import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import * as fs from 'node:fs/promises';
 import { readdirSync } from 'node:fs';
+import { randomBytes } from 'node:crypto';
 import { join } from 'node:path';
-import { zstdCompressSync } from 'node:zlib';
-import { scanSessions, sweep, collectGarbage, exists, digest, encodeSegment, listRequests, readJSON, stateDir, enqueue, planSessionDeletion, atomicJSON, safePath } from '../lib/core.js';
+import { zstdCompressSync, constants } from 'node:zlib';
+import { scanSessions, sweep, collectGarbage, exists, digest, encodeSegment, listRequests, readJSON, stateDir, enqueue, planSessionDeletion, atomicJSON, safePath, readLog, SUPPORTED_DSH } from '../lib/core.js';
 import { birth } from '../lib/platform/index.js';
 import { fixture } from './fixtures.js';
+
+test('compressed logs retain every frame across blocks, checksums and input boundaries', async () => {
+  const f = await fixture();
+  try {
+    const header = zstdCompressSync(JSON.stringify(f.headers[f.ids.other]) + '\n');
+    const rle = Buffer.from([0x28, 0xb5, 0x2f, 0xfd, 0x20, 20, 0xa3, 0, 0, 10]);
+    const metadata = Buffer.alloc(65534 - header.length - rle.length);
+    metadata.writeUInt32LE(0x184d2a50); metadata.writeUInt32LE(metadata.length - 8, 4);
+    const event = JSON.stringify({ content: randomBytes(2 * 1024 * 1024).toString('base64'), attachmentId: 'sha256:' + f.exclusive }) + '\n';
+    const frame = zstdCompressSync(event, { params: { [constants.ZSTD_c_checksumFlag]: 1 } });
+    const path = join(f.home, 'sessions/project', f.ids.other, 'session.v4.jsonl.zstd');
+    await fs.writeFile(path, Buffer.concat([header, rle, metadata, frame]));
+    assert.deepEqual([...(await readLog(path)).refs.hashes], [f.exclusive]);
+    await fs.truncate(path, (await fs.stat(path)).size - 1);
+    await assert.rejects(readLog(path));
+  } finally { await f.cleanup(); }
+});
+
+test('journals identify the reviewed host version', async () => {
+  const f = await fixture();
+  try {
+    const plan = await planSessionDeletion(f.home, new Map(Object.entries(f.headers)), f.ids.main);
+    await enqueue(f.home, f.headers[f.ids.main], plan);
+    assert.equal((await listRequests(f.home))[0].dshVersion, SUPPORTED_DSH);
+    await sweep(f.home);
+    assert.equal((await listRequests(f.home)).length, 0);
+  } finally { await f.cleanup(); }
+});
+
+test('unsupported host versions cannot authorize a deletion', async () => {
+  const f = await fixture();
+  try {
+    await f.queue();
+    const request = (await listRequests(f.home))[0];
+    await atomicJSON(join(stateDir(f.home), 'pending', digest(f.ids.main) + '.json'), { ...request, dshVersion: 'unsupported' });
+    await assert.rejects(sweep(f.home), /Invalid deletion request/);
+    assert.equal(await exists(join(f.home, 'sessions/project', f.ids.main)), true);
+  } finally { await f.cleanup(); }
+});
 
 const attachment = (f, hash, kind = 'objects') => join(f.home, 'attachments/v1', kind, hash.slice(0, 2), hash);
 

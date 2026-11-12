@@ -88,7 +88,7 @@ window.__ModuleLoader__.load({ id: 'dsh-session-deletion', factory(require) {
     const matches = async (value: string) => deleted.has(await hash(value));
     for (const storage of [localStorage, sessionStorage]) {
       for (const key of Object.keys(storage)) {
-        // rc.5's three session-scoped stores plus two navigation stores.
+        // The three session-scoped stores plus two navigation stores.
         // Never recursively rewrite arbitrary DSH preferences or other drafts.
         const prefix = ['dsh.conversation.', 'dsh.sidebar-right.v1.', 'dsh.schedule.task-tab.v1.'].find(p => key.startsWith(p));
         if (!prefix && key !== 'dsh.sessions.current' && key !== 'dsh.workspace.view.v5') continue;
@@ -162,7 +162,7 @@ window.__ModuleLoader__.load({ id: 'dsh-session-deletion', factory(require) {
   }
   function useDisabledClose(selector: string, open: boolean, busy: boolean): void {
     React.useLayoutEffect(() => {
-      // rc.5 Modal exposes no disabled-close prop. Synchronize only its native
+      // Modal exposes no disabled-close prop. Synchronize only its native
       // close button; footer buttons remain controlled by React.
       const closeButton = document.querySelector<HTMLButtonElement>(selector + ' button[aria-label="关闭"]');
       if (closeButton) closeButton.disabled = busy;

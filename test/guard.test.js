@@ -1,13 +1,14 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import * as fs from 'node:fs/promises';
-import { join, resolve } from 'node:path';
+import fs from 'node:fs/promises';
+import { syncBuiltinESMExports } from 'node:module';
+import { join, resolve, toNamespacedPath } from 'node:path';
 import { spawn } from 'node:child_process';
 import { once } from 'node:events';
 import { setTimeout as delay } from 'node:timers/promises';
-import { tryLock, runGuard } from '../lib/guard.js';
+import { tryLock, runGuard, otherHosts, waitingHosts } from '../lib/guard.js';
 import { exists, listRequests, stateDir, atomicJSON, readJSON } from '../lib/core.js';
-import { birth, otherHosts } from '../lib/platform/index.js';
+import { birth, homeVariable } from '../lib/platform/index.js';
 import { fixture } from './fixtures.js';
 
 function finished(child) { return new Promise(resolve => child.once('exit', (code, signal) => resolve({ code, signal }))); }
@@ -112,7 +113,7 @@ test('startup lock timeout neither deletes data nor overwrites the active owner 
     await f.queue();
     const statusPath=join(stateDir(f.home),'status.json');
     await atomicJSON(statusPath,{state:'owner-active'});
-    lock=await tryLock(join(stateDir(f.home),'lifecycle.lock'),true);
+    lock=await tryLock(join(stateDir(f.home),'lifecycle.lock'),true,true);
     await assert.rejects(runGuard({home:f.home,startupTimeoutMs:30},()=>{}),/Another DSH host/);
     assert.deepEqual(await readJSON(statusPath),{state:'owner-active'});
     assert.equal((await listRequests(f.home)).length,1);
@@ -195,4 +196,126 @@ test('DSH processes using another home do not block cleanup', async () => {
     await runGuard({ home: f.home }, () => {});
     assert.equal((await listRequests(f.home)).length, 0);
   } finally { host.kill(); await done; await f.cleanup(); }
+});
+
+
+test('closing an old lock repeatedly cannot release its successor', async () => {
+  const f = await fixture(); let successor, contender;
+  try {
+    const path = join(f.home, 'sessions/project', f.ids.main, 'session.lock');
+    const previous = await tryLock(path);
+    assert.ok(previous);
+    await previous.close();
+    successor = await tryLock(path);
+    assert.ok(successor);
+    await previous.close();
+    await previous.close();
+    contender = await tryLock(path);
+    assert.equal(contender, undefined, 'an old close must not act on a reused native handle');
+  } finally { await contender?.close(); await successor?.close(); await f.cleanup(); }
+});
+
+test('mkdir rejects an unavailable Windows root without hanging', { skip: process.platform !== 'win32' }, async t => {
+  let root;
+  for (const drive of 'ZYXWVUTSRQPONMLKJIHGFED') {
+    const path = drive + ':\\';
+    if (!(await exists(path))) { root = path; break; }
+  }
+  if (!root) return t.skip('No unused drive letter');
+  const program = 'import assert from "node:assert/strict"; import { mkdir } from '
+    + JSON.stringify(new URL('../lib/platform/index.js', import.meta.url).href)
+    + '; await assert.rejects(mkdir(process.argv[1]), { code: "ENOENT" });';
+  const child = spawn(process.execPath, ['--input-type=module', '-e', program, root], { timeout: 3000, stdio: ['ignore', 'pipe', 'pipe'] });
+  let error = ''; child.stderr.on('data', chunk => { error += chunk; });
+  assert.equal((await finished(child)).code, 0, error || 'mkdir did not reject the missing root promptly');
+});
+
+
+for (const mode of ['relative', 'default', 'long-argv', 'blank', 'tilde', 'tilde-root', 'tilde-backslash', ...(process.platform === 'win32' ? ['namespaced', 'mixed-env', 'drive-relative', 'drive-relative-ns', 'drive-relative-lower'] : [])])
+test('host detection uses target process metadata: ' + mode, async () => {
+  const f = await fixture(); let host, done;
+  try {
+    const env = { ...process.env, DSH_HOME: f.home };
+    let expected = f.home;
+    if (mode === 'relative') env.DSH_HOME = 'home';
+    if (['default', 'blank', 'tilde', 'tilde-root', 'tilde-backslash'].includes(mode)) {
+      delete env.DSH_HOME;
+      env[homeVariable] = join(f.base, 'profile');
+      expected = join(env[homeVariable], '.dsh');
+      await fs.mkdir(expected, { recursive: true });
+    }
+    if (mode === 'blank') env.DSH_HOME = '   ';
+    if (mode === 'tilde') env.DSH_HOME = '~/.dsh';
+    if (mode === 'tilde-root') { env.DSH_HOME = '~'; expected = env[homeVariable]; }
+    if (mode === 'tilde-backslash') env.DSH_HOME = '~\\.dsh';
+    if (mode === 'mixed-env') { delete env.DSH_HOME; env.dsh_home = f.home; }
+    if (mode === 'namespaced') env.DSH_HOME = toNamespacedPath(f.home);
+    if (mode.startsWith('drive-relative')) {
+      const drive = f.base.slice(0, 2).toUpperCase();
+      const saved = join(f.base, 'saved-drive-cwd');
+      expected = join(saved, 'home'); await fs.mkdir(expected, { recursive: true });
+      for (const name of Object.keys(env)) if (name.toUpperCase() === '=' + drive) delete env[name];
+      env['=' + (mode === 'drive-relative-lower' ? drive.toLowerCase() : drive)] = saved;
+      env.DSH_HOME = drive + 'home';
+    }
+    const flags = mode === 'long-argv' ? ['--no-warnings', '--trace-warnings', '--enable-source-maps'] : [];
+    host = spawn(process.execPath, [...flags, '-e', 'console.log("READY");setInterval(()=>{},1000)', join(f.base, '@deepseek-ai/dsh/lib/bin.js')], {
+      env, cwd: mode === 'drive-relative-ns' ? toNamespacedPath(f.base) : f.base, stdio: ['ignore', 'pipe', 'pipe'],
+    });
+    done = finished(host); await ready(host);
+    assert.ok((await otherHosts(expected, new Set([process.pid]))).includes(host.pid));
+  } finally { host?.kill(); await done; await f.cleanup(); }
+});
+
+test('lifecycle ownership spans Windows path aliases', { skip: process.platform !== 'win32' }, async () => {
+  const f = await fixture(); let host, guard, hostDone, guardDone;
+  try {
+    host = spawn(process.execPath, ['-e', 'setInterval(()=>{},1000)'], { stdio: 'ignore' });
+    hostDone = finished(host);
+    guard = spawn(process.execPath, ['lib/guard.js', f.home, String(host.pid), await birth(host.pid)], { stdio: ['ignore', 'pipe', 'pipe'] });
+    guardDone = finished(guard); await ready(guard);
+    await assert.rejects(runGuard({ home: toNamespacedPath(f.home), startupTimeoutMs: 30 }, () => {}), /Another DSH host/);
+    host.kill(); await hostDone; host = undefined;
+    assert.equal((await guardDone).code, 0); guard = undefined;
+  } finally { host?.kill(); guard?.kill(); await hostDone; await guardDone; await f.cleanup(); }
+});
+
+
+test('marker removal failure still releases lifecycle ownership', async () => {
+  const f = await fixture(); const rm = fs.rm; let held;
+  try {
+    const started = await birth(process.pid);
+    const marker = join(stateDir(f.home), 'hosts', process.pid + '-' + started + '.json');
+    fs.rm = async (path, ...args) => {
+      if (path === marker) throw Object.assign(new Error('Injected marker removal failure'), { code: 'EIO' });
+      return rm(path, ...args);
+    };
+    syncBuiltinESMExports();
+    await assert.rejects(runGuard({ home: f.home, hostPid: process.pid, hostBirth: started }, line => {
+      if (line === 'CLEANING') throw new Error('Injected startup interruption');
+    }), /Injected marker removal failure/);
+    fs.rm = rm; syncBuiltinESMExports();
+    held = await tryLock(join(await fs.realpath(stateDir(f.home)), 'lifecycle.lock'), true, true);
+    assert.ok(held, 'failed marker cleanup must not leak the kernel lifecycle lock');
+  } finally { fs.rm = rm; syncBuiltinESMExports(); await held?.close(); await f.cleanup(); }
+});
+
+
+test('a stale marker disappearing after its read is already cleaned up', async () => {
+  const f = await fixture(); const readFile = fs.readFile;
+  try {
+    const stale = String(BigInt(await birth(process.pid)) + 1n);
+    const marker = join(stateDir(f.home), 'hosts', process.pid + '-' + stale + '.json');
+    await atomicJSON(marker, { pid: process.pid, birth: stale, phase: 'waiting' });
+    let removed = false;
+    fs.readFile = async (path, ...args) => {
+      const contents = await readFile(path, ...args);
+      if (path === marker) { await fs.rm(marker, { force: true }); removed = true; }
+      return contents;
+    };
+    syncBuiltinESMExports();
+    assert.equal((await waitingHosts(stateDir(f.home))).size, 0);
+    assert.equal(removed, true, 'model the other guard removing its own marker after this read');
+    assert.equal(await exists(marker), false);
+  } finally { fs.readFile = readFile; syncBuiltinESMExports(); await f.cleanup(); }
 });

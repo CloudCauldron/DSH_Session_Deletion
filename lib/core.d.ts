@@ -69,7 +69,7 @@ export interface GcHooks {
     snapshots?(): Promise<Map<string, LiveSnapshot>>;
     removeUploadMappings?(hashes: ReadonlySet<string>): Promise<void>;
 }
-export declare const SUPPORTED_DSH = "0.2.1-rc.5";
+export declare const SUPPORTED_DSH = "0.2.2-rc.2";
 export declare const STATE_NAME = "session-deletion";
 export declare const digest: (value: string) => string;
 export declare const stateDir: (home: string) => string;

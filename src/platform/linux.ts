@@ -1,11 +1,17 @@
 import * as fs from 'node:fs/promises';
 import { constants } from 'node:fs';
-import { homedir } from 'node:os';
 import { basename, dirname, join, resolve } from 'node:path';
 import koffi from 'koffi';
-import type { Lock } from './index.js';
+import type { Lock, ProcessInfo } from './index.js';
 
-const flock = koffi.load('libc.so.6').func('int flock(int fd, int operation)');
+export const homeVariable: string = 'HOME';
+
+// Use the already-loaded libc without assuming a glibc-specific filename.
+const flock = koffi.load(null).func('int flock(int fd, int operation)');
+
+export function resolvePath(cwd: string, value: string, _env: readonly string[]): string {
+  return resolve(cwd, value);
+}
 
 export function assertOwner(path: string, uid: number): void {
   if (uid !== process.getuid!()) throw new Error(`Not owned by this user: ${path}`);
@@ -41,27 +47,27 @@ export async function birth(pid: number): Promise<string | undefined> {
     return fields[0] === 'Z' ? undefined : fields[19];
   } catch (e) { if (['ENOENT', 'ESRCH'].includes((e as NodeJS.ErrnoException).code || '')) return; throw e; }
 }
-export async function otherHosts(home: string, excluded: Set<number>): Promise<number[]> {
-  const found: number[] = [];
+export async function processes(excluded: Set<number>, executables: readonly string[], matches: (args: readonly string[]) => boolean): Promise<ProcessInfo[]> {
+  const found: ProcessInfo[] = [];
   for (const pidText of await fs.readdir('/proc')) {
-    if (!/^\d+$/.test(pidText) || excluded.has(Number(pidText))) continue;
+    const pid = Number(pidText);
+    if (!/^\d+$/.test(pidText) || excluded.has(pid)) continue;
     try {
-      const p = `/proc/${pidText}`;
-      if ((await fs.stat(p)).uid !== process.getuid!() || !(await birth(Number(pidText)))) continue;
+      const p = '/proc/' + pidText;
+      if ((await fs.stat(p)).uid !== process.getuid!() || !(await birth(pid))) continue;
       const args = (await fs.readFile(join(p, 'cmdline'), 'utf8')).split('\0').filter(Boolean);
-      if (!args.length || !['dsh', 'node', 'nodejs'].includes(basename(args[0]))) continue;
-      if (!args.slice(0, 4).some(a => a.includes('@deepseek-ai/dsh/') || a.includes('deepseek-harness') || a.endsWith('/dsh'))) continue;
+      if (!args.length || !executables.includes(basename(args[0])) || !matches(args)) continue;
       const env = (await fs.readFile(join(p, 'environ'), 'utf8')).split('\0');
-      const configured = env.find(x => x.startsWith('DSH_HOME='))?.slice(9);
-      if (resolve(configured || join(homedir(), '.dsh')) === home) found.push(Number(pidText));
+      const cwd = await fs.readlink(join(p, 'cwd'));
+      found.push({ pid, cwd, env });
     } catch (e) {
-      if (['ENOENT', 'ESRCH'].includes((e as NodeJS.ErrnoException).code || '')) continue;
+      if (['ENOENT', 'ESRCH'].includes((e as NodeJS.ErrnoException).code || '') && !(await birth(pid))) continue;
       throw new Error('Cannot inspect a same-user process; cleanup deferred', { cause: e });
     }
   }
   return found;
 }
-export async function tryLock(path: string, create = false): Promise<Lock | undefined> {
+export async function tryLock(path: string, create = false, _machineWide = false): Promise<Lock | undefined> {
   const handle = await fs.open(path, constants.O_RDWR | constants.O_NOFOLLOW | (create ? constants.O_CREAT : 0), 0o600);
   if (flock(handle.fd, 2 /* LOCK_EX */ | 4 /* LOCK_NB */) === 0) return handle;
   const errno = koffi.errno();

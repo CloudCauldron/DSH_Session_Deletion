@@ -1,18 +1,16 @@
 /** Version-pinned online adapter. Public lifecycle handles own teardown; a small
- * set of guarded internal cache hooks closes rc.5's missing deletion seam. */
+ * set of guarded internal cache hooks closes the missing deletion seam. */
 import { AsyncLocalStorage } from 'node:async_hooks';
-import { createRequire } from 'node:module';
 import { pathToFileURL } from 'node:url';
 import { join, relative } from 'node:path';
 import { setTimeout as delay } from 'node:timers/promises';
 import { digest, enqueue, familyOf, listRequests, readJSON, stateDir, sweep, planSessionDeletion, collectGarbage,
   type LiveSnapshot, type Receipt, type SessionHeader, type SessionMap, type GcResult } from './core.js';
-import { tryLock, waitingHosts } from './guard.js';
-import { otherHosts, type Lock } from './platform/index.js';
-import type { Gate } from './gate.js';
-import { realpath } from 'node:fs/promises';
+import { tryLock, waitingHosts, otherHosts } from './guard.js';
+import type { Lock } from './platform/index.js';
+import { hostRequire, type Gate } from './gate.js';
 
-// These dynamic boundaries are intentionally confined to this rc.5 adapter.
+// These dynamic boundaries are confined to the reviewed DSH release.
 type Dynamic = Record<string, any>;
 type Method = (this: any, ...args: any[]) => any;
 interface Agent extends Dynamic { id: string; session: { id: string; header: SessionHeader }; status: string; whenIdle(): Promise<void> }
@@ -104,7 +102,7 @@ export class DeletionRuntime {
     if (names.has(key)) return;
     const original = object[key];
     if (typeof original !== 'function') {
-      if (required) throw new Error(`Unsupported rc.5 capability: ${key}`);
+      if (required) throw new Error(`Unsupported DSH capability: ${key}`);
       return;
     }
     const own = Object.getOwnPropertyDescriptor(object, key);
@@ -185,8 +183,12 @@ export class DeletionRuntime {
     }
     const uploads = this.unwrap(this.ctx.fileUploads);
     if (!(uploads.stagedFiles instanceof WeakMap)) throw new Error('Unsupported staged file ownership');
-    this.patch(uploads, 'commit', original => function (agent, ...args) {
-      return runtime.operation([agent.id], () => Reflect.apply(original, this, [agent, ...args]));
+    for (const method of ['upload', 'uploadStream', 'uploadImageStream']) this.patch(uploads, method, original => async function (owner, ...args) {
+      return runtime.operation([owner.id ?? owner.sessionId], () => Reflect.apply(original, this, [owner, ...args]));
+    });
+    this.patch(uploads, 'bindPrompt', original => function (agent, ...args) {
+      runtime.assertAllowed([agent.id]); runtime.barrier.assertSynchronousPublication();
+      return Reflect.apply(original, this, [agent, ...args]);
     });
     this.ctx.on('agent/created', ({ agent }: { agent: Agent }) => {
       // The creation callback may reject publication; the factory rolls it back.
@@ -291,7 +293,7 @@ export class DeletionRuntime {
         const staged = this.unwrap(this.ctx.fileUploads).stagedFiles.get(session);
         map.set(session.id, { header: observation.header, events: [
           ...observation.events,
-          ...[...(staged?.values() || [])].map((upload: Dynamic) => upload.file),
+          ...[...(staged?.values() || [])].map((upload: Dynamic) => upload.attachment),
         ] });
       }
       finally { observation[Symbol.dispose](); }
@@ -423,7 +425,7 @@ export class DeletionRuntime {
 export const name = 'session-deletion-runtime';
 export const inject = ['sessionDeletionGate', 'agents', 'sessions', 'sessionPersistence', 'sessionProjectionCache', 'sessionQuery', 'workspaceRegistry', 'attachments', 'fileUploads'];
 export async function apply(ctx: Dynamic): Promise<void> {
-  const require = createRequire(await realpath(process.argv[1]));
+  const require = await hostRequire();
   const cordis = await import(pathToFileURL(require.resolve('@deepseek-ai/cordis')).href);
   const provider = await import(pathToFileURL(require.resolve('@deepseek-ai/dsh-llm-deepseek')).href);
   const runtime = new DeletionRuntime(ctx, object => object?.[cordis.symbols.original] ?? object, provider.DeepSeekUploadIndex);

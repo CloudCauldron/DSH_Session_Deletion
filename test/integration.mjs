@@ -26,7 +26,8 @@ if(!(await exists(join(home,'profiles/web/package.json')))){
 const env={...process.env,DSH_HOME:home,DSH_TELEMETRY_DISABLED:'1',pnpm_config_store_dir:join(base,'pnpm-store')};
 // Native Windows cannot spawn a .cmd shim directly; an explicit CLI entry also
 // lets either platform test an isolated DSH installation.
-const spawnDsh=args=>spawn(process.env.DSH_CLI?process.execPath:'dsh',[...(process.env.DSH_CLI?[process.env.DSH_CLI]:[]),...args],{env,stdio:['ignore','pipe','pipe']});
+const dshArgs=process.env.DSH_CLI?[...process.execArgv.filter(arg=>arg==='--expose-internals'),process.env.DSH_CLI]:[];
+const spawnDsh=args=>spawn(dshArgs.length?process.execPath:'dsh',[...dshArgs,...args],{env,stdio:['ignore','pipe','pipe']});
 const install=spawnDsh(['plugin','--profile','web','add','file:'+repo]);
 let installText='';install.stdout.on('data',d=>{installText+=d});install.stderr.on('data',d=>{installText+=d});
 assert.equal(await new Promise(r=>install.on('exit',r)),0,'Install failed: '+installText);
@@ -85,7 +86,7 @@ async function stop(){
  if(process.platform!=='win32'&&!(await exists(path)))return;
  const deadline=Date.now()+15000;
  for(;;){
-  const lock=await tryLock(path);
+  const lock=await tryLock(path,true,true);
   if(lock){await lock.close();return;}
   if(Date.now()>=deadline)throw new Error('Recovery guard has not finished; retain the fixture until it exits');
   await delay(50);
@@ -173,6 +174,7 @@ try{
 
  await page.waitForTimeout(1200);
  await row.hover();await row.locator('xpath=ancestor::*[.//button][1]').locator('button').first().click();
+ await page.getByRole('menuitem',{name:'归档并删除'}).waitFor({timeout:5000});
  assert.equal(await page.getByRole('menuitem',{name:'归档并删除'}).count(),1);
  const busyPreview=await (await context.request.post(`http://127.0.0.1:${port}/session-deletion/api/preview`,{headers:{'X-DSH-Session-Deletion':'1'},data:{sessionId:id}})).json();
  const refused=await context.request.post(`http://127.0.0.1:${port}/session-deletion/api/delete`,{headers:{'X-DSH-Session-Deletion':'1'},data:{sessionId:id,token:busyPreview.token,confirmation:'DELETE_IDLE_SESSION'}});
@@ -199,7 +201,7 @@ try{
  await row.locator('xpath=ancestor::*[.//button][1]').locator('button').first().click();
  const deletionItem=page.getByRole('menuitem',{name:'归档并删除'});
  const menuItems=page.getByRole('menuitem');
- assert.equal(await menuItems.last().innerText(),'归档并删除','delete is the final native menu row');
+ assert.match(await menuItems.last().innerText(),/^归档会话/,'the native archive action follows the extension slot');
  assert.equal(await deletionItem.locator('svg').count(),1);
  assert.equal(await deletionItem.evaluate(el=>getComputedStyle(el).fontSize),await menuItems.first().evaluate(el=>getComputedStyle(el).fontSize));
  await deletionItem.hover();
@@ -342,6 +344,8 @@ try{
  await delay(1200);
  assert.equal(await recoveryToast.count(),0,'polling an unchanged state must not reopen an expired Toast');
  await page.evaluate(id=>localStorage.setItem('dsh.conversation.'+id,JSON.stringify({draft:'private fixture draft'})),id);
+ // Restart recovery uses a fresh page while retaining the same browser storage.
+ await Promise.all([otherPage.close(),independentPage.close(),page.goto('about:blank')]);
  await stop();
  const again=await start();await page.goto(again);await page.waitForTimeout(2000);
  assert.equal((await status()).pending.length,0);
@@ -358,5 +362,5 @@ try{
 }finally{
  await browser?.close();await stop();
  // Both the host and its recovery guard have finished before the fixture is removed.
- await fs.rm(base,{recursive:true,force:true});
+ await fs.rm(base,{recursive:true,force:true,maxRetries:10,retryDelay:100});
 }

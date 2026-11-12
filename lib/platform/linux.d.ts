@@ -1,9 +1,11 @@
-import type { Lock } from './index.js';
+import type { Lock, ProcessInfo } from './index.js';
+export declare const homeVariable: string;
+export declare function resolvePath(cwd: string, value: string, _env: readonly string[]): string;
 export declare function assertOwner(path: string, uid: number): void;
 export declare function mkdir(path: string): Promise<string | undefined>;
 export declare function secureDir(path: string, firstCreated?: string): Promise<void>;
 export declare function syncDir(path: string): Promise<void>;
 export declare function rename(from: string, to: string): Promise<void>;
 export declare function birth(pid: number): Promise<string | undefined>;
-export declare function otherHosts(home: string, excluded: Set<number>): Promise<number[]>;
-export declare function tryLock(path: string, create?: boolean): Promise<Lock | undefined>;
+export declare function processes(excluded: Set<number>, executables: readonly string[], matches: (args: readonly string[]) => boolean): Promise<ProcessInfo[]>;
+export declare function tryLock(path: string, create?: boolean, _machineWide?: boolean): Promise<Lock | undefined>;

@@ -1,10 +1,12 @@
 /** Detached Node.js supervisor for interrupted deletion recovery before startup or after exit. */
 import * as fs from 'node:fs/promises';
 import { join, resolve } from 'node:path';
+import { userInfo } from 'node:os';
 import { pathToFileURL } from 'node:url';
 import { setTimeout as delay } from 'node:timers/promises';
 import { atomicJSON, cleanAtomicTemps, exists, privateDir, readJSON, safePath, stateDir, sweep } from './core.js';
-import { birth, otherHosts, tryLock as lock, usesLockFiles, type Lock } from './platform/index.js';
+import { birth, processes, tryLock as lock, usesLockFiles, homeVariable, resolvePath, type Lock } from './platform/index.js';
+
 interface HostMarker { pid: number; birth: string; phase: 'waiting' | 'running' }
 export interface GuardOptions { home: string; hostPid?: number; hostBirth?: string; startupTimeoutMs?: number }
 
@@ -15,16 +17,36 @@ export async function waitingHosts(state: string): Promise<Set<number>> {
     const path = join(state, 'hosts', name);
     const host = await readJSON<HostMarker | undefined>(path);
     if (!host) continue; // A waiting startup may exit between readdir and read.
-    if (await birth(host.pid) !== host.birth) await fs.unlink(path);
+    if (await birth(host.pid) !== host.birth) await fs.rm(path, { force: true });
     else if (host.phase === 'waiting') waiting.add(host.pid);
   }
   return waiting;
 }
 
-/** Use the same kernel lock as DSH's session writer on each platform. */
-export async function tryLock(path: string, create = false): Promise<Lock | undefined> {
+export async function otherHosts(home: string, excluded: Set<number>): Promise<number[]> {
+  const actual = await fs.realpath(home);
+  const hosts = await processes(excluded, ['node', 'nodejs', 'dsh'], args => args.some(arg => {
+    const path = arg.replaceAll('\\', '/').toLowerCase();
+    return path.includes('@deepseek-ai/dsh/') || path.includes('deepseek-harness') || /\/dsh(?:\.exe)?$/.test(path);
+  }));
+  const found: number[] = [];
+  for (const host of hosts) {
+    const env = (name: string) => host.env.find(row => row.startsWith(name + '='))?.slice(name.length + 1);
+    const configured = env('DSH_HOME');
+    let target = configured?.trim() ? configured : join(env(homeVariable) || userInfo().homedir, '.dsh');
+    if (target === '~' || /^~[\\/]/.test(target)) target = join(env(homeVariable) || userInfo().homedir, target.slice(2));
+    try {
+      if (await fs.realpath(resolvePath(host.cwd, target, host.env)) === actual) found.push(host.pid);
+    } catch (e) { if ((e as NodeJS.ErrnoException).code !== 'ENOENT') throw e; }
+  }
+  return found;
+}
+
+/** Preserve DSH's writer protocol by default; machineWide additionally requires
+ * exclusion across Windows logon sessions for the recovery lifecycle. */
+export async function tryLock(path: string, create = false, machineWide = false): Promise<Lock | undefined> {
   await safePath(path, { missing: create || !usesLockFiles });
-  return lock(path, create);
+  return lock(path, create, machineWide);
 }
 async function offline(options: GuardOptions): Promise<void> {
   const state = stateDir(options.home);
@@ -60,6 +82,7 @@ export async function runGuard(options: GuardOptions, announce: (line: string) =
   await safePath(options.home, { directory: true });
   const state = stateDir(options.home);
   await privateDir(join(state, 'hosts'));
+  const lifecycle = join(await fs.realpath(state), 'lifecycle.lock');
   let marker: string | undefined; let lock: Lock | undefined; let ready = false;
   try {
     if (options.hostPid) {
@@ -68,7 +91,7 @@ export async function runGuard(options: GuardOptions, announce: (line: string) =
       await atomicJSON(marker, { pid: options.hostPid, birth: options.hostBirth, phase: 'waiting' });
     }
     const deadline = Date.now() + (options.startupTimeoutMs ?? 60000);
-    while (!(lock = await tryLock(join(state, 'lifecycle.lock'), true))) {
+    while (!(lock = await tryLock(lifecycle, true, true))) {
       if (Date.now() >= deadline) throw new Error('Another DSH host or cleanup owns this home; close it before starting DSH');
       if (options.hostPid && await birth(options.hostPid) !== options.hostBirth) return;
       await delay(200);
@@ -94,8 +117,8 @@ export async function runGuard(options: GuardOptions, announce: (line: string) =
     if (!ready) announce('ERROR ' + error);
     throw e;
   } finally {
-    if (marker) await fs.rm(marker, { force: true });
-    await lock?.close();
+    try { if (marker) await fs.rm(marker, { force: true }); }
+    finally { await lock?.close(); }
   }
 }
 

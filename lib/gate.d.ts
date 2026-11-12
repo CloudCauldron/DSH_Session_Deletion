@@ -7,4 +7,5 @@ export interface GateContext {
     provide(name: string, value: Gate): unknown;
 }
 export declare const name = "session-deletion-gate";
+export declare function hostRequire(): Promise<NodeJS.Require>;
 export declare function apply(ctx: GateContext): Promise<void>;

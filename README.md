@@ -4,7 +4,7 @@
 
 ## **1 - 项目简介**
 
-<span style="margin-left:2em;">​</span>DeepSeek Harness 当前版本（2026 年 11 月 3 日，0.2.1-rc.5）原生仅提供会话归档功能。随着日常使用与多智能体协作的增多，历史会话、子代理记录以及关联的文件和图片附件会长期滞留在本地磁盘中。`dsh-session-deletion` 弥补了这一空缺，为 DSH 带来了两项关键的维护能力：
+<span style="margin-left:2em;">​</span>DeepSeek Harness `0.2.2-rc.2` 原生仅提供会话归档功能。随着日常使用与多智能体协作的增多，历史会话、子代理记录以及关联的文件和图片附件会长期滞留在本地磁盘中。`dsh-session-deletion` 弥补了这一空缺，为 DSH 带来了两项关键的维护能力：
 
 - **会话删除**：移除目标会话及其子代理的日志与投影缓存，清理工作区中的会话关联及相关配置。
 - **残留附件与缓存清理 (GC)**：在系统空闲时智能扫描所有存活会话，精准识别并清理无引用的孤立附件与本地图片缓存，释放磁盘空间。
@@ -49,7 +49,7 @@
 
 ## **4 - 环境要求**
 
-- **DeepSeek Harness**：`0.2.1-rc.5`（默认 Web 配置）
+- **DeepSeek Harness**：`0.2.2-rc.2`（CLI 默认 Web 配置或 DSH Desktop）
 - **操作系统**：Linux、Windows
 - **Node.js**：`>= 24.9.0`
 
@@ -65,6 +65,8 @@
     ```
 
 2. 将插件注册到 DSH 的 Web profile：
+
+    DSH Desktop 使用内置 CLI，并将以下命令中的 `--profile web` 改为 `--profile desktop`。
 
     Linux（Bash）：
 

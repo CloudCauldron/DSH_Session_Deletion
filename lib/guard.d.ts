@@ -6,6 +6,8 @@ export interface GuardOptions {
     startupTimeoutMs?: number;
 }
 export declare function waitingHosts(state: string): Promise<Set<number>>;
-/** Use the same kernel lock as DSH's session writer on each platform. */
-export declare function tryLock(path: string, create?: boolean): Promise<Lock | undefined>;
+export declare function otherHosts(home: string, excluded: Set<number>): Promise<number[]>;
+/** Preserve DSH's writer protocol by default; machineWide additionally requires
+ * exclusion across Windows logon sessions for the recovery lifecycle. */
+export declare function tryLock(path: string, create?: boolean, machineWide?: boolean): Promise<Lock | undefined>;
 export declare function runGuard(options: GuardOptions, announce?: (line: string) => void): Promise<void>;

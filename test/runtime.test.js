@@ -6,7 +6,53 @@ import { join } from 'node:path';
 import{setTimeout as delay}from'node:timers/promises';
 import{PublicationBarrier,DeletionRuntime}from'../lib/runtime.js';
 import { fixture } from './fixtures.js';
-import { listRequests, stateDir } from '../lib/core.js';
+import { listRequests, stateDir, SUPPORTED_DSH } from '../lib/core.js';
+
+test('uploads wait for GC and prompt bindings remain synchronous', async () => {
+ const f = await fixture(); let dispose, finish, maintenance;
+ try {
+  let uploadsCalled = 0, retired = 0;
+  const binding = { [Symbol.dispose]() {} };
+  const uploads = { stagedFiles: new WeakMap(),
+   upload: async () => { uploadsCalled++; }, uploadStream: async () => { uploadsCalled++; }, uploadImageStream: async () => { uploadsCalled++; },
+   bindPrompt: () => binding, retirePrompt: () => { retired++; },
+  };
+  const attachments = { root: join(f.home, 'attachments/v1'), cacheRoot: join(f.home, 'cache/attachments') };
+  for (const name of ['saveImage', 'saveImages', 'saveFile', 'saveFileStream', 'readImageRequest']) attachments[name] = async () => {};
+  const runtime = new DeletionRuntime({
+   sessionDeletionGate: { home: f.home, version: SUPPORTED_DSH, healthy: () => true }, attachments, fileUploads: uploads,
+   workspaceRegistry: { pinSession() {}, archiveSession() {}, unarchiveSession() {} },
+   agents: { requireFactory() {}, setFactory() {} }, sessionProjectionCache: { table: new Map(), put() {} },
+   on() {}, inject() {}, effect(callback) { dispose = callback(); },
+  }, value => value, class {});
+  await runtime.initialize();
+  assert.equal(uploads.bindPrompt({ id: f.ids.main }, [], 'request'), binding);
+  maintenance = runtime.barrier.exclusive(() => new Promise(resolve => { finish = resolve; }));
+  const upload = uploads.uploadStream({ sessionId: f.ids.main });
+  await delay(20); assert.equal(uploadsCalled, 0);
+  assert.throws(() => uploads.bindPrompt({ id: f.ids.main }, [], 'request'), /正在清理/);
+  finish(); await maintenance; await upload; assert.equal(uploadsCalled, 1);
+  runtime.locked.add(f.ids.main);
+  await assert.rejects(uploads.uploadImageStream({ sessionId: f.ids.main }), /此会话/);
+  assert.throws(() => uploads.bindPrompt({ id: f.ids.main }, [], 'request'), /此会话/);
+  uploads.retirePrompt({ id: f.ids.main }, 'request');
+  assert.equal(retired, 1, 'retirement only removes references and must remain available during disposal');
+ } finally { finish?.(); await maintenance; dispose?.(); await f.cleanup(); }
+});
+
+test('GC snapshots retain staged upload references', async () => {
+ const session = { id: 'session', header: { type: 'session', id: 'session', version: 4, createdAt: 1 } };
+ const attachment = { attachmentId: 'sha256:' + 'a'.repeat(64) };
+ const stagedFiles = new WeakMap([[session, new Map([['receipt', { attachment }]])]]);
+ let disposed = false;
+ const runtime = new DeletionRuntime({
+  sessions: { list: () => [session] }, fileUploads: { stagedFiles },
+  sessionQuery: { observeSession: async () => ({ header: session.header, events: [], [Symbol.dispose]() { disposed = true; } }) },
+ }, value => value, class {});
+ const snapshot = (await runtime.snapshots()).get(session.id);
+ assert.deepEqual(snapshot.events, [attachment]);
+ assert.equal(disposed, true);
+});
 
 test('publication barrier drains existing work, permits reentrant calls and queues new work',async()=>{
  const gate=new PublicationBarrier();const order=[];

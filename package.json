@@ -1,6 +1,6 @@
 {
   "name": "dsh-session-deletion",
-  "version": "0.3.6",
+  "version": "0.5.0",
   "private": true,
   "type": "module",
   "description": "Immediate private session deletion and separately guarded orphan attachment garbage collection for DSH.",
@@ -35,7 +35,7 @@
     "test:integration": "pnpm build && node test/integration.mjs"
   },
   "devDependencies": {
-    "@deepseek-ai/dsh-host-webserver": "0.2.1-rc.5",
+    "@deepseek-ai/dsh-host-webserver": "0.2.2-rc.2",
     "@types/node": "^26.6.6",
     "@types/react": "^19.3.0",
     "playwright-core": "^1.64.1",
