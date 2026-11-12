@@ -51,6 +51,7 @@ async function refreshClient(localStorage, sessionStorage, deletedId, verify = a
   vm.runInNewContext(await readFile(new URL('../lib/client.js', import.meta.url), 'utf8'), sandbox);
   plugin.apply({
     slots: { inject() {} },
+    contextMenus: { register() { return () => {}; } },
     sessions: { list: {
       getSnapshot: () => ({ byId: { [deletedId]: { id: deletedId, running: false, retainedBy: { mainView: 1 } } } }),
       subscribe: () => () => {},
@@ -125,7 +126,7 @@ test('receipt sync fetches only on revision changes, retries failures and keeps 
 test('deletion checks show the selected copy and refuse confirmation if the session starts running', async () => {
   const id = 'session-copy-test';
   const rows = { [id]: { id, running: false, retainedBy: { mainView: 1 } } };
-  const components = new Map(); let plugin, cleanup, resolvePreview;
+  const components = new Map(); let plugin, cleanup, resolvePreview, menu;
   const preview = new Promise(resolve => { resolvePreview = resolve; });
   const ui = { Modal: 'NativeModal', MenuItemButton: 'NativeMenu', Button: 'NativeButton', IconTrashOutlineRegular: 'NativeIcon' };
   const react = {
@@ -147,6 +148,7 @@ test('deletion checks show the selected copy and refuse confirmation if the sess
   vm.runInNewContext(await readFile(new URL('../lib/client.js', import.meta.url), 'utf8'), sandbox);
   plugin.apply({
     slots: { inject(_, callback) { callback(); }, register(options, component) { components.set(options.id, component); } },
+    contextMenus: { register(contribution) { menu = contribution; return () => {}; } },
     sessions: { list: { getSnapshot: () => ({ byId: rows }), subscribe: () => () => {} } },
     uiWorkspace: { startSession() {} }, effect(callback) { cleanup = callback(); },
   });
@@ -157,7 +159,7 @@ test('deletion checks show the selected copy and refuse confirmation if the sess
   }
   try {
     await new Promise(setImmediate);
-    components.get('session-deletion.action')({ sessionId: id, displayTitle: 'Test', useMenuOpenState: () => [true, () => {}] }).props.onSelect();
+    menu.resolve({ sessionId: id, displayTitle: 'Test' })[0].run();
     const render = () => nodes(components.get('session-deletion.dialog')());
     assert.ok(render().includes('正在检查会话状态…'));
     resolvePreview({ count: 1, token: 'fixture', archived: false });
@@ -165,7 +167,7 @@ test('deletion checks show the selected copy and refuse confirmation if the sess
     rows[id].running = true;
     const current = render();
     assert.ok(current.includes('会话正在运行，暂时无法删除'));
-    const confirm = current.find(node => node?.type === ui.Button && nodes(node.props.children).includes('确认归档并删除'));
+    const confirm = current.find(node => node?.type === ui.Button && nodes(node.props.children).includes('确认删除'));
     assert.equal(confirm.props.disabled, true);
   } finally { cleanup?.(); }
 });

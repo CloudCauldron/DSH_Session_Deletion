@@ -1,6 +1,6 @@
 {
   "name": "dsh-session-deletion",
-  "version": "0.5.0",
+  "version": "0.5.1",
   "private": true,
   "type": "module",
   "description": "Immediate private session deletion and separately guarded orphan attachment garbage collection for DSH.",
@@ -24,6 +24,7 @@
       "inject": [
         "@deepseek-ai/dsh-client-ui-workspace",
         "@deepseek-ai/dsh-client-ui-renderer",
+        "@deepseek-ai/dsh-client-ui-context-menu",
         "@deepseek-ai/dsh-client-ui-sidebar"
       ]
     }

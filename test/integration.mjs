@@ -155,13 +155,13 @@ try{
  assert.equal((await controls('open',{id:family.id})).status(),200);
  const familyRow=page.getByText('测试含子代理的会话',{exact:true}).first();
  await familyRow.hover();await familyRow.locator('xpath=ancestor::*[.//button][1]').locator('button').first().click();
- await page.getByRole('menuitem',{name:'归档并删除',exact:true}).click();
+ await page.getByRole('menuitem',{name:'删除会话',exact:true}).click();
  const familyDialog=page.getByRole('dialog',{name:'归档并删除此会话？',exact:true});
  await familyDialog.getByText('该会话将被彻底移除（包含与之关联的 2 个子代理），已保存的文件与附件不受影响；如需释放存储空间，可前往左侧「更多」→「清理残留附件与缓存」。',{exact:true}).waitFor();
  assert.equal(await familyDialog.getByRole('checkbox').count(),0);
  assert.equal(await familyDialog.locator('strong').innerText(),'测试含子代理的会话');
  assert.equal(await familyDialog.locator('code').innerText(),family.id);
- assert.equal(await familyDialog.getByRole('button',{name:'确认归档并删除',exact:true}).isEnabled(),true);
+ assert.equal(await familyDialog.getByRole('button',{name:'确认删除',exact:true}).isEnabled(),true);
  await controls('archive-probe',{id:family.id});
  const archivedDialog=page.getByRole('dialog',{name:'删除此会话？',exact:true});
  await archivedDialog.getByRole('button',{name:'确认删除',exact:true}).waitFor();
@@ -174,8 +174,8 @@ try{
 
  await page.waitForTimeout(1200);
  await row.hover();await row.locator('xpath=ancestor::*[.//button][1]').locator('button').first().click();
- await page.getByRole('menuitem',{name:'归档并删除'}).waitFor({timeout:5000});
- assert.equal(await page.getByRole('menuitem',{name:'归档并删除'}).count(),1);
+ await page.getByRole('menuitem',{name:'删除会话',exact:true}).waitFor({timeout:5000});
+ assert.equal(await page.getByRole('menuitem',{name:'删除会话',exact:true}).count(),1);
  const busyPreview=await (await context.request.post(`http://127.0.0.1:${port}/session-deletion/api/preview`,{headers:{'X-DSH-Session-Deletion':'1'},data:{sessionId:id}})).json();
  const refused=await context.request.post(`http://127.0.0.1:${port}/session-deletion/api/delete`,{headers:{'X-DSH-Session-Deletion':'1'},data:{sessionId:id,token:busyPreview.token,confirmation:'DELETE_IDLE_SESSION'}});
  assert.equal(refused.status(),409,'backend must reject busy deletion even if UI is bypassed');
@@ -199,9 +199,10 @@ try{
  await controls('hold-delete',{id});
  await row.hover();
  await row.locator('xpath=ancestor::*[.//button][1]').locator('button').first().click();
- const deletionItem=page.getByRole('menuitem',{name:'归档并删除'});
+ const deletionItem=page.getByRole('menuitem',{name:'删除会话',exact:true});
  const menuItems=page.getByRole('menuitem');
- assert.match(await menuItems.last().innerText(),/^归档会话/,'the native archive action follows the extension slot');
+ assert.match(await menuItems.nth(-2).innerText(),/^归档会话/);
+ assert.equal(await menuItems.last().innerText(),'删除会话','deletion follows the native archive action');
  assert.equal(await deletionItem.locator('svg').count(),1);
  assert.equal(await deletionItem.evaluate(el=>getComputedStyle(el).fontSize),await menuItems.first().evaluate(el=>getComputedStyle(el).fontSize));
  await deletionItem.hover();
@@ -214,7 +215,7 @@ try{
  assert.equal((await deletionDialog.innerText()).includes('子代理'),false,'no zero-subagent boilerplate');
  const deletionAppearance=await dialogAppearance(deletionDialog);
  assert.deepEqual(deletionAppearance,nativeAppearance,'private deletion uses the actual native modal and button styles');
- await page.getByRole('button',{name:'确认归档并删除',exact:true}).click();
+ await page.getByRole('button',{name:'确认删除',exact:true}).click();
  for(let i=0;i<100;i++){if((await (await controls('held')).json()).held)break;await delay(50)}
  assert.equal((await (await controls('held')).json()).held,true,'test must pause after the backend locks the target');
  const deleteToast=page.getByRole('alert').filter({hasText:'正在删除会话…'});
@@ -268,7 +269,8 @@ try{
  await page.getByRole('dialog',{name:'清理残留附件与缓存？',exact:true}).waitFor();
  await page.getByText('将移除无关联的本地附件及临时图片缓存以释放空间，操作期间请确保其他会话处于空闲状态。',{exact:true}).waitFor();
  const gcAppearance=await dialogAppearance(page.getByRole('dialog',{name:'清理残留附件与缓存？',exact:true}));
- assert.deepEqual(gcAppearance,nativeAppearance,'GC uses the same modal typography, spacing and buttons as native stop-and-archive');
+ assert.deepEqual(gcAppearance,{...nativeAppearance,confirm:{...nativeAppearance.confirm,color:nativeAppearance.cancel.color}},
+  'GC uses native modal and button styles with the default confirmation text color');
  await page.getByRole('dialog',{name:'清理残留附件与缓存？',exact:true}).getByRole('button',{name:'取消',exact:true}).click();
  assert.equal((await status()).gc,null,'cancel does not execute GC');
  assert.equal(await page.getByRole('alert').filter({hasText:/共清理/}).count(),0);

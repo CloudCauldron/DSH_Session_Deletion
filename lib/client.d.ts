@@ -11,6 +11,32 @@ interface DeletionClientContext {
             inject?: () => object;
         }, component: unknown): unknown;
     };
+    contextMenus: {
+        register(options: {
+            id: string;
+            target: 'session';
+            order: number;
+            observe(): {
+                getSnapshot(): unknown;
+                subscribe(callback: () => void): () => void;
+            }[];
+            resolve(target: {
+                sessionId: string;
+                displayTitle: string;
+            }): {
+                id: string;
+                label: string;
+                disabled: boolean;
+                danger: boolean;
+                separatorBefore: boolean;
+                afterContent: boolean;
+                icon: {
+                    key: string;
+                };
+                run(): void;
+            }[];
+        }): () => void;
+    };
     effect(callback: () => () => void, label: string): unknown;
     sessions: {
         list: {
