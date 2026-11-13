@@ -107,7 +107,10 @@ dsh plugin --profile web remove dsh-session-deletion
 
 ## **6 - 开发与测试**
 
+ESLint 对源码和 JavaScript 测试运行正确性检查，并对 TypeScript 源码启用类型感知的 Promise 检查；复用 `.gitignore`，另行排除已提交的生成目录 `lib/`，不引入格式化规则。构建仍通过 `@typescript/native` 别名使用 TypeScript 7，`typescript` 别名仅为 ESLint 提供 TypeScript 6 兼容 API，参照 [Microsoft 的并行使用说明](https://devblogs.microsoft.com/typescript/announcing-typescript-7-0/#running-side-by-side-with-typescript-60)。
+
 ```bash
+pnpm lint              # ESLint 正确性与异步检查
 pnpm check             # TypeScript 类型检查
 pnpm test              # 运行单元测试
 pnpm test:integration  # 运行集成测试

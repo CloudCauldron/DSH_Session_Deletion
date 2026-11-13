@@ -2,7 +2,7 @@ import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import fs from 'node:fs/promises';
 import { syncBuiltinESMExports } from 'node:module';
-import { join, resolve, toNamespacedPath } from 'node:path';
+import { join, toNamespacedPath } from 'node:path';
 import { spawn } from 'node:child_process';
 import { once } from 'node:events';
 import { setTimeout as delay } from 'node:timers/promises';

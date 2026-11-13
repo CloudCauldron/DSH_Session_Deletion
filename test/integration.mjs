@@ -101,7 +101,8 @@ try{
  const unauthorizedSize=await fetch(`http://127.0.0.1:${port}/session-deletion/api/gc-size`);
  assert.ok([401,403].includes(unauthorizedSize.status));
  browser=await chromium.launch({executablePath:process.env.CHROME_PATH||(process.platform==='win32'?join(process.env.PROGRAMFILES,'Google/Chrome/Application/chrome.exe'):'/opt/google/chrome/chrome'),headless:true,args:['--no-sandbox']});
- const context=await browser.newContext({viewport:{width:1440,height:1000}});
+ // Native UI selectors below use Simplified Chinese, independent of the host locale.
+ const context=await browser.newContext({locale:'zh-CN',viewport:{width:1440,height:1000}});
  const page=await context.newPage();page.on('pageerror',e=>errors.push(e.message));
  let receiptRequests=0;page.on('request',request=>{if(new URL(request.url()).pathname==='/session-deletion/api/receipt')receiptRequests++});
  await page.goto(url);await page.waitForTimeout(2000);

@@ -14,6 +14,7 @@ interface DeletionClientContext {
   sessions: { list: { getSnapshot(): { byId: Record<string, { id: string; running: boolean; retainedBy: Record<string, number> }> }; subscribe(callback: () => void): () => void } };
   uiWorkspace: { startSession(): void };
 }
+// eslint-disable-next-line @typescript-eslint/no-unused-vars -- Augments the host's global Window without turning this browser entry into a module.
 interface Window {
   __ModuleLoader__: { load(module: { id: string; factory(require: (name: string) => unknown): unknown }): void };
 }
