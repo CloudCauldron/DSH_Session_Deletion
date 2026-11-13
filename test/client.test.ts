@@ -5,7 +5,7 @@ import { createHash } from 'node:crypto';
 import vm from 'node:vm';
 
 type ClientFixture = Partial<Omit<DeletionClientContext, 'slots'>> & { slots: Partial<DeletionClientContext['slots']> };
-interface ClientPlugin { apply(ctx: ClientFixture): void }
+interface ClientPlugin { apply(ctx: ClientFixture): Promise<void> }
 interface ClientModule { factory(require: (name: string) => unknown): ClientPlugin }
 type MenuContribution = Parameters<DeletionClientContext['contextMenus']['register']>[0];
 type MockNode = MockElement | string | number | boolean | null | undefined | MockNode[];
@@ -27,6 +27,28 @@ interface ReceiptControl {
   readonly receiptRequests: number;
   update(value: DeletionReceipt): void;
   failNextReceipt(): void;
+}
+
+const dictionaries = Object.fromEntries(await Promise.all(['zh', 'en'].map(async locale => {
+  const data = JSON.parse(await readFile(new URL(`../locale/${locale}.json`, import.meta.url), 'utf8')) as { messages?: Record<string, string> };
+  return [locale, data.messages ?? {}];
+}))) as Record<string, Record<string, string>>;
+
+function localeFixture() {
+  const registered = new Map<string, Record<string, string>>();
+  const listeners = new Set<() => void>();
+  let snapshot = { active: 'zh', revision: 0 };
+  return {
+    register(_namespace: string, locale: string, dictionary: Record<string, string>) {
+      registered.set(locale, dictionary); return () => { registered.delete(locale); };
+    },
+    bind() { return (key: string, params?: Record<string, unknown>) =>
+      (registered.get(snapshot.active)?.[key] ?? registered.get('en')?.[key] ?? key)
+        .replace(/\{(\w+)\}/g, (match, name: string) => String(params?.[name] ?? match)); },
+    getSnapshot: () => snapshot,
+    subscribe(listener: () => void) { listeners.add(listener); return () => { listeners.delete(listener); }; },
+    setLocale(active: string) { snapshot = { active, revision: snapshot.revision + 1 }; for (const listener of listeners) listener(); },
+  };
 }
 
 // Run the shipped browser entry point. No helper is extracted or reimplemented:
@@ -66,6 +88,7 @@ async function refreshClient(localStorage: ReturnType<typeof browserStorage>, se
     MutationObserver: class { observe() {} disconnect() {} },
     setInterval(callback: () => void) { poll = callback; return 1; }, clearInterval() {},
     fetch: async (url: string) => {
+      if (url.endsWith('/locales')) return { ok: true, json: async () => ({ dictionaries }) };
       if (url.endsWith('/receipt')) {
         receiptRequests++;
         if (failReceipt) { failReceipt = false; return { ok: false, status: 503, json: async () => ({ error: 'retry' }) }; }
@@ -76,7 +99,8 @@ async function refreshClient(localStorage: ReturnType<typeof browserStorage>, se
     },
   };
   vm.runInNewContext(await readFile(new URL('../lib/client.js', import.meta.url), 'utf8'), sandbox);
-  plugin.apply({
+  await plugin.apply({
+    locale: localeFixture(), fiber: { uid: 1 },
     slots: { inject() {} },
     contextMenus: { register() { return () => {}; } },
     sessions: { list: {
@@ -150,12 +174,16 @@ void test('receipt sync fetches only on revision changes, retries failures and k
   });
 });
 
-void test('deletion checks show the selected copy and refuse confirmation if the session starts running', async () => {
+void test('deletion copy and API errors follow locale changes, retain Chinese fallback and reject running sessions', async () => {
   const id = 'session-copy-test';
   const rows = { [id]: { id, running: false, retainedBy: { mainView: 1 } } };
   const components = new Map<string, () => MockNode>();
   let plugin!: ClientPlugin, menu!: MenuContribution, resolvePreview!: (value: DeletionPreview) => void;
   let cleanup: (() => void) | undefined;
+  let previewFailed = false;
+  let previewThrown = false;
+  const locale = localeFixture();
+  const translated = { ...dictionaries, en: { 'delete.checking': '[en] checking', 'delete.menu': '[en] delete', 'error.guardUnavailable': '[en] guard unavailable' } };
   const preview = new Promise<DeletionPreview>(resolve => { resolvePreview = resolve; });
   const ui = { Modal: 'NativeModal', MenuItemButton: 'NativeMenu', Button: 'NativeButton', IconTrashOutlineRegular: 'NativeIcon' };
   const react = {
@@ -170,12 +198,18 @@ void test('deletion checks show the selected copy and refuse confirmation if the
     window: { __ModuleLoader__: { load(definition: ClientModule) { plugin = definition.factory(name => name === 'react' ? react : ui); } }, addEventListener() {}, removeEventListener() {} },
     document: { body: {}, head: { append() {} }, querySelectorAll: () => [], createElement: () => ({ remove() {} }) },
     MutationObserver: class { observe() {} disconnect() {} }, setInterval() { return 1; }, clearInterval() {},
-    fetch: async (url: string) => ({ ok: true, json: () => url.endsWith('/preview') ? preview : Promise.resolve(url.endsWith('/receipt')
-      ? { revision: 'empty', deletedIdHashes: [] }
-      : { pending: [], locked: [], archived: [], guardHealthy: true, receipt: { revision: 'empty', count: 0 } }) }),
+    fetch: async (url: string) => {
+      if (url.endsWith('/locales')) return { ok: true, json: async () => ({ dictionaries: translated }) };
+      if (url.endsWith('/preview') && previewThrown) throw 0;
+      if (url.endsWith('/preview')) return { ok: !previewFailed, json: () => previewFailed
+        ? Promise.resolve({ error: 'Host fallback', messages: [{ key: 'error.guardUnavailable' }] }) : preview };
+      return { ok: true, json: async () => url.endsWith('/receipt') ? { revision: 'empty', deletedIdHashes: [] }
+        : { pending: [], locked: [], archived: [], guardHealthy: true, receipt: { revision: 'empty', count: 0 } } };
+    },
   };
   vm.runInNewContext(await readFile(new URL('../lib/client.js', import.meta.url), 'utf8'), sandbox);
-  plugin.apply({
+  await plugin.apply({
+    locale, fiber: { uid: 1 },
     slots: { inject(_, callback) { callback(); }, register(options, component) {
       assert.equal(typeof component, 'function'); components.set(options.id, component as () => MockNode);
     } },
@@ -188,6 +222,10 @@ void test('deletion checks show the selected copy and refuse confirmation if the
     menu.resolve({ sessionId: id, displayTitle: 'Test' })[0].run();
     const render = () => { const component = components.get('session-deletion.dialog'); assert(component); return nodes(component()); };
     assert.ok(render().includes('正在检查会话状态…'));
+    locale.setLocale('en');
+    assert.ok(render().includes('[en] checking'));
+    assert.equal(menu.resolve({ sessionId: id, displayTitle: 'Test' })[0].label, '[en] delete');
+    assert.ok(menu.observe().includes(locale));
     resolvePreview({ count: 1, token: 'fixture', archived: false });
     await new Promise(setImmediate);
     rows[id].running = true;
@@ -196,6 +234,16 @@ void test('deletion checks show the selected copy and refuse confirmation if the
     const confirm = current.find((node): node is MockElement => isElement(node) && node.type === ui.Button && nodes(node.props.children).includes('确认删除'));
     assert(confirm);
     assert.equal(confirm.props.disabled, true);
+    rows[id].running = false; previewFailed = true;
+    menu.resolve({ sessionId: id, displayTitle: 'Test' })[0].run();
+    await new Promise(setImmediate);
+    assert.ok(render().includes('[en] guard unavailable'));
+    locale.setLocale('zh');
+    assert.ok(render().includes('恢复监测不可用，请重启 DSH。'));
+    previewThrown = true;
+    menu.resolve({ sessionId: id, displayTitle: 'Test' })[0].run();
+    await new Promise(setImmediate);
+    assert.ok(render().includes('0'), 'non-Error failures remain visible without localization metadata');
   } finally { cleanup?.(); }
 });
 
@@ -213,16 +261,18 @@ void test('GC menu shows a native spinner, formats binary units and reports fail
   vm.runInNewContext(await readFile(new URL('../lib/client.js', import.meta.url), 'utf8'), {
     window: { __ModuleLoader__: { load(definition: ClientModule) { plugin = definition.factory(name => name === 'react' ? react : ui); } } },
     fetch: async (url: string) => {
+      if (url.endsWith('/locales')) return { ok: true, json: async () => ({ dictionaries }) };
       assert.equal(url, '/session-deletion/api/gc-size'); requests++;
       if (fail === 'network') throw new Error('Disconnected');
       return { ok: !fail, json: async () => fail ? { error: 'Cannot scan' } : { bytes: response } };
     },
   });
-  plugin.apply({
+  await plugin.apply({
+    locale: localeFixture(), fiber: { uid: 1 },
     slots: { inject(_, callback) { callback(); }, register(options, component) { if (options.id === 'session-deletion.gc') {
       assert.equal(typeof component, 'function'); menu = component as typeof menu;
     } } },
-    effect() {},
+    effect(callback, label) { if (label.startsWith('session-deletion locale')) callback(); },
   });
   const render = () => element(element(menu({ onDismiss() {} })).props.children);
   const text = (value: MockNode): string => typeof value === 'string' ? value : Array.isArray(value) ? value.map(text).join('') : isElement(value) ? text(value.props.children) : '';

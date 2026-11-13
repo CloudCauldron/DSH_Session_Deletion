@@ -75,7 +75,7 @@ async function start(){
  host.stdout.on('data',d=>{bootLog+=d});host.stderr.on('data',d=>{bootLog+=d});
  for(let i=0;i<200;i++){
   const match=bootLog.match(/http:\/\/127\.0\.0\.1:(\d+)\/[^\s]*/);
-  if(match){port=match[1];return match[0];}
+  if(match){assert.doesNotMatch(bootLog.replace(/token=[^\s]+/g,'token=[redacted]'),/entries did not activate/);port=match[1];return match[0];}
   if(host.exitCode!==null)throw new Error('Boot failed: '+bootLog.replace(/token=[^\s]+/g,'token=[redacted]'));
   await delay(100);
  }
@@ -102,6 +102,8 @@ try{
  assert.ok([401,403].includes(unauthorizedReceipt.status));
  const unauthorizedSize=await fetch(`http://127.0.0.1:${port}/session-deletion/api/gc-size`);
  assert.ok([401,403].includes(unauthorizedSize.status));
+ const unauthorizedLocales=await fetch(`http://127.0.0.1:${port}/session-deletion/api/locales`);
+ assert.ok([401,403].includes(unauthorizedLocales.status));
  browser=await chromium.launch({executablePath:process.env.CHROME_PATH||(process.platform==='win32'?join(process.env.PROGRAMFILES!,'Google/Chrome/Application/chrome.exe'):'/opt/google/chrome/chrome'),headless:true,args:['--no-sandbox']});
  // Native UI selectors below use Simplified Chinese, independent of the host locale.
  const context=await browser.newContext({locale:'zh-CN',viewport:{width:1440,height:1000}});
@@ -295,6 +297,7 @@ try{
  await page.getByRole('menuitem',{name:'清理残留附件与缓存（无法计算体积）',exact:true}).click();
  await page.getByRole('button',{name:'确认清理',exact:true}).click();
  await page.getByRole('dialog',{name:'清理残留附件与缓存？',exact:true}).getByRole('alert').waitFor();
+ assert.match(await page.getByRole('dialog',{name:'清理残留附件与缓存？',exact:true}).getByRole('alert').innerText(),/仍有|尚未结束/);
  await page.waitForFunction(()=>[...document.querySelectorAll<HTMLButtonElement>('.dsh-session-deletion-modal button')].every(button=>!button.disabled));
  assert.equal(await exists(join(home,'attachments/v1/objects',exclusive.slice(0,2),exclusive)),true);
  await controls('clear-input',{id:draftOwner.id});await controls('release-maintenance',{id:draftOwner.id});
@@ -371,8 +374,44 @@ try{
  assert.equal(await exists(interrupted.path),false,'the pending deletion recovers on restart');
  assert.equal(await page.evaluate(id=>localStorage.getItem('dsh.conversation.'+id),id),null);
  assert.equal(await page.getByText('Offline deletion integration fixture',{exact:true}).count(),0);
+ // The native inventory lists one external entry and resolves its shipped locale metadata.
+ await page.getByRole('button',{name:'账号菜单',exact:true}).click();
+ await page.getByRole('menuitem',{name:'设置',exact:true}).click();
+ const settings=page.locator('[data-shortcut-modal="settings"]');
+ await settings.getByRole('button',{name:'内置插件',exact:true}).click();
+ await settings.getByRole('searchbox',{name:'搜索插件',exact:true}).fill('dsh-session-deletion');
+ const pluginCard=settings.locator('[data-plugin-module^="dsh-session-deletion"]');
+ await pluginCard.getByText('DSH 会话删除',{exact:true}).waitFor();
+ assert.equal(await pluginCard.count(),1,'internal gate/runtime fibers must not become Loader inventory entries');
+ assert.equal(await pluginCard.getAttribute('data-plugin-module'),'dsh-session-deletion');
+ assert.equal(await pluginCard.getAttribute('data-failed'),null);
+ await settings.getByRole('button',{name:'通用设置',exact:true}).click();
+ await settings.getByRole('button',{name:'中文',exact:true}).click();
+ await page.getByRole('menuitem',{name:'English',exact:true}).click();
+ await settings.getByRole('button',{name:'Built-in plugins',exact:true}).click();
+ await settings.getByRole('searchbox',{name:'Search plugins',exact:true}).fill('dsh-session-deletion');
+ await pluginCard.getByText('DSH Session Deletion',{exact:true}).waitFor();
+ assert.equal(await pluginCard.count(),1);
+ assert.equal(await pluginCard.getByText('DSH 会话删除',{exact:true}).count(),0);
+ // The same plugin renders its English menu, dialog and buttons through the native locale service.
+ await settings.getByRole('button',{name:'Close',exact:true}).click();
+ await page.locator('nav').getByRole('button',{name:'More',exact:true}).click();
+ await page.getByRole('menuitem',{name:/^Clean Up Orphaned Attachments and Cache \(/}).click();
+ const englishGc=page.getByRole('dialog',{name:'Clean up orphaned attachments and cache?',exact:true});
+ await englishGc.getByText('Unlinked local attachments and temporary image cache will be removed to free up space. Make sure all other sessions are idle during cleanup.',{exact:true}).waitFor();
+ assert.equal(await englishGc.getByRole('button',{name:'Confirm Cleanup',exact:true}).count(),1);
+ assert.equal(await englishGc.getByRole('button',{name:'Close',exact:true}).count(),1);
+ await englishGc.getByRole('button',{name:'Cancel',exact:true}).click();
+ await page.getByRole('button',{name:'Account menu',exact:true}).click();
+ await page.getByRole('menuitem',{name:'Settings',exact:true}).click();
+ await settings.getByRole('button',{name:'General',exact:true}).click();
+ await settings.getByRole('button',{name:'English',exact:true}).click();
+ await page.getByRole('menuitem',{name:'中文',exact:true}).click();
+ await settings.getByRole('button',{name:'内置插件',exact:true}).click();
+ await settings.getByRole('searchbox',{name:'搜索插件',exact:true}).fill('dsh-session-deletion');
+ await pluginCard.getByText('DSH 会话删除',{exact:true}).waitFor();
  assert.deepEqual(errors,[]);
- console.log('INTEGRATION PASS: native menu and GC entry, private deletion during other maintenance/uploads, target-only locking, explicit idle GC, staged/shared references, GC publication barrier, recovery and restart');
+ console.log('INTEGRATION PASS: native menu and GC entry, private deletion during other maintenance/uploads, target-only locking, explicit idle GC, staged/shared references, GC publication barrier, recovery and restart, single plugin entry with live zh/en names and English UI');
 }catch(e){
  if(browser){const pages=browser.contexts().flatMap(c=>c.pages());if(pages[0]){await fs.mkdir('test-results',{recursive:true});await pages[0].screenshot({path:'test-results/failure.png'});console.error((await pages[0].locator('body').innerText()).slice(0,6000));}}
  console.error('Browser errors:',errors);

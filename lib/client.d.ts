@@ -1,7 +1,20 @@
 /** Browser bundle in DSH's module-loader format; React comes from the host. */
 type ReactAPI = typeof import('react');
 type ElementNode = import('react').ReactNode;
+type ClientMessage = import('./locale.js').LocalizedMessage;
 interface DeletionClientContext {
+    fiber: {
+        uid: number | null;
+    };
+    locale: {
+        register(namespace: string, locale: string, dictionary: Record<string, string>): () => void;
+        bind(namespace: string): (key: string, params?: Record<string, unknown>) => string;
+        getSnapshot(): {
+            active: string;
+            revision: number;
+        };
+        subscribe(listener: () => void): () => void;
+    };
     slots: {
         inject(name: string, callback: () => unknown): unknown;
         register(options: {
@@ -71,7 +84,7 @@ interface GcResult {
 }
 interface GcDialog {
     busy?: boolean;
-    error?: string;
+    error?: Error;
 }
 interface DeletionReceipt {
     revision: string;
@@ -99,5 +112,5 @@ interface DeletionDialog {
     title: string;
     preview?: DeletionPreview;
     busy?: boolean;
-    error?: string;
+    error?: Error;
 }

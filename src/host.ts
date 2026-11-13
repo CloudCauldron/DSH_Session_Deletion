@@ -5,6 +5,7 @@ import { randomBytes, timingSafeEqual } from 'node:crypto';
 import { listRequests, readJSON, stateDir } from './core.js';
 import { DeletionRefused, type DeletionRuntime } from './runtime.js';
 import type { Gate } from './gate.js';
+import { dictionaries, LocalizedError, type LocalizedMessage } from './locale.js';
 
 export interface HostContext {
   sessionDeletionGate: Gate; sessionDeletionRuntime: DeletionRuntime;
@@ -17,7 +18,7 @@ export interface HostContext {
 }
 export const name = 'session-deletion';
 export const inject = ['sessionDeletionGate', 'sessionDeletionRuntime', 'webServer', 'connection', 'sessionPersistence', 'sessionController', 'schedule'];
-class HttpError extends Error { constructor(public status: number, message: string) { super(message); } }
+class HttpError extends LocalizedError { constructor(public status: number, key: string, params?: LocalizedMessage['params']) { super(key, params); } }
 function send(res: ServerResponse, status: number, value: unknown): void {
   res.writeHead(status, { 'Content-Type': 'application/json; charset=utf-8', 'Cache-Control': 'no-store', 'X-Content-Type-Options': 'nosniff' });
   res.end(JSON.stringify(value));
@@ -47,6 +48,9 @@ export async function apply(ctx: HostContext): Promise<void> {
       if ('rejection' in admission) throw new HttpError(admission.rejection, 'Not authorized');
       if (admission.peer.principal.kind !== 'owner') throw new HttpError(403, 'Owner access required');
       const path = new URL(req.url || '/', 'http://localhost').pathname;
+      if (req.method === 'GET' && path === '/session-deletion/api/locales') {
+        send(res, 200, { ok: true, dictionaries }); return;
+      }
       if (req.method === 'GET' && path === '/session-deletion/api/status') {
         send(res, 200, { ok: true, mode: 'private-delete-and-gc', version: gate.version, guardHealthy: gate.healthy(), gcRunning: runtime.gcRunning, deletionRunning: runtime.deletionRunning,
           archived: runtime.archivedIds, locked: [...runtime.locked],
@@ -64,16 +68,16 @@ export async function apply(ctx: HostContext): Promise<void> {
       if (req.method !== 'POST') throw new HttpError(405, 'Method not allowed');
       const data = await body(req);
       if (path === '/session-deletion/api/gc') {
-        if (data.confirmation !== 'COLLECT_ORPHAN_ATTACHMENTS') throw new HttpError(400, '需要明确确认清理残留附件与缓存。');
+        if (data.confirmation !== 'COLLECT_ORPHAN_ATTACHMENTS') throw new HttpError(400, 'error.confirmGc');
         send(res, 200, { ok: true, ...await runtime.gc() }); return;
       }
       if (typeof data.sessionId !== 'string' || !data.sessionId || data.sessionId.length > 1024) throw new HttpError(400, 'Invalid session ID');
       const id = data.sessionId;
-      if (!gate.healthy()) throw new HttpError(503, '恢复监测不可用，请重启 DSH。');
+      if (!gate.healthy()) throw new HttpError(503, 'error.guardUnavailable');
       const result = await (async () => {
         const headers = await runtime.headers(); const header = headers.get(id);
-        if (!header) throw new HttpError(404, '会话不存在或已经删除。');
-        if (header.origin === 'subagent' || (header.delegationDepth ?? 0) > 0) throw new HttpError(400, '请从主会话入口删除，以包含全部子代理。');
+        if (!header) throw new HttpError(404, 'error.sessionMissing');
+        if (header.origin === 'subagent' || (header.delegationDepth ?? 0) > 0) throw new HttpError(400, 'error.mainSessionRequired');
         const ids = runtime.family(headers, id);
         if (path === '/session-deletion/api/preview') {
           const token = randomBytes(24).toString('hex');
@@ -82,11 +86,11 @@ export async function apply(ctx: HostContext): Promise<void> {
           return { ok: true, sessionId: id, count: ids.length, token, archived: runtime.archivedIds.includes(id) };
         }
         if (path === '/session-deletion/api/delete') {
-          if (data.confirmation !== 'DELETE_IDLE_SESSION') throw new HttpError(400, '需要明确确认永久删除。');
+          if (data.confirmation !== 'DELETE_IDLE_SESSION') throw new HttpError(400, 'error.confirmDeletion');
           const preview = previews.get(id); const token = typeof data.token === 'string' ? data.token : '';
           if (!preview || preview.expires < Date.now() || Buffer.byteLength(token) !== Buffer.byteLength(preview.token)
-            || !timingSafeEqual(Buffer.from(token), Buffer.from(preview.token))) throw new HttpError(409, '确认已过期，请重新打开删除对话框。');
-          if (header.createdAt !== preview.createdAt || JSON.stringify(ids) !== JSON.stringify(preview.ids)) throw new HttpError(409, '会话或子代理集合已变化，请重新确认。');
+            || !timingSafeEqual(Buffer.from(token), Buffer.from(preview.token))) throw new HttpError(409, 'error.previewExpired');
+          if (header.createdAt !== preview.createdAt || JSON.stringify(ids) !== JSON.stringify(preview.ids)) throw new HttpError(409, 'error.previewChanged');
           previews.delete(id);
           return { ok: true, ...await runtime.remove(id, preview.createdAt, preview.ids) };
         }
@@ -94,7 +98,8 @@ export async function apply(ctx: HostContext): Promise<void> {
       })();
       send(res, 200, result);
     } catch (e) {
-      send(res, e instanceof HttpError || e instanceof DeletionRefused ? e.status : 500, { ok: false, error: e instanceof Error ? e.message : 'Operation failed' });
+      send(res, e instanceof HttpError || e instanceof DeletionRefused ? e.status : 500, { ok: false, error: e instanceof Error ? e.message : 'Operation failed',
+        ...e instanceof LocalizedError ? { messages: e.messages } : {} });
     }
   } });
 }

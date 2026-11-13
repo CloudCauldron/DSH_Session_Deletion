@@ -95,6 +95,8 @@
 
 4. 重启 DSH 服务即可体验。
 
+插件清单仅显示一个 `dsh-session-deletion` 入口。中文界面中显示名称为 **「DSH 会话删除」**，英文界面中为 **「DSH Session Deletion」**；其他语言回退到英文名称。内部恢复、删除运行时与 HTTP 模块由该入口统一管理。
+
 ### **5.2 - 卸载插件**
 
 如需移除插件，运行以下命令并重启 DSH：
@@ -107,7 +109,7 @@ dsh plugin --profile web remove dsh-session-deletion
 
 ## **6 - 开发与测试**
 
-源码与全部测试均使用 TypeScript。`pnpm check` 对两者执行严格类型检查，ESLint 对两者运行推荐规则与类型感知的 Promise 检查，并禁止显式 `any`。测试通过 Node.js 内置的类型擦除直接运行，只有产品源码输出到 `lib/`。ESLint 复用 `.gitignore`，另行排除已提交的生成目录 `lib/`，不引入格式化规则。构建仍通过 `@typescript/native` 别名使用 TypeScript 7，`typescript` 别名仅为 ESLint 提供 TypeScript 6 兼容 API，参照 [Microsoft 的并行使用说明](https://devblogs.microsoft.com/typescript/announcing-typescript-7-0/#running-side-by-side-with-typescript-60)。
+源码与全部测试均使用 TypeScript，建仍通过 `@typescript/native` 别名使用 TypeScript 7，`typescript` 别名仅为 ESLint 提供 TypeScript 6 兼容 API，参照 [Microsoft 的并行使用说明](https://devblogs.microsoft.com/typescript/announcing-typescript-7-0/#running-side-by-side-with-typescript-60)。
 
 ```bash
 pnpm lint              # ESLint 正确性与异步检查
@@ -115,3 +117,5 @@ pnpm check             # 源码与测试的严格 TypeScript 类型检查
 pnpm test              # 运行单元测试
 pnpm test:integration  # 运行集成测试
 ```
+
+界面文案和删除、清理被拒绝时的提示分别维护在 `locale/zh.json` 与 `locale/en.json` 的 `messages` 中。修改文案时同步维护两种语言，保留键名及 `{title}`、`{count}`、`{size}`、`{kind}`、`{detail}` 等占位符；`meta.title` 仍单独控制插件名称。未翻译的条目回退到中文。重新安装插件并重启 DSH 后加载更新的语言文件。

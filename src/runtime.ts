@@ -9,6 +9,7 @@ import { digest, enqueue, familyOf, listRequests, readJSON, stateDir, sweep, pla
 import { tryLock, waitingHosts, otherHosts } from './guard.js';
 import type { Lock } from './platform/index.js';
 import { hostRequire, type Gate } from './gate.js';
+import { LocalizedError, message, type LocalizedMessage } from './locale.js';
 
 // Narrow contracts for the services used from the reviewed DSH release.
 interface Session { id: string; header: SessionHeader }
@@ -70,8 +71,8 @@ export interface RuntimeContext {
   logger: { warn(message: string, error: unknown): unknown };
 }
 type Method = (this: unknown, ...args: unknown[]) => unknown;
-export interface Activity { busy: boolean; reasons: string[] }
-export class DeletionRefused extends Error { readonly status = 409; }
+export interface Activity { busy: boolean; reasons: LocalizedMessage[] }
+export class DeletionRefused extends LocalizedError { readonly status = 409; }
 
 /** Briefly serialize input/attachment publication while collecting references.
  * Reentrant service calls keep their lease, avoiding nested-call deadlocks. */
@@ -81,7 +82,7 @@ export class PublicationBarrier {
   private blocked = false;
   private waiters: (() => void)[] = [];
   assertSynchronousPublication(): void {
-    if (this.blocked && !this.context.getStore()?.open) throw new DeletionRefused('正在清理会话，请稍后重试输入或后台操作。');
+    if (this.blocked && !this.context.getStore()?.open) throw new DeletionRefused('error.publicationBlocked');
   }
   async read<T>(work: () => Promise<T> | T): Promise<T> {
     // Detached tasks inherit ALS, but must not inherit an already returned
@@ -95,12 +96,12 @@ export class PublicationBarrier {
     finally { lease.open = false; this.active--; }
   }
   async exclusive<T>(work: () => Promise<T>, timeoutMs = 15000): Promise<T> {
-    if (this.blocked) throw new DeletionRefused('另一项清理正在进行，请稍后重试。');
+    if (this.blocked) throw new DeletionRefused('error.cleanupBusy');
     this.blocked = true;
     try {
       const deadline = Date.now() + timeoutMs;
       while (this.active) {
-        if (Date.now() > deadline) throw new DeletionRefused('仍有消息提交或附件操作未结束，请稍后重试。');
+        if (Date.now() > deadline) throw new DeletionRefused('error.publicationTimeout');
         await delay(10);
       }
       return await work();
@@ -135,7 +136,7 @@ export class DeletionRuntime {
   get receipt() { return { revision: this.receiptRevision, deletedIdHashes: [...this.deleted] }; }
   isLocked(id: string): boolean { return this.locked.has(id) || this.deleted.has(digest(id)); }
   private assertAllowed(ids: string[]): void {
-    if (ids.some(id => this.isLocked(id))) throw new DeletionRefused('此会话正在删除或已经删除，不能再接收输入。');
+    if (ids.some(id => this.isLocked(id))) throw new DeletionRefused('error.sessionLocked');
   }
   private operation<T>(ids: string[], work: () => Promise<T> | T): Promise<T> {
     this.assertAllowed(ids);
@@ -191,7 +192,7 @@ export class DeletionRuntime {
         runtime.trackAgent(handle.agent);
         if (ids.some(id => runtime.isLocked(id))) {
           await handle.dispose();
-          throw new DeletionRefused('会话已进入删除流程，不能重新打开。');
+          throw new DeletionRefused('error.sessionReopen');
         }
         return handle;
       });
@@ -313,35 +314,35 @@ export class DeletionRuntime {
   }
   /** One final check after native archival, never a continuous activity monitor. */
   private async quiescence(ids: string[], global = false): Promise<Activity> {
-    const reasons: string[] = [];
-    if (!this.controller || !this.schedule) reasons.push('会话服务仍在初始化');
+    const reasons: LocalizedMessage[] = [];
+    if (!this.controller || !this.schedule) reasons.push(message('activity.initializing'));
     const targets = new Set(ids);
     const all = new Set(global ? this.ctx.sessions.list().map((session) => session.id) as string[] : ids);
     for (const id of all) {
       if (targets.has(id)) {
         const stored = await this.ctx.sessionPersistence.stat(id);
-        if (!stored || !(stored.sizeBytes > 0)) reasons.push('尚未保存的空白会话没有可删除的日志；空白子代理请在重启后再清理');
+        if (!stored || !(stored.sizeBytes > 0)) reasons.push(message('activity.unsaved'));
       }
-      if (this.operations.get(id)) reasons.push('仍有消息提交或会话操作未结束');
+      if (this.operations.get(id)) reasons.push(message('activity.operations'));
       const agent = this.ctx.agents.get(id) as Agent | undefined;
       if (agent) {
-        if (agent.status !== 'idle') reasons.push(global ? '仍有 AI 在工作或等待交互，请全部空闲后再清理附件' : '目标会话或子代理仍在工作或等待交互');
-        if (agent.inbox?.nextTurn?.length || agent.inbox?.nextStep?.length) reasons.push('仍有排队输入');
-        if (targets.has(id) && !this.handles.has(id)) reasons.push('缺少完整生命周期句柄，请重启 DSH');
+        if (agent.status !== 'idle') reasons.push(message(global ? 'activity.globalAgentBusy' : 'activity.targetAgentBusy'));
+        if (agent.inbox?.nextTurn?.length || agent.inbox?.nextStep?.length) reasons.push(message('activity.queuedInput'));
+        if (targets.has(id) && !this.handles.has(id)) reasons.push(message('activity.missingHandle'));
         const idle = await Promise.race([agent.whenIdle().then(() => true), delay(0).then(() => false)]);
-        if (!idle) reasons.push('会话后台维护尚未结束');
-        if (this.terminals?.list(agent).some((terminal) => terminal.status?.kind === 'running')) reasons.push('交互终端仍打开，请先关闭');
-      } else if (this.ctx.sessions.get(id)) reasons.push('存在无法安全释放的驻留会话');
+        if (!idle) reasons.push(message('activity.maintenance'));
+        if (this.terminals?.list(agent).some((terminal) => terminal.status?.kind === 'running')) reasons.push(message('activity.terminal'));
+      } else if (this.ctx.sessions.get(id)) reasons.push(message('activity.residentSession'));
       try {
         const activity = await this.ctx.waterfall('workspace/session-activity', { sessionId: id }, () => Promise.resolve([]));
         for (const item of activity) {
           // Future reminders in another conversation are not work in flight.
           if (global && item.kind === 'schedule') continue;
-          reasons.push(`官方归档状态仍有活动：${item.kind || '后台任务'}`);
+          reasons.push(item.kind ? message('activity.nativeBusy', { kind: item.kind }) : message('activity.nativeBusyUnknown'));
         }
-      } catch { reasons.push('无法确认全部后台活动已结束'); }
+      } catch { reasons.push(message('activity.unconfirmed')); }
     }
-    return { busy: reasons.length > 0, reasons: [...new Set(reasons)] };
+    return { busy: reasons.length > 0, reasons: [...new Map(reasons.map(reason => [JSON.stringify(reason), reason])).values()] };
   }
   get archivedIds(): string[] { return [...this.ctx.workspaceRegistry.archivedSessionIds]; }
   private async snapshots(): Promise<Map<string, LiveSnapshot>> {
@@ -360,13 +361,13 @@ export class DeletionRuntime {
     return map;
   }
   async remove(id: string, createdAt: number, expectedIds: readonly string[]): Promise<{ deleted: number }> {
-    if (this.maintenance) throw new DeletionRefused('另一项清理正在进行，请稍后重试。');
+    if (this.maintenance) throw new DeletionRefused('error.cleanupBusy');
     this.maintenance = 'delete';
     try { return await this.removeOne(id, createdAt, expectedIds); }
     finally { this.maintenance = undefined; }
   }
   async garbageSize(): Promise<number> {
-    if (this.maintenance) throw new DeletionRefused('另一项清理正在进行，请稍后重试。');
+    if (this.maintenance) throw new DeletionRefused('error.cleanupBusy');
     let changed = false;
     const subscriptions = (['session/created', 'session/disposed', 'session/event'] as const).map(name => this.ctx.on(name, () => { changed = true; }));
     // Session events cover log/lifecycle changes; staged uploads can change without an event.
@@ -376,23 +377,23 @@ export class DeletionRuntime {
     try {
       const before = current();
       const bytes = await garbageSize(this.home, () => this.snapshots());
-      if (changed || this.maintenance || before !== current()) throw new DeletionRefused('会话或附件已变化，请重新打开菜单计算体积。');
+      if (changed || this.maintenance || before !== current()) throw new DeletionRefused('error.sizeChanged');
       return bytes;
     } finally { for (const dispose of subscriptions) dispose(); }
   }
   async gc(): Promise<GcResult> {
-    if (this.maintenance) throw new DeletionRefused('另一项清理正在进行，请稍后重试。');
-    if (!(this.ctx.sessionDeletionGate as Gate).healthy()) throw new DeletionRefused('恢复监测不可用，请重启 DSH。');
+    if (this.maintenance) throw new DeletionRefused('error.cleanupBusy');
+    if (!(this.ctx.sessionDeletionGate as Gate).healthy()) throw new DeletionRefused('error.guardUnavailable');
     this.maintenance = 'gc';
     try {
       return await this.barrier.exclusive(async () => {
         const excluded = await waitingHosts(stateDir(this.home)); excluded.add(process.pid);
-        if ((await otherHosts(this.home, excluded)).length) throw new DeletionRefused('另一个 DSH 进程正在使用相同目录，请先关闭它。');
-        if ((await listRequests(this.home)).length) throw new DeletionRefused('有未完成的会话删除，请先重启 DSH 恢复。');
+        if ((await otherHosts(this.home, excluded)).length) throw new DeletionRefused('error.otherHost');
+        if ((await listRequests(this.home)).length) throw new DeletionRefused('error.pendingDeletion');
         const activity = await this.quiescence([], true);
-        if (activity.busy) throw new DeletionRefused(activity.reasons.join('；'));
+        if (activity.busy) throw new DeletionRefused(activity.reasons);
         // A canceled image caller can finish before its shared compression work.
-        if (this.unwrap(this.ctx.attachments).requestInflight.size) throw new DeletionRefused('图片缓存仍在生成，请稍后重试。');
+        if (this.unwrap(this.ctx.attachments).requestInflight.size) throw new DeletionRefused('error.imageCacheBusy');
         await this.ctx.sessionPersistence.flush();
         await Promise.all([...this.cacheWrites.values()].flatMap(writes => [...writes]));
         return collectGarbage(this.home, { hooks: {
@@ -411,17 +412,17 @@ export class DeletionRuntime {
     for (const [scope, rows] of groups) await index.remove(scope, rows.map(r => ({ variantId: r.variantId, fileId: r.fileId })));
   }
   private async removeOne(id: string, createdAt: number, expectedIds: readonly string[]): Promise<{ deleted: number }> {
-    if (!(this.ctx.sessionDeletionGate as Gate).healthy()) throw new DeletionRefused('恢复监测不可用，请重启 DSH。');
-    if ((await listRequests(this.home)).length) throw new DeletionRefused('有未完成的清理，请先重启 DSH 恢复。');
+    if (!(this.ctx.sessionDeletionGate as Gate).healthy()) throw new DeletionRefused('error.guardUnavailable');
+    if ((await listRequests(this.home)).length) throw new DeletionRefused('error.pendingCleanup');
     const headers = await this.headers(); const root = headers.get(id);
-    if (!root || root.createdAt !== createdAt) throw new DeletionRefused('会话已变化，请重新确认。');
+    if (!root || root.createdAt !== createdAt) throw new DeletionRefused('error.sessionChanged');
     const ids = this.family(headers, id);
-    if (JSON.stringify(ids) !== JSON.stringify(expectedIds)) throw new DeletionRefused('子代理集合已变化，请重新确认。');
+    if (JSON.stringify(ids) !== JSON.stringify(expectedIds)) throw new DeletionRefused('error.familyChanged');
     // Reuse DSH's own admission and durable archive write. Do not reimplement
     // its running-turn/job/subagent/schedule monitor or force-stop active work.
     try { await this.ctx.workspaceRegistry.archiveSession(id); }
-    catch (e) { throw new DeletionRefused('官方归档未完成，未执行删除。' + (e instanceof Error ? e.message : '')); }
-    if (!this.ctx.workspaceRegistry.archivedSessionIds.includes(id)) throw new DeletionRefused('未能确认归档完成，未执行删除。');
+    catch (e) { throw new DeletionRefused('error.archiveIncomplete', { detail: e instanceof Error ? e.message : '' }); }
+    if (!this.ctx.workspaceRegistry.archivedSessionIds.includes(id)) throw new DeletionRefused('error.archiveUnconfirmed');
     this.assertAllowed(ids);
     // No await between publishing these locks: other tabs and background input
     // are rejected before the asynchronous authoritative activity checks begin.
@@ -430,10 +431,10 @@ export class DeletionRuntime {
     const writerLocks: Lock[] = [];
     try {
       const excluded = await waitingHosts(stateDir(this.home)); excluded.add(process.pid);
-      if ((await otherHosts(this.home, excluded)).length) throw new DeletionRefused('另一个 DSH 进程正在使用相同目录，请先关闭它。');
+      if ((await otherHosts(this.home, excluded)).length) throw new DeletionRefused('error.otherHost');
       const again = await this.quiescence(ids);
-      if (again.busy) throw new DeletionRefused(again.reasons.join('；'));
-      if (JSON.stringify(this.family(await this.headers(), id)) !== JSON.stringify(ids)) throw new DeletionRefused('子代理集合已变化，请重新确认。');
+      if (again.busy) throw new DeletionRefused(again.reasons);
+      if (JSON.stringify(this.family(await this.headers(), id)) !== JSON.stringify(ids)) throw new DeletionRefused('error.familyChanged');
       // Commit only private paths. No attachment reference snapshot is needed.
       const request = await enqueue(this.home, root, await planSessionDeletion(this.home, headers, id));
       journaled = true;

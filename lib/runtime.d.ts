@@ -1,5 +1,6 @@
 import { type LiveSnapshot, type SessionHeader, type GcResult } from './core.js';
 import { type Gate } from './gate.js';
+import { LocalizedError, type LocalizedMessage } from './locale.js';
 interface Session {
     id: string;
     header: SessionHeader;
@@ -136,9 +137,9 @@ export interface RuntimeContext {
 }
 export interface Activity {
     busy: boolean;
-    reasons: string[];
+    reasons: LocalizedMessage[];
 }
-export declare class DeletionRefused extends Error {
+export declare class DeletionRefused extends LocalizedError {
     readonly status = 409;
 }
 /** Briefly serialize input/attachment publication while collecting references.

@@ -1,6 +1,6 @@
 {
   "name": "dsh-session-deletion",
-  "version": "0.5.2",
+  "version": "0.6.0",
   "private": true,
   "type": "module",
   "description": "Immediate private session deletion and separately guarded orphan attachment garbage collection for DSH.",
@@ -9,11 +9,10 @@
     "node": ">=24.9.0"
   },
   "exports": {
-    ".": "./lib/host.js",
-    "./gate": "./lib/gate.js",
+    ".": "./lib/index.js",
     "./client": "./lib/client.js",
     "./package.json": "./package.json",
-    "./runtime": "./lib/runtime.js"
+    "./locale/*.json": "./locale/*.json"
   },
   "dsh": {
     "bundle": {
@@ -22,6 +21,7 @@
     "client": {
       "platform": "web",
       "inject": [
+        "@deepseek-ai/dsh-client-locale",
         "@deepseek-ai/dsh-client-ui-workspace",
         "@deepseek-ai/dsh-client-ui-renderer",
         "@deepseek-ai/dsh-client-ui-context-menu",
@@ -52,6 +52,7 @@
   },
   "files": [
     "lib/",
+    "locale/",
     "cordis.patch.yml",
     "README.md",
     "LICENSE"

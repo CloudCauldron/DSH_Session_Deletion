@@ -1,10 +1,6 @@
 - insert:
-    - id: session-deletion-gate
-      name: dsh-session-deletion/gate
     - id: session-deletion
       name: dsh-session-deletion
-    - id: session-deletion-runtime
-      name: dsh-session-deletion/runtime
 # No persistence or storage provider may load stale state before recovery finishes.
 - id: session-persistence-jsonl
   inject: [sessionDeletionGate]
