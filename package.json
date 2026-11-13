@@ -32,9 +32,9 @@
   "scripts": {
     "lint": "eslint . --max-warnings 0",
     "build": "tsc -p tsconfig.json",
-    "check": "tsc -p tsconfig.json --noEmit",
-    "test": "pnpm build && node --test test/*.test.js",
-    "test:integration": "pnpm build && node test/integration.mjs"
+    "check": "tsc -p test/tsconfig.json",
+    "test": "pnpm build && node --test test/*.test.ts",
+    "test:integration": "pnpm build && node test/integration.ts"
   },
   "devDependencies": {
     "@deepseek-ai/dsh-host-webserver": "0.2.2-rc.2",
@@ -43,7 +43,6 @@
     "@types/react": "^19.3.0",
     "@typescript/native": "npm:typescript@7.0.2",
     "eslint": "10.14.0",
-    "globals": "17.14.0",
     "playwright-core": "^1.64.1",
     "typescript": "npm:@typescript/typescript6@6.0.2",
     "typescript-eslint": "8.72.2"

@@ -2,15 +2,16 @@ import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import fs from 'node:fs/promises';
 import { readdirSync } from 'node:fs';
-import { randomBytes } from 'node:crypto';
+import { createHash, randomBytes } from 'node:crypto';
 import { join } from 'node:path';
 import { zstdCompressSync, constants } from 'node:zlib';
 import { syncBuiltinESMExports } from 'node:module';
 import { scanSessions, sweep, collectGarbage, garbageSize, exists, digest, encodeSegment, listRequests, readJSON, stateDir, enqueue, planSessionDeletion, atomicJSON, safePath, readLog, SUPPORTED_DSH } from '../lib/core.js';
+import type { Receipt, DeletionRequest } from '../lib/core.js';
 import { birth } from '../lib/platform/index.js';
-import { fixture } from './fixtures.js';
+import { fixture } from './fixtures.ts';
 
-test('compressed logs retain every frame across blocks, checksums and input boundaries', async () => {
+void test('compressed logs retain every frame across blocks, checksums and input boundaries', async () => {
   const f = await fixture();
   try {
     const header = zstdCompressSync(JSON.stringify(f.headers[f.ids.other]) + '\n');
@@ -27,7 +28,7 @@ test('compressed logs retain every frame across blocks, checksums and input boun
   } finally { await f.cleanup(); }
 });
 
-test('journals identify the reviewed host version', async () => {
+void test('journals identify the reviewed host version', async () => {
   const f = await fixture();
   try {
     const plan = await planSessionDeletion(f.home, new Map(Object.entries(f.headers)), f.ids.main);
@@ -38,7 +39,7 @@ test('journals identify the reviewed host version', async () => {
   } finally { await f.cleanup(); }
 });
 
-test('unsupported host versions cannot authorize a deletion', async () => {
+void test('unsupported host versions cannot authorize a deletion', async () => {
   const f = await fixture();
   try {
     await f.queue();
@@ -49,56 +50,56 @@ test('unsupported host versions cannot authorize a deletion', async () => {
   } finally { await f.cleanup(); }
 });
 
-const attachment = (f, hash, kind = 'objects') => join(f.home, 'attachments/v1', kind, hash.slice(0, 2), hash);
+const attachment = (f: Awaited<ReturnType<typeof fixture>>, hash: string, kind = 'objects') => join(f.home, 'attachments/v1', kind, hash.slice(0, 2), hash);
 
-test('atomic writes identify their process owner and preserve the committed file when serialization fails', async () => {
+void test('atomic writes identify their process owner and preserve the committed file when serialization fails', async () => {
   const f = await fixture();
   try {
     const path = join(stateDir(f.home), 'receipt.json');
     await atomicJSON(path, { committed: true });
     const prefix = `.session-deletion-write-${process.pid}-${await birth(process.pid)}-`;
-    let temporary;
+    let temporary!: string[];
     await assert.rejects(atomicJSON(path, { toJSON() {
       // Serialization runs only after the temporary file has been opened.
       temporary = readdirSync(stateDir(f.home));
       throw new Error('serialization interrupted');
     } }), /serialization interrupted/);
     assert.ok(temporary.some(name => name.startsWith(prefix)));
-    assert.deepEqual(await readJSON(path), { committed: true });
+    assert.deepEqual(await readJSON<{ committed: boolean }>(path), { committed: true });
     assert.deepEqual(await fs.readdir(stateDir(f.home)), ['receipt.json']);
   } finally { await f.cleanup(); }
 });
 
-test('receipts retain all hashes and advance revision after each deletion', async () => {
+void test('receipts retain all hashes and advance revision after each deletion', async () => {
   const f = await fixture();
   try {
     const path = join(stateDir(f.home), 'receipt.json');
     const previous = Array.from({ length: 4100 }, (_, i) => digest('previous-session-' + i));
     await atomicJSON(path, { schema: 1, revision: 'a'.repeat(32), deletedIdHashes: previous });
     await f.queue(); await sweep(f.home);
-    const first = await readJSON(path);
+    const first = await readJSON<Receipt>(path);
     assert.deepEqual(first.deletedIdHashes.slice(0, previous.length), previous);
     assert.equal(first.deletedIdHashes.length, previous.length + 3);
     assert.match(first.revision, /^[a-f0-9]{32}$/);
     await enqueue(f.home, f.headers[f.ids.other], await planSessionDeletion(f.home, new Map(Object.entries(f.headers)), f.ids.other));
     await sweep(f.home);
-    const second = await readJSON(path);
+    const second = await readJSON<Receipt>(path);
     assert.notEqual(second.revision, first.revision);
     assert.deepEqual(second.deletedIdHashes.slice(0, first.deletedIdHashes.length), first.deletedIdHashes);
   } finally { await f.cleanup(); }
 });
-async function fileSnapshot(root) {
-  const files = {};
-  async function visit(path) {
+async function fileSnapshot(root: string) {
+  const files: Record<string, string> = {};
+  async function visit(path: string): Promise<void> {
     for (const entry of await fs.readdir(path, { withFileTypes: true })) {
       const file = join(path, entry.name);
-      if (entry.isDirectory()) await visit(file); else files[file] = digest(await fs.readFile(file));
+      if (entry.isDirectory()) await visit(file); else files[file] = createHash('sha256').update(await fs.readFile(file)).digest('hex');
     }
   }
   await visit(root); return files;
 }
 
-test('private deletion preserves every attachment, cache, upload mapping and temporary file', async () => {
+void test('private deletion preserves every attachment, cache, upload mapping and temporary file', async () => {
   const f = await fixture();
   try {
     const before = await fileSnapshot(join(f.home, 'attachments'));
@@ -112,16 +113,16 @@ test('private deletion preserves every attachment, cache, upload mapping and tem
     assert.equal(await fs.readFile(join(f.home, 'llm-deepseek/files-v3.json'), 'utf8'), upload);
     assert.equal(await exists(f.spill), true); assert.equal(await exists(f.sharedSpill), true);
     assert.equal(await fs.readFile(f.projectFile, 'utf8'), 'user project must survive');
-    const workspace = await readJSON(join(f.home, 'storages/workspace.json'));
+    const workspace = await readJSON<{ tables: { workspaces: { project: { sessionIds: string[] } } }; global: { pinnedSessionIds: string[] } }>(join(f.home, 'storages/workspace.json'));
     assert.deepEqual(workspace.tables.workspaces.project.sessionIds, [f.ids.fork, f.ids.other]);
     assert.deepEqual(workspace.global.pinnedSessionIds, [f.ids.other]);
-    assert.deepEqual(Object.keys((await readJSON(join(f.home, 'storages/schedule.json'))).tables.tasks), ['c']);
+    assert.deepEqual(Object.keys((await readJSON<{ tables: { tasks: Record<string, unknown> } }>(join(f.home, 'storages/schedule.json'))).tables.tasks), ['c']);
     assert.equal((await listRequests(f.home)).length, 0);
     assert.ok(!(await fs.readFile(join(stateDir(f.home), 'receipt.json'), 'utf8')).includes(f.ids.main));
   } finally { await f.cleanup(); }
 });
 
-for (let step = 1; step <= 11; step++) test(`private deletion interruption ${step} recovers without touching attachments`, async () => {
+for (let step = 1; step <= 11; step++) void test(`private deletion interruption ${step} recovers without touching attachments`, async () => {
   const f = await fixture();
   try {
     const before = await fileSnapshot(join(f.home, 'attachments'));
@@ -134,7 +135,7 @@ for (let step = 1; step <= 11; step++) test(`private deletion interruption ${ste
   } finally { await f.cleanup(); }
 });
 
-test('unrelated corrupt logs and opaque attachment storage do not block private deletion', async () => {
+void test('unrelated corrupt logs and opaque attachment storage do not block private deletion', async () => {
   const f = await fixture();
   try {
     await fs.writeFile(join(f.home, 'sessions/project', f.ids.other, 'session.v4.jsonl.zstd'), 'corrupt');
@@ -145,7 +146,7 @@ test('unrelated corrupt logs and opaque attachment storage do not block private 
   } finally { await f.cleanup(); }
 });
 
-test('target symlink or changed lifecycle refuses private deletion', async () => {
+void test('target symlink or changed lifecycle refuses private deletion', async () => {
   const f = await fixture();
   try {
     await f.queue();
@@ -159,7 +160,7 @@ test('target symlink or changed lifecycle refuses private deletion', async () =>
   } finally { await f.cleanup(); }
 });
 
-test('path checks reject symlink/junction ancestors even when the leaf does not exist', async () => {
+void test('path checks reject symlink/junction ancestors even when the leaf does not exist', async () => {
   const f = await fixture();
   try {
     const link = join(f.home, 'external');
@@ -169,7 +170,7 @@ test('path checks reject symlink/junction ancestors even when the leaf does not 
   } finally { await f.cleanup(); }
 });
 
-test('plan validation rejects invalid schemas and traversal', async () => {
+void test('plan validation rejects invalid schemas and traversal', async () => {
   const f = await fixture();
   try {
     assert.equal(encodeSegment('../outside'), '..~002Foutside');
@@ -181,7 +182,7 @@ test('plan validation rejects invalid schemas and traversal', async () => {
     await assert.rejects(enqueue(f.home, { ...f.headers[f.ids.main], createdAt: 9 }, plan), /lifecycle/);
     await f.queue();
     const path = join(stateDir(f.home), 'pending', digest(f.ids.main) + '.json');
-    const request = await readJSON(path);
+    const request = await readJSON<DeletionRequest>(path);
     await f.write(path, JSON.stringify({ ...request, schema: 'invalid' }));
     await assert.rejects(sweep(f.home), /Invalid deletion request/);
     plan.directories[0].path = '../outside';
@@ -190,7 +191,7 @@ test('plan validation rejects invalid schemas and traversal', async () => {
   } finally { await f.cleanup(); }
 });
 
-test('uncommitted requests are ignored and never authorize deletion', async () => {
+void test('uncommitted requests are ignored and never authorize deletion', async () => {
   const f = await fixture();
   try {
     await f.queue();
@@ -203,7 +204,7 @@ test('uncommitted requests are ignored and never authorize deletion', async () =
   } finally { await f.cleanup(); }
 });
 
-test('GC size preview is read-only, excludes live attachments and counts hard-linked aliases once', async () => {
+void test('GC size preview is read-only, excludes live attachments and counts hard-linked aliases once', async () => {
   const f = await fixture();
   try {
     const orphan = digest('never referenced');
@@ -221,21 +222,21 @@ test('GC size preview is read-only, excludes live attachments and counts hard-li
   } finally { await f.cleanup(); }
 });
 
-test('failed size reads stop dispatching and finish outstanding reads before returning', async () => {
+void test('failed size reads stop dispatching and finish outstanding reads before returning', async () => {
   const f = await fixture(); const lstat = fs.lstat;
   let started = 0, active = 0;
   const failure = new Error('Injected size read failure');
   try {
     for (let i = 0; i < 32; i++) await f.write(attachment(f, digest('orphan-' + i)), 'orphan');
-    fs.lstat = async function (path, ...args) {
+    fs.lstat = (async (...[path, ...args]: Parameters<typeof lstat>) => {
       if (args[0]?.bigint) {
         if (++started === 1) throw failure;
         active++;
-        try { await new Promise(resolve => setTimeout(resolve, 10)); return await lstat.call(this, path, ...args); }
+        try { await new Promise(resolve => setTimeout(resolve, 10)); return await lstat(path, ...args); }
         finally { active--; }
       }
-      return lstat.call(this, path, ...args);
-    };
+      return lstat(path, ...args);
+    }) as typeof lstat;
     syncBuiltinESMExports();
     await assert.rejects(garbageSize(f.home), error => error === failure);
     assert.equal(active, 0, 'no I/O may outlive a failed scan');
@@ -243,7 +244,7 @@ test('failed size reads stop dispatching and finish outstanding reads before ret
   } finally { fs.lstat = lstat; syncBuiltinESMExports(); await f.cleanup(); }
 });
 
-test('GC removes all unreferenced objects and aliases, including never-referenced orphans', async () => {
+void test('GC removes all unreferenced objects and aliases, including never-referenced orphans', async () => {
   const f = await fixture();
   try {
     await f.queue(); await sweep(f.home);
@@ -262,7 +263,7 @@ test('GC removes all unreferenced objects and aliases, including never-reference
   } finally { await f.cleanup(); }
 });
 
-test('GC protects staged uploads in a live session without a materialized log', async () => {
+void test('GC protects staged uploads in a live session without a materialized log', async () => {
   const f = await fixture();
   try {
     await f.queue(); await sweep(f.home);
@@ -275,7 +276,7 @@ test('GC protects staged uploads in a live session without a materialized log', 
   } finally { await f.cleanup(); }
 });
 
-for (const separator of ['/', '\\']) test(`GC protects literal attachment paths using ${separator} and non-session storage references`, async () => {
+for (const separator of ['/', '\\']) void test(`GC protects literal attachment paths using ${separator} and non-session storage references`, async () => {
   const f = await fixture();
   try {
     await f.queue(); await sweep(f.home);
@@ -287,7 +288,7 @@ for (const separator of ['/', '\\']) test(`GC protects literal attachment paths 
   } finally { await f.cleanup(); }
 });
 
-for (const mode of ['corrupt', 'torn', 'symlink', 'referenced-symlink', 'opaque']) test(`GC ${mode} preflight failure deletes nothing`, async () => {
+for (const mode of ['corrupt', 'torn', 'symlink', 'referenced-symlink', 'opaque']) void test(`GC ${mode} preflight failure deletes nothing`, async () => {
   const f = await fixture();
   try {
     const log = join(f.home, 'sessions/project', f.ids.other, 'session.v4.jsonl.zstd');
@@ -303,7 +304,7 @@ for (const mode of ['corrupt', 'torn', 'symlink', 'referenced-symlink', 'opaque'
   } finally { await f.cleanup(); }
 });
 
-for (let step = 1; step <= 5; step++) test(`GC interruption ${step} permits a fresh safe scan`, async () => {
+for (let step = 1; step <= 5; step++) void test(`GC interruption ${step} permits a fresh safe scan`, async () => {
   const f = await fixture();
   try {
     await f.queue(); await sweep(f.home);

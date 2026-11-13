@@ -3,6 +3,7 @@ import { join } from 'node:path';
 import { tmpdir } from 'node:os';
 import { zstdCompressSync } from 'node:zlib';
 import { digest, encodeSegment, enqueue, planSessionDeletion } from '../lib/core.js';
+import type { SessionHeader } from '../lib/core.js';
 
 export async function fixture() {
   const base = await fs.mkdtemp(join(tmpdir(), 'dsh-deletion-测试 空格-'));
@@ -10,10 +11,10 @@ export async function fixture() {
   await fs.mkdir(home, { mode: 0o700 }); await fs.mkdir(temporary, { mode: 0o700 });
   const exclusive = digest('exclusive attachment'); const shared = digest('shared attachment');
   const ids = { main: 'session-main', child: 'session-child', grand: 'session-grand', fork: 'session-fork', other: 'session-other' };
-  const write = async (path, value) => { await fs.mkdir(join(path, '..'), { recursive: true, mode: 0o700 }); await fs.writeFile(path, value, { mode: 0o600 }); };
-  const headers = {};
-  async function session(id, extra = {}, refs = []) {
-    const header = { type: 'session', version: 4, id, createdAt: 1234, cwd: '/project', isSeeded: false, ...extra };
+  const write = async (path: string, value: string | Buffer) => { await fs.mkdir(join(path, '..'), { recursive: true, mode: 0o700 }); await fs.writeFile(path, value, { mode: 0o600 }); };
+  const headers: Record<string, SessionHeader> = {};
+  async function session(id: string, extra: Partial<SessionHeader> = {}, refs: unknown[] = []) {
+    const header: SessionHeader = { type: 'session', version: 4, id, createdAt: 1234, cwd: '/project', isSeeded: false, ...extra };
     headers[id] = header;
     const path = join(home, 'sessions', 'project', encodeSegment(id), 'session.v4.jsonl.zstd');
     // Real persistence uses concatenated independent Zstandard frames.

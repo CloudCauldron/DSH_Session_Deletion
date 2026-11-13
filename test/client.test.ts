@@ -4,32 +4,59 @@ import { readFile } from 'node:fs/promises';
 import { createHash } from 'node:crypto';
 import vm from 'node:vm';
 
-// Run the shipped browser entry point. No helper is extracted or reimplemented:
-// a successful refresh must finish its actual cleanup before startSession fires.
-function browserStorage(values) {
-  const storage = { ...values };
-  Object.defineProperties(storage, {
-    getItem: { value: key => storage[key] ?? null },
-    setItem: { value: (key, value) => { storage[key] = String(value); } },
-    removeItem: { value: key => { delete storage[key]; } },
-  });
-  return storage;
+type ClientFixture = Partial<Omit<DeletionClientContext, 'slots'>> & { slots: Partial<DeletionClientContext['slots']> };
+interface ClientPlugin { apply(ctx: ClientFixture): void }
+interface ClientModule { factory(require: (name: string) => unknown): ClientPlugin }
+type MenuContribution = Parameters<DeletionClientContext['contextMenus']['register']>[0];
+type MockNode = MockElement | string | number | boolean | null | undefined | MockNode[];
+interface MockElement {
+  type: unknown;
+  props: Record<string, unknown> & { children?: MockNode; description?: MockNode; footer?: MockNode };
+}
+const createElement = (type: unknown, props: Record<string, unknown> | null, ...children: MockNode[]): MockElement =>
+  ({ type, props: { ...props, ...(children.length ? { children } : {}) } });
+function isElement(value: MockNode): value is MockElement { return !!value && typeof value === 'object' && !Array.isArray(value); }
+function element(value: MockNode): MockElement { assert(isElement(value)); return value; }
+function nodes(value: MockNode): MockNode[] {
+  if (Array.isArray(value)) return value.flatMap(nodes);
+  if (value === null || value === undefined) return [];
+  return isElement(value) ? [value, ...nodes(value.props.description), ...nodes(value.props.children), ...nodes(value.props.footer)] : [value];
+}
+interface ReceiptControl {
+  poll(): Promise<void>;
+  readonly receiptRequests: number;
+  update(value: DeletionReceipt): void;
+  failNextReceipt(): void;
 }
 
-async function refreshClient(localStorage, sessionStorage, deletedId, verify = async () => {}) {
-  let plugin;
-  let cleanup;
-  let finish;
-  let poll, receiptRequests = 0, failReceipt = false;
+// Run the shipped browser entry point. No helper is extracted or reimplemented:
+// a successful refresh must finish its actual cleanup before startSession fires.
+function browserStorage(values: Record<string, string>) {
+  const storage = { ...values };
+  Object.defineProperties(storage, {
+    getItem: { value: (key: string) => storage[key] ?? null },
+    setItem: { value: (key: string, value: string) => { storage[key] = String(value); } },
+    removeItem: { value: (key: string) => { delete storage[key]; } },
+  });
+  return storage as unknown as Pick<Storage, 'getItem' | 'setItem' | 'removeItem'>;
+}
+
+async function refreshClient(localStorage: ReturnType<typeof browserStorage>, sessionStorage: ReturnType<typeof browserStorage>, deletedId: string,
+  verify: (control: ReceiptControl) => Promise<void> = async () => {}) {
+  let plugin!: ClientPlugin;
+  let cleanup: (() => void) | undefined;
+  let finish!: () => void;
+  let poll!: () => void;
+  let receiptRequests = 0, failReceipt = false;
   let receipt = { revision: 'first', deletedIdHashes: [createHash('sha256').update(deletedId).digest('hex')] };
-  const finished = new Promise(resolve => { finish = resolve; });
+  const finished = new Promise<void>(resolve => { finish = resolve; });
   const sandbox = {
     TextEncoder,
-    crypto: { subtle: { digest: async (_, bytes) => createHash('sha256').update(bytes).digest() } },
+    crypto: { subtle: { digest: async (_: string, bytes: Uint8Array) => createHash('sha256').update(bytes).digest() } },
     localStorage,
     sessionStorage,
     window: {
-      __ModuleLoader__: { load(definition) { plugin = definition.factory(() => ({ createElement() {} })); } },
+      __ModuleLoader__: { load(definition: ClientModule) { plugin = definition.factory(() => ({ createElement() {} })); } },
       addEventListener() {}, removeEventListener() {},
     },
     document: {
@@ -37,8 +64,8 @@ async function refreshClient(localStorage, sessionStorage, deletedId, verify = a
       createElement: () => ({ remove() {} }),
     },
     MutationObserver: class { observe() {} disconnect() {} },
-    setInterval(callback) { poll = callback; return 1; }, clearInterval() {},
-    fetch: async url => {
+    setInterval(callback: () => void) { poll = callback; return 1; }, clearInterval() {},
+    fetch: async (url: string) => {
       if (url.endsWith('/receipt')) {
         receiptRequests++;
         if (failReceipt) { failReceipt = false; return { ok: false, status: 503, json: async () => ({ error: 'retry' }) }; }
@@ -71,11 +98,11 @@ async function refreshClient(localStorage, sessionStorage, deletedId, verify = a
   finally { cleanup?.(); }
 }
 
-test('browser cleanup removes only owned session keys and preserves another draft quoting the deleted ID', { timeout: 2000 }, async () => {
+void test('browser cleanup removes only owned session keys and preserves another draft quoting the deleted ID', { timeout: 2000 }, async () => {
   const deleted = 'session-deleted-123';
   const survivor = 'session-surviving-456';
   const scopedPrefixes = ['dsh.conversation.', 'dsh.sidebar-right.v1.', 'dsh.schedule.task-tab.v1.'];
-  const values = {
+  const values: Record<string, string> = {
     [`dsh.conversation.${survivor}`]: JSON.stringify({ draft: deleted, view: null, viewRequest: null }),
     'dsh.unrelated.preferences': JSON.stringify({ id: deleted, nested: { [deleted]: deleted } }),
     'dsh.conversation.contentWidth': '760',
@@ -95,13 +122,13 @@ test('browser cleanup removes only owned session keys and preserves another draf
     assert.equal(storage.getItem('dsh.unrelated.preferences'), values['dsh.unrelated.preferences']);
     assert.equal(storage.getItem('dsh.conversation.contentWidth'), '760');
     assert.equal(storage.getItem('dsh.sessions.current'), null);
-    const view = JSON.parse(storage.getItem('dsh.workspace.view.v5'));
+    const view = JSON.parse(storage.getItem('dsh.workspace.view.v5')!);
     assert.deepEqual(view.sessionOrderByAccount, { project: [survivor], [deleted]: [survivor] });
     assert.deepEqual(view.groupExpansion, { project: true, [deleted]: false });
   }
 });
 
-test('receipt sync fetches only on revision changes, retries failures and keeps cleaning late browser writes', { timeout: 2000 }, async () => {
+void test('receipt sync fetches only on revision changes, retries failures and keeps cleaning late browser writes', { timeout: 2000 }, async () => {
   const first = 'deleted-first', second = 'deleted-second';
   const local = browserStorage({});
   await refreshClient(local, browserStorage({}), first, async client => {
@@ -123,80 +150,83 @@ test('receipt sync fetches only on revision changes, retries failures and keeps 
   });
 });
 
-test('deletion checks show the selected copy and refuse confirmation if the session starts running', async () => {
+void test('deletion checks show the selected copy and refuse confirmation if the session starts running', async () => {
   const id = 'session-copy-test';
   const rows = { [id]: { id, running: false, retainedBy: { mainView: 1 } } };
-  const components = new Map(); let plugin, cleanup, resolvePreview, menu;
-  const preview = new Promise(resolve => { resolvePreview = resolve; });
+  const components = new Map<string, () => MockNode>();
+  let plugin!: ClientPlugin, menu!: MenuContribution, resolvePreview!: (value: DeletionPreview) => void;
+  let cleanup: (() => void) | undefined;
+  const preview = new Promise<DeletionPreview>(resolve => { resolvePreview = resolve; });
   const ui = { Modal: 'NativeModal', MenuItemButton: 'NativeMenu', Button: 'NativeButton', IconTrashOutlineRegular: 'NativeIcon' };
   const react = {
     Fragment: Symbol('Fragment'),
-    createElement: (type, props, ...children) => ({ type, props: { ...props, ...(children.length ? { children } : {}) } }),
-    useSyncExternalStore: (_, read) => read(), useLayoutEffect() {},
+    createElement,
+    useSyncExternalStore: <T>(_: unknown, read: () => T) => read(), useLayoutEffect() {},
   };
   const sandbox = {
     TextEncoder,
-    crypto: { subtle: { digest: async (_, bytes) => createHash('sha256').update(bytes).digest() } },
+    crypto: { subtle: { digest: async (_: string, bytes: Uint8Array) => createHash('sha256').update(bytes).digest() } },
     localStorage: browserStorage({}), sessionStorage: browserStorage({}),
-    window: { __ModuleLoader__: { load(definition) { plugin = definition.factory(name => name === 'react' ? react : ui); } }, addEventListener() {}, removeEventListener() {} },
+    window: { __ModuleLoader__: { load(definition: ClientModule) { plugin = definition.factory(name => name === 'react' ? react : ui); } }, addEventListener() {}, removeEventListener() {} },
     document: { body: {}, head: { append() {} }, querySelectorAll: () => [], createElement: () => ({ remove() {} }) },
     MutationObserver: class { observe() {} disconnect() {} }, setInterval() { return 1; }, clearInterval() {},
-    fetch: async url => ({ ok: true, json: () => url.endsWith('/preview') ? preview : Promise.resolve(url.endsWith('/receipt')
+    fetch: async (url: string) => ({ ok: true, json: () => url.endsWith('/preview') ? preview : Promise.resolve(url.endsWith('/receipt')
       ? { revision: 'empty', deletedIdHashes: [] }
       : { pending: [], locked: [], archived: [], guardHealthy: true, receipt: { revision: 'empty', count: 0 } }) }),
   };
   vm.runInNewContext(await readFile(new URL('../lib/client.js', import.meta.url), 'utf8'), sandbox);
   plugin.apply({
-    slots: { inject(_, callback) { callback(); }, register(options, component) { components.set(options.id, component); } },
+    slots: { inject(_, callback) { callback(); }, register(options, component) {
+      assert.equal(typeof component, 'function'); components.set(options.id, component as () => MockNode);
+    } },
     contextMenus: { register(contribution) { menu = contribution; return () => {}; } },
     sessions: { list: { getSnapshot: () => ({ byId: rows }), subscribe: () => () => {} } },
     uiWorkspace: { startSession() {} }, effect(callback) { cleanup = callback(); },
   });
-  function nodes(value) {
-    if (Array.isArray(value)) return value.flatMap(nodes);
-    if (value === null || value === undefined) return [];
-    return [value, ...nodes(value?.props?.description), ...nodes(value?.props?.children), ...nodes(value?.props?.footer)];
-  }
   try {
     await new Promise(setImmediate);
     menu.resolve({ sessionId: id, displayTitle: 'Test' })[0].run();
-    const render = () => nodes(components.get('session-deletion.dialog')());
+    const render = () => { const component = components.get('session-deletion.dialog'); assert(component); return nodes(component()); };
     assert.ok(render().includes('正在检查会话状态…'));
     resolvePreview({ count: 1, token: 'fixture', archived: false });
     await new Promise(setImmediate);
     rows[id].running = true;
     const current = render();
     assert.ok(current.includes('会话正在运行，暂时无法删除'));
-    const confirm = current.find(node => node?.type === ui.Button && nodes(node.props.children).includes('确认删除'));
+    const confirm = current.find((node): node is MockElement => isElement(node) && node.type === ui.Button && nodes(node.props.children).includes('确认删除'));
+    assert(confirm);
     assert.equal(confirm.props.disabled, true);
   } finally { cleanup?.(); }
 });
 
-test('GC menu shows a native spinner, formats binary units and reports failed or invalid size previews', async () => {
-  let plugin, menu, mount, bytes, response, fail = false, requests = 0;
+void test('GC menu shows a native spinner, formats binary units and reports failed or invalid size previews', async () => {
+  let plugin!: ClientPlugin, menu!: (props: { onDismiss(): void }) => MockNode, mount!: () => () => void;
+  let bytes: number | null | undefined, response: unknown, fail: boolean | 'network' = false, requests = 0;
   const ui = { MenuItemButton: 'NativeMenu', StateDot: 'NativeSpinner' };
   const react = {
     Fragment: Symbol('Fragment'),
-    createElement: (type, props, ...children) => ({ type, props: { ...props, ...(children.length ? { children } : {}) } }),
-    useSyncExternalStore: (_, read) => read(),
-    useState: () => [bytes, value => { bytes = value; }],
-    useEffect: callback => { mount = callback; },
+    createElement,
+    useSyncExternalStore: <T>(_: unknown, read: () => T) => read(),
+    useState: () => [bytes, (value: typeof bytes) => { bytes = value; }],
+    useEffect: (callback: () => () => void) => { mount = callback; },
   };
   vm.runInNewContext(await readFile(new URL('../lib/client.js', import.meta.url), 'utf8'), {
-    window: { __ModuleLoader__: { load(definition) { plugin = definition.factory(name => name === 'react' ? react : ui); } } },
-    fetch: async url => {
+    window: { __ModuleLoader__: { load(definition: ClientModule) { plugin = definition.factory(name => name === 'react' ? react : ui); } } },
+    fetch: async (url: string) => {
       assert.equal(url, '/session-deletion/api/gc-size'); requests++;
       if (fail === 'network') throw new Error('Disconnected');
       return { ok: !fail, json: async () => fail ? { error: 'Cannot scan' } : { bytes: response } };
     },
   });
   plugin.apply({
-    slots: { inject(_, callback) { callback(); }, register(options, component) { if (options.id === 'session-deletion.gc') menu = component; } },
+    slots: { inject(_, callback) { callback(); }, register(options, component) { if (options.id === 'session-deletion.gc') {
+      assert.equal(typeof component, 'function'); menu = component as typeof menu;
+    } } },
     effect() {},
   });
-  const render = () => menu({ onDismiss() {} }).props.children;
-  const text = value => typeof value === 'string' ? value : Array.isArray(value) ? value.map(text).join('') : text(value?.props?.children ?? '');
-  const cases = [
+  const render = () => element(element(menu({ onDismiss() {} })).props.children);
+  const text = (value: MockNode): string => typeof value === 'string' ? value : Array.isArray(value) ? value.map(text).join('') : isElement(value) ? text(value.props.children) : '';
+  const cases: Array<[number, string]> = [
     [0, '0 B'], [1, '1 B'], [1023, '1023 B'], [1024, '1 KiB'], [1536, '1.5 KiB'], [1264, '1.23 KiB'],
     [1024 ** 2 - 1, '1024 KiB'], [1024 ** 2, '1 MiB'],
     [1024 ** 3 - 1, '1024 MiB'], [1024 ** 3, '1 GiB'],
@@ -204,17 +234,19 @@ test('GC menu shows a native spinner, formats binary units and reports failed or
   ];
   for (const [value, expected] of cases) {
     bytes = undefined; response = value;
-    const loading = render().props.children[1];
+    const loading = nodes(render()).find((node): node is MockElement => isElement(node) && node.props.role === 'status');
+    assert(loading);
     assert.equal(loading.props.role, 'status');
     assert.equal(loading.props['aria-label'], '正在计算可清理体积');
-    assert.equal(loading.props.children[0].type, ui.StateDot);
-    assert.equal(loading.props.children[0].props.state, 'ongoing');
+    const spinner = nodes(loading).find((node): node is MockElement => isElement(node) && node.type === ui.StateDot);
+    assert(spinner);
+    assert.equal(spinner.props.state, 'ongoing');
     const unmount = mount();
     await new Promise(setImmediate);
     assert.equal(text(render()), `清理残留附件与缓存（${expected}）`);
     unmount();
   }
-  const failures = [[true, 0], ['network', 0], [false, undefined], [false, null], [false, -1], [false, NaN], [false, Infinity], [false, '1024']];
+  const failures: Array<[boolean | 'network', unknown]> = [[true, 0], ['network', 0], [false, undefined], [false, null], [false, -1], [false, NaN], [false, Infinity], [false, '1024']];
   for (const [failure, value] of failures) {
     bytes = undefined; fail = failure; response = value; render();
     const unmount = mount();

@@ -6,7 +6,8 @@ import { spawn } from 'node:child_process';
 import { randomUUID, createHash } from 'node:crypto';
 import { zstdCompressSync } from 'node:zlib';
 import { setTimeout as delay } from 'node:timers/promises';
-import { chromium } from 'playwright-core';
+import { chromium, type Browser, type Locator } from 'playwright-core';
+import type { SessionHeader } from '../lib/core.js';
 import { exists, encodeSegment } from '../lib/core.js';
 import { tryLock } from '../lib/guard.js';
 
@@ -27,11 +28,11 @@ const env={...process.env,DSH_HOME:home,DSH_TELEMETRY_DISABLED:'1',pnpm_config_s
 // Native Windows cannot spawn a .cmd shim directly; an explicit CLI entry also
 // lets either platform test an isolated DSH installation.
 const dshArgs=process.env.DSH_CLI?[...process.execArgv.filter(arg=>arg==='--expose-internals'),process.env.DSH_CLI]:[];
-const spawnDsh=args=>spawn(dshArgs.length?process.execPath:'dsh',[...dshArgs,...args],{env,stdio:['ignore','pipe','pipe']});
+const spawnDsh=(args: string[])=>spawn(dshArgs.length?process.execPath:'dsh',[...dshArgs,...args],{env,stdio:['ignore','pipe','pipe']});
 const install=spawnDsh(['plugin','--profile','web','add','file:'+repo]);
 let installText='';install.stdout.on('data',d=>{installText+=d});install.stderr.on('data',d=>{installText+=d});
 assert.equal(await new Promise(r=>install.on('exit',r)),0,'Install failed: '+installText);
-await fs.writeFile(join(home,'profiles/web/cordis.patch.yml'),'- insert:\n    - id: deletion-test-controls\n      name: '+JSON.stringify(join(repo,'test/host-fixture.mjs'))+'\n');
+await fs.writeFile(join(home,'profiles/web/cordis.patch.yml'),'- insert:\n    - id: deletion-test-controls\n      name: '+JSON.stringify(join(repo,'test/host-fixture.ts'))+'\n');
 const cwd=join(base,'project');await fs.mkdir(cwd,{recursive:true});
 await fs.writeFile(join(cwd,'keep.txt'),'project file');
 const id='session-'+randomUUID();
@@ -41,13 +42,13 @@ const stagedExclusive=createHash('sha256').update('target draft upload').digest(
 const projectKey='--'+encodeSegment(cwd.replace(/[\\/:]+/g,'-').replace(/^-+/,'')||'root').slice(0,251)+'--';
 const sessionDir=join(home,'sessions',projectKey,id);await fs.mkdir(sessionDir,{recursive:true,mode:0o700});
 const log=join(sessionDir,'session.v4.jsonl.zstd');
-const header={type:'session',version:4,id,createdAt:Date.now(),cwd,isSeeded:false,delegationDepth:0};
+const header: SessionHeader={type:'session',version:4,id,createdAt:Date.now(),cwd,isSeeded:false,delegationDepth:0};
 const message={type:'user/message',seq:1,time:Date.now(),surfaceOp:'append',data:{id:randomUUID(),role:'user',source:{kind:'user',rpcId:randomUUID(),clientTimeZone:'Asia/Taipei'},content:[{type:'text',text:'Offline deletion integration fixture'},{type:'text',text:`sha256:${exclusive} sha256:${shared} sha256:${stagedShared}`} ]}};
 const events=[{type:'turn/start',seq:0,time:Date.now(),data:{turn:1}},message,
  {type:'session/title',seq:2,time:Date.now(),data:{title:'Offline deletion integration fixture',messageSeqs:[],source:{kind:'user'}}}];
 await fs.writeFile(log,Buffer.concat([zstdCompressSync(JSON.stringify(header)+'\n'),zstdCompressSync(events.map(e=>JSON.stringify(e)+'\n').join(''))]));
 if(process.platform!=='win32')await fs.writeFile(join(sessionDir,'session.lock'),'');
-async function extraSession(name,age,attachment,meta={}){
+async function extraSession(name: string,age: number,attachment?: string,meta: Partial<SessionHeader>={}){
  const extra='session-'+randomUUID();const dir=join(home,'sessions',projectKey,extra);await fs.mkdir(dir,{recursive:true,mode:0o700});
  const extraHeader={...header,id:extra,createdAt:header.createdAt-age,...meta};
  const extraEvents=events.map(e=>({...e,time:e.time-age,data:e.type==='user/message'?{...e.data,id:randomUUID(),content:[{type:'text',text:name+(attachment?' sha256:'+attachment:'')}]}:e.type==='session/title'?{...e.data,title:name}:e.data}));
@@ -65,11 +66,12 @@ await fs.mkdir(join(home,'llm-deepseek'),{recursive:true,mode:0o700});
 await fs.writeFile(join(home,'llm-deepseek/files-v3.json'),JSON.stringify({formatVersion:3,records:[exclusive,shared].map(hash=>({scope:'c'.repeat(64),attachmentId:'sha256:'+hash,variantId:'sha256:'+hash,fileId:'file-'+hash.slice(0,8),bytes:18,createdAt:Date.now(),expiresAt:Date.now()+3600000}))}));
 const imageCache=join(home,'cache/attachments/request-images/aa/fixture');
 await fs.mkdir(join(imageCache,'..'),{recursive:true,mode:0o700});await fs.writeFile(imageCache,'derived fixture image');
-let host;let browser;let bootLog='';let exited;let port='0';
-const errors=[];
+let host: ReturnType<typeof spawnDsh> | undefined;let browser: Browser | undefined;let bootLog='';let exited: Promise<{code:number|null;signal:NodeJS.Signals|null}> | undefined;let port='0';
+const errors: string[]=[];
 async function start(){
  bootLog='';host=spawnDsh(['web','--no-open','--host','127.0.0.1','--port',port]);
- exited=new Promise(r=>host.on('exit',(code,signal)=>r({code,signal})));
+ const running=host;
+ exited=new Promise(r=>running.on('exit',(code,signal)=>r({code,signal})));
  host.stdout.on('data',d=>{bootLog+=d});host.stderr.on('data',d=>{bootLog+=d});
  for(let i=0;i<200;i++){
   const match=bootLog.match(/http:\/\/127\.0\.0\.1:(\d+)\/[^\s]*/);
@@ -80,7 +82,7 @@ async function start(){
  throw new Error('Boot timeout: '+bootLog.replace(/token=[^\s]+/g,'token=[redacted]'));
 }
 async function stop(){
- if(!host)return;
+ if(!host)return;assert(exited);
  if(host.exitCode===null&&host.signalCode===null){host.kill('SIGINT');await Promise.race([exited,delay(15000,undefined,{ref:false}).then(()=>{throw new Error('Host did not exit')})]);}
  const path=join(home,'session-deletion/lifecycle.lock');
  if(process.platform!=='win32'&&!(await exists(path)))return;
@@ -100,7 +102,7 @@ try{
  assert.ok([401,403].includes(unauthorizedReceipt.status));
  const unauthorizedSize=await fetch(`http://127.0.0.1:${port}/session-deletion/api/gc-size`);
  assert.ok([401,403].includes(unauthorizedSize.status));
- browser=await chromium.launch({executablePath:process.env.CHROME_PATH||(process.platform==='win32'?join(process.env.PROGRAMFILES,'Google/Chrome/Application/chrome.exe'):'/opt/google/chrome/chrome'),headless:true,args:['--no-sandbox']});
+ browser=await chromium.launch({executablePath:process.env.CHROME_PATH||(process.platform==='win32'?join(process.env.PROGRAMFILES!,'Google/Chrome/Application/chrome.exe'):'/opt/google/chrome/chrome'),headless:true,args:['--no-sandbox']});
  // Native UI selectors below use Simplified Chinese, independent of the host locale.
  const context=await browser.newContext({locale:'zh-CN',viewport:{width:1440,height:1000}});
  const page=await context.newPage();page.on('pageerror',e=>errors.push(e.message));
@@ -124,7 +126,7 @@ try{
  const row=page.getByText(/^(未命名|Offline deletion integration fixture)$/).first();
  await row.waitFor({timeout:15000});
  await row.click();
- const controls=async(action,data={})=>context.request.post(`http://127.0.0.1:${port}/deletion-test/`+action,{data});
+ const controls=async(action: string,data: Record<string, unknown>={})=>context.request.post(`http://127.0.0.1:${port}/deletion-test/`+action,{data});
  for(let i=0;i<100;i++){if((await (await controls('state',{id})).json()).agentResident)break;await delay(50)}
  const archivedProbe=await (await controls('archive-probe',{id})).json();
  assert.deepEqual(archivedProbe,{archived:true,agentResident:true,sessionResident:true,status:'idle',writerOpen:true});
@@ -134,14 +136,15 @@ try{
  console.log('ARCHIVE PROBE: archived=true; Agent, Session and write handle remain resident');
  await controls('unarchive',{id});
  // Compare against the actual native archive dialog, then cancel without stopping anything.
- const dialogAppearance=async locator=>locator.evaluate(node=>{
-  const pick=(element,keys)=>Object.fromEntries(keys.map(key=>[key,getComputedStyle(element)[key]]));
+ const dialogAppearance=async (locator: Locator)=>locator.evaluate(node=>{
+  const pick=(element: Element | null,keys: readonly (keyof CSSStyleDeclaration)[])=>{if(!element)throw new Error('Missing native dialog element');return Object.fromEntries(keys.map(key=>[key,getComputedStyle(element)[key]]));};
   const description=node.querySelector('p');
   const buttons=[...node.querySelectorAll('button')];
   const cancel=buttons.find(button=>button.textContent==='取消');
   const confirm=buttons.at(-1);
-  const typography=['fontFamily','fontSize','fontWeight','lineHeight','color'];
-  const buttonKeys=[...typography,'padding','borderRadius','borderWidth','backgroundColor'];
+  if(!description||!cancel||!confirm)throw new Error('Native dialog fixture is incomplete');
+  const typography=['fontFamily','fontSize','fontWeight','lineHeight','color'] as const;
+  const buttonKeys=[...typography,'padding','borderRadius','borderWidth','backgroundColor'] as const;
   return {panel:pick(node,['width','borderRadius','backgroundColor','boxShadow']),title:pick(node.querySelector('h2'),typography),
    description:pick(description,[...typography,'marginTop','marginBottom']),content:pick(description.parentElement,['padding','gap']),
    footer:pick(cancel.parentElement,['padding','gap','justifyContent']),cancel:pick(cancel,buttonKeys),confirm:pick(confirm,buttonKeys)};
@@ -223,19 +226,19 @@ try{
  assert.equal((await (await controls('held')).json()).held,true,'test must pause after the backend locks the target');
  const deleteToast=page.getByRole('alert').filter({hasText:'正在删除会话…'});
  await page.waitForFunction(()=>[...document.querySelectorAll('[role="alert"]')].some(el=>el.textContent==='正在删除会话…'));
- assert.match(await deleteToast.getAttribute('class'),/toast/,'progress uses the DSH Toast primitive');
+ assert.match(await deleteToast.getAttribute('class')??'',/toast/,'progress uses the DSH Toast primitive');
  assert.equal(await deleteToast.evaluate(el=>el.parentElement===document.body),true,'native Toast renders through its portal');
  await otherPage.waitForFunction(()=>[...document.querySelectorAll('[role="alert"]')].some(el=>el.textContent==='正在删除会话…'));
  assert.equal((await status()).deletionRunning,true);
  assert.equal(await otherPage.getByText('清理未完成，将在下次启动时自动恢复',{exact:true}).count(),0,'a pending journal is not an interruption while the server is deleting');
  const deletingDialog=page.getByRole('dialog',{name:/归档并删除此会话|删除此会话/});
- assert.equal(await deletingDialog.locator('button').evaluateAll(buttons=>buttons.every(button=>button.disabled)),true);
+ assert.equal(await deletingDialog.locator('button').evaluateAll((buttons: HTMLButtonElement[])=>buttons.every(button=>button.disabled)),true);
  await page.keyboard.press('Escape');
  assert.equal(await deletingDialog.count(),1,'native deletion modal stays open until submission completes');
- await page.waitForFunction(()=>document.querySelector('#deletion-lock-probe')?.inert===true);
- await otherPage.waitForFunction(()=>document.querySelector('#deletion-lock-probe')?.inert===true);
+ await page.waitForFunction(()=>document.querySelector<HTMLElement>('#deletion-lock-probe')?.inert===true);
+ await otherPage.waitForFunction(()=>document.querySelector<HTMLElement>('#deletion-lock-probe')?.inert===true);
  assert.equal((await controls('input',{id})).status(),409,'another tab/API cannot send input during deletion');
- assert.equal(await independentPage.locator('#deletion-lock-probe').evaluate(el=>el.inert),false,'another conversation stays interactive');
+ assert.equal(await independentPage.locator('#deletion-lock-probe').evaluate((el: HTMLElement)=>el.inert),false,'another conversation stays interactive');
  assert.equal((await controls('direct-input',{id:draftOwner.id})).status(),200,'another agent can publish while private deletion is in progress');
  assert.equal((await controls('stage',{id:draftOwner.id,text:'parallel upload'})).status(),200,'another conversation can upload during private deletion');
  assert.equal((await controls('pin',{id})).status(),409,'workspace pin cannot recreate target bookkeeping during cleanup');
@@ -244,16 +247,16 @@ try{
  await page.getByRole('dialog',{name:/归档并删除此会话|删除此会话/}).waitFor({state:'hidden',timeout:30000});
  const deletedToast=page.getByRole('alert').filter({hasText:'会话已删除：Offline deletion integration fixture'});
  await deletedToast.waitFor();
- assert.match(await deletedToast.getAttribute('class'),/toast/);
+ assert.match(await deletedToast.getAttribute('class')??'',/toast/);
  assert.equal(await deletedToast.evaluate(el=>el.parentElement===document.body),true);
- assert.equal(host.exitCode,null,'DSH must remain running during deletion');
+ assert.equal(host!.exitCode,null,'DSH must remain running during deletion');
  assert.equal(await exists(log),false,'session log must disappear before DSH exits');
  assert.equal((await status()).pending.length,0);
  const deletedReceipt=await receipt();
  assert.notEqual(deletedReceipt.revision,initialReceipt.revision);
  assert.deepEqual(deletedReceipt.deletedIdHashes,[createHash('sha256').update(id).digest('hex')]);
  assert.deepEqual((await status()).receipt,{revision:deletedReceipt.revision,count:1});
- await page.waitForFunction(()=>!document.querySelector('#deletion-lock-probe')?.inert);
+ await page.waitForFunction(()=>!document.querySelector<HTMLElement>('#deletion-lock-probe')?.inert);
  await page.evaluate(id=>localStorage.setItem('dsh.conversation.'+id,JSON.stringify({draft:'late stale-tab write'})),id);
  await page.waitForFunction(id=>localStorage.getItem('dsh.conversation.'+id)===null,id);
  assert.equal(receiptRequests,2,'one new receipt fetch after deletion; late writes use cached tombstones');
@@ -261,7 +264,7 @@ try{
  assert.equal(await exists(join(home,'attachments/v1/objects',exclusive.slice(0,2),exclusive)),true,'private deletion retains all attachments');
  assert.equal(await exists(imageCache),true,'private deletion does not clear the shared image cache');
  assert.equal(await fs.readFile(join(home,'attachments/v1/objects',shared.slice(0,2),shared),'utf8'),'fixture attachment');
- assert.deepEqual(JSON.parse(await fs.readFile(join(home,'llm-deepseek/files-v3.json'),'utf8')).records.map(r=>r.attachmentId),['sha256:'+exclusive,'sha256:'+shared]);
+ assert.deepEqual(JSON.parse(await fs.readFile(join(home,'llm-deepseek/files-v3.json'),'utf8')).records.map((r: { attachmentId: string })=>r.attachmentId),['sha256:'+exclusive,'sha256:'+shared]);
  assert.equal(createHash('sha256').update(await fs.readFile(preserved.path)).digest('hex'),preservedHash);
  assert.equal(await fs.readFile(join(home,'attachments/v1/file-objects',stagedShared.slice(0,2),stagedShared),'utf8'),'other draft upload','another session staged receipt protects its bytes');
  assert.equal(await exists(join(home,'attachments/v1/file-objects',stagedExclusive.slice(0,2),stagedExclusive)),true,'private deletion leaves staged-only uploads for later GC');
@@ -269,8 +272,8 @@ try{
  // GC is separately initiated from the native More menu; busy failure changes no attachments.
  const reclaimableBytes=Buffer.byteLength('fixture attachment')+Buffer.byteLength('target draft upload')+Buffer.byteLength('derived fixture image');
  const gcMenuName=`清理残留附件与缓存（${reclaimableBytes} B）`;
- let releaseSize;
- const sizeHold=new Promise(resolve=>{releaseSize=resolve});
+ let releaseSize!: () => void;
+ const sizeHold=new Promise<void>(resolve=>{releaseSize=resolve});
  await page.route('**/session-deletion/api/gc-size',async route=>{await sizeHold;await route.continue()},{times:1});
  await page.locator('nav').getByRole('button',{name:'更多',exact:true}).click();
  const sizeLoading=page.getByRole('status',{name:'正在计算可清理体积',exact:true});
@@ -292,7 +295,7 @@ try{
  await page.getByRole('menuitem',{name:'清理残留附件与缓存（无法计算体积）',exact:true}).click();
  await page.getByRole('button',{name:'确认清理',exact:true}).click();
  await page.getByRole('dialog',{name:'清理残留附件与缓存？',exact:true}).getByRole('alert').waitFor();
- await page.waitForFunction(()=>[...document.querySelectorAll('.dsh-session-deletion-modal button')].every(button=>!button.disabled));
+ await page.waitForFunction(()=>[...document.querySelectorAll<HTMLButtonElement>('.dsh-session-deletion-modal button')].every(button=>!button.disabled));
  assert.equal(await exists(join(home,'attachments/v1/objects',exclusive.slice(0,2),exclusive)),true);
  await controls('clear-input',{id:draftOwner.id});await controls('release-maintenance',{id:draftOwner.id});
  assert.equal((await controls('hold-gc')).status(),200);
@@ -303,12 +306,12 @@ try{
  await page.waitForFunction(()=>[...document.querySelectorAll('[role="alert"]')].some(el=>el.textContent==='正在清理残留附件与缓存…'));
  const busyDialog=page.getByRole('dialog',{name:'清理残留附件与缓存？',exact:true});
  assert.equal(await busyDialog.locator('button').count(),3);
- assert.equal(await busyDialog.locator('button').evaluateAll(buttons=>buttons.every(button=>button.disabled)),true,'all native GC buttons, including close, are disabled');
- assert.equal(await page.locator('nav button').evaluateAll(buttons=>buttons.every(button=>button.inert)),true,'session navigation controls remain inert');
+ assert.equal(await busyDialog.locator('button').evaluateAll((buttons: HTMLButtonElement[])=>buttons.every(button=>button.disabled)),true,'all native GC buttons, including close, are disabled');
+ assert.equal(await page.locator('nav button').evaluateAll((buttons: HTMLElement[])=>buttons.every(button=>button.inert)),true,'session navigation controls remain inert');
  await page.mouse.click(5,5); // Native backdrop dismissal is also blocked.
  await page.keyboard.press('Escape');
  assert.equal(await page.getByRole('dialog',{name:'清理残留附件与缓存？',exact:true}).count(),1,'busy GC cannot be dismissed through native Modal keyboard handling');
- await independentPage.waitForFunction(()=>document.querySelector('#deletion-lock-probe')?.inert===true);
+ await independentPage.waitForFunction(()=>document.querySelector<HTMLElement>('#deletion-lock-probe')?.inert===true);
  assert.equal((await controls('direct-input',{id:draftOwner.id})).status(),409,'GC blocks synchronous background publication');
  let uploaded=false;
  const duringGc=controls('stage',{id:draftOwner.id,text:'after GC upload'}).then(response=>{uploaded=true;return response});
@@ -317,11 +320,11 @@ try{
  const resultToast=page.getByRole('alert').filter({hasText:'共清理 3 项残留附件与缓存文件。'});
  await resultToast.waitFor({timeout:30000});
  assert.equal(await resultToast.innerText(),'共清理 3 项残留附件与缓存文件。');
- assert.match(await resultToast.getAttribute('class'),/toast/);
+ assert.match(await resultToast.getAttribute('class')??'',/toast/);
  assert.equal(await resultToast.evaluate(el=>el.parentElement===document.body),true);
  assert.equal(await page.locator('.dsh-session-deletion-gc').count(),0,'successful GC closes its modal automatically');
  assert.equal((await duringGc).status(),200);
- await page.waitForFunction(()=>!document.querySelector('#deletion-lock-probe')?.inert);
+ await page.waitForFunction(()=>!document.querySelector<HTMLElement>('#deletion-lock-probe')?.inert);
  // A second pass has nothing to reclaim and still uses the native Toast.
  await page.locator('nav').getByRole('button',{name:'更多',exact:true}).click();
  await page.getByRole('menuitem',{name:'清理残留附件与缓存（0 B）',exact:true}).click();
@@ -335,7 +338,7 @@ try{
  assert.equal(await exists(join(home,'attachments/v1/file-objects',stagedExclusive.slice(0,2),stagedExclusive)),false);
  assert.equal(await exists(join(home,'attachments/v1/file-objects',stagedShared.slice(0,2),stagedShared)),true,'GC protects other staged drafts');
  assert.equal(await exists(join(home,'attachments/v1/objects',shared.slice(0,2),shared)),true);
- assert.deepEqual(JSON.parse(await fs.readFile(join(home,'llm-deepseek/files-v3.json'),'utf8')).records.map(r=>r.attachmentId),['sha256:'+shared]);
+ assert.deepEqual(JSON.parse(await fs.readFile(join(home,'llm-deepseek/files-v3.json'),'utf8')).records.map((r: { attachmentId: string })=>r.attachmentId),['sha256:'+shared]);
  const coldProbe=await (await controls('archive-probe',{id:cold.id})).json();assert.equal(coldProbe.archived,true);
  const coldPreview=await (await context.request.post(`http://127.0.0.1:${port}/session-deletion/api/preview`,{headers:{'X-DSH-Session-Deletion':'1'},data:{sessionId:cold.id}})).json();assert.equal(coldPreview.archived,true);
  await controls('block-status');

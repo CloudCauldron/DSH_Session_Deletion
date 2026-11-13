@@ -2,7 +2,7 @@ import type { IncomingMessage } from 'node:http';
 import type { WebServer } from '@deepseek-ai/dsh-host-webserver';
 import { type DeletionRuntime } from './runtime.js';
 import type { Gate } from './gate.js';
-interface HostContext {
+export interface HostContext {
     sessionDeletionGate: Gate;
     sessionDeletionRuntime: DeletionRuntime;
     sessionPersistence: {
@@ -26,4 +26,3 @@ interface HostContext {
 export declare const name = "session-deletion";
 export declare const inject: string[];
 export declare function apply(ctx: HostContext): Promise<void>;
-export {};

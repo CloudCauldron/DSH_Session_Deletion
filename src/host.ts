@@ -6,7 +6,7 @@ import { listRequests, readJSON, stateDir } from './core.js';
 import { DeletionRefused, type DeletionRuntime } from './runtime.js';
 import type { Gate } from './gate.js';
 
-interface HostContext {
+export interface HostContext {
   sessionDeletionGate: Gate; sessionDeletionRuntime: DeletionRuntime;
   sessionPersistence: { name: string; root: string };
   connection: {

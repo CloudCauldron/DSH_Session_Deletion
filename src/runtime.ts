@@ -10,11 +10,66 @@ import { tryLock, waitingHosts, otherHosts } from './guard.js';
 import type { Lock } from './platform/index.js';
 import { hostRequire, type Gate } from './gate.js';
 
-// These dynamic boundaries are confined to the reviewed DSH release.
-type Dynamic = Record<string, any>;
-type Method = (this: any, ...args: any[]) => any;
-interface Agent extends Dynamic { id: string; session: { id: string; header: SessionHeader }; status: string; whenIdle(): Promise<void> }
+// Narrow contracts for the services used from the reviewed DSH release.
+interface Session { id: string; header: SessionHeader }
+interface Agent {
+  id: string; session: Session; status: string; whenIdle(): Promise<void>;
+  inbox?: { nextTurn?: readonly unknown[]; nextStep?: readonly unknown[] };
+}
 interface Handle { agent: Agent; dispose(): Promise<void> }
+interface FactoryOptions { sessionId?: string; resumeSessionId?: string; parentAgent?: { id: string }; meta?: { parentSession?: string } }
+interface SessionRequest { sessionId?: string; parentSession?: string }
+interface DeletionCache { delete(id: string): unknown }
+interface Schedule {
+  catalog(): Promise<Array<{ sessionId: string; id: string }>>;
+  delete(request: { sessionId: string; id: string }): Promise<unknown>;
+}
+interface Terminals { list(agent: Agent): Array<{ status?: { kind: string } }> }
+interface UploadRecord { scope: string; attachmentId: string; variantId: string; fileId: string }
+export interface UploadIndex {
+  load(): Promise<{ records: UploadRecord[] }>;
+  remove(scope: string, records: Array<Pick<UploadRecord, 'variantId' | 'fileId'>>): Promise<unknown>;
+}
+export interface RuntimeContext {
+  sessionDeletionGate: Gate;
+  attachments: { root: string; cacheRoot: string; requestInflight: { size: number } };
+  fileUploads: { stagedFiles: WeakMap<object, Map<string, { attachment: unknown }>> };
+  agents: { get(id: string): Agent | undefined; requireFactory(): { target: object }; setFactory(...args: unknown[]): unknown; factory?: { target: object } };
+  sessions: { list(): Session[]; get(id: string): Session | undefined };
+  sessionPersistence: {
+    list(): Promise<Array<{ header: SessionHeader }>>;
+    stat(id: string): Promise<{ sizeBytes: number } | undefined>;
+    flush(): Promise<void>;
+    coldLogMemo?: DeletionCache;
+  };
+  sessionProjectionCache: { table: DeletionCache; put(id: string, ...args: unknown[]): unknown };
+  sessionQuery: {
+    observeSession(id: string, options: { projectionMode: 'none' }): Promise<LiveSnapshot & Disposable>;
+    _observations?: { cache?: DeletionCache };
+  };
+  workspaceRegistry: {
+    archivedSessionIds: string[];
+    pinSession(id: string): unknown;
+    archiveSession(id: string): Promise<unknown>;
+    unarchiveSession(id: string): Promise<void>;
+    unpinSession(id: string): Promise<unknown>;
+    list(): Array<{ sessionIds: string[]; detachSession(id: string): Promise<unknown> }>;
+    headers?: DeletionCache; sessionPaths?: DeletionCache; missingSessionPaths?: DeletionCache; invalidSessionPaths?: DeletionCache;
+  };
+  sessionController: object;
+  schedule: Schedule;
+  terminals: Terminals;
+  on(name: 'agent/created' | 'agent/disposed', listener: (event: { agent: Agent }) => unknown): () => void;
+  on(name: 'agent/pre-step', listener: (event: { agent: Agent }, next: () => Promise<unknown>) => unknown): () => void;
+  on(name: 'session/created' | 'session/disposed' | 'session/event', listener: () => unknown): () => void;
+  inject(names: string[], callback: (ctx: RuntimeContext) => void): unknown;
+  effect(callback: () => () => void, label?: string): unknown;
+  provide(name: string, value: unknown): unknown;
+  emit(name: 'api-session/removed', id: string): unknown;
+  waterfall(name: 'workspace/session-activity', request: { sessionId: string }, fallback: () => Promise<unknown[]>): Promise<Array<{ kind?: string }>>;
+  logger: { warn(message: string, error: unknown): unknown };
+}
+type Method = (this: unknown, ...args: unknown[]) => unknown;
 export interface Activity { busy: boolean; reasons: string[] }
 export class DeletionRefused extends Error { readonly status = 409; }
 
@@ -67,14 +122,14 @@ export class DeletionRuntime {
   private restorers: (() => void)[] = [];
   private agentRestorers = new Map<Agent, (() => void)[]>();
   private wrapped = new WeakMap<object, Set<string>>();
-  private controller?: Dynamic;
-  private schedule?: Dynamic;
-  private terminals?: Dynamic;
+  private controller?: object;
+  private schedule?: Schedule;
+  private terminals?: Terminals;
   private unarchiveForCleanup!: (id: string) => Promise<void>;
   private maintenance?: 'delete' | 'gc';
   get gcRunning(): boolean { return this.maintenance === 'gc'; }
   get deletionRunning(): boolean { return this.maintenance === 'delete'; }
-  constructor(readonly ctx: Dynamic, private unwrap: (value: any) => any, private UploadIndex: new(path: string) => Dynamic) {}
+  constructor(readonly ctx: RuntimeContext, private unwrap: <T extends object>(value: T) => T, private UploadIndex: new(path: string) => UploadIndex) {}
   get home(): string { return (this.ctx.sessionDeletionGate as Gate).home; }
   get receiptSummary() { return { revision: this.receiptRevision, count: this.deleted.size }; }
   get receipt() { return { revision: this.receiptRevision, deletedIdHashes: [...this.deleted] }; }
@@ -96,21 +151,21 @@ export class DeletionRuntime {
       } }
     });
   }
-  private patch(object: Dynamic, key: string, wrap: (original: Method) => Method, required = true, restorers = this.restorers): void {
-    object = this.unwrap(object);
-    const names = this.wrapped.get(object) || new Set<string>();
+  private patch(object: object, key: string, wrap: (original: Method) => Method, required = true, restorers = this.restorers): void {
+    const target = this.unwrap(object) as Record<string, unknown>;
+    const names = this.wrapped.get(target) || new Set<string>();
     if (names.has(key)) return;
-    const original = object[key];
+    const original = target[key];
     if (typeof original !== 'function') {
       if (required) throw new Error(`Unsupported DSH capability: ${key}`);
       return;
     }
-    const own = Object.getOwnPropertyDescriptor(object, key);
-    const replacement = wrap(original);
-    object[key] = replacement; names.add(key); this.wrapped.set(object, names);
+    const own = Object.getOwnPropertyDescriptor(target, key);
+    const replacement = wrap(original as Method);
+    target[key] = replacement; names.add(key); this.wrapped.set(target, names);
     restorers.push(() => {
-      if (object[key] !== replacement) return;
-      if (own) Object.defineProperty(object, key, own); else delete object[key];
+      if (target[key] !== replacement) return;
+      if (own) Object.defineProperty(target, key, own); else delete target[key];
     });
   }
   private trackAgent(agent: Agent): void {
@@ -119,18 +174,19 @@ export class DeletionRuntime {
     this.agentRestorers.set(agent, restorers);
     for (const name of ['send', 'followup', 'steer', 'inject', 'runMaintenance']) {
       this.patch(agent, name, original => function (...args) {
-        runtime.assertAllowed([this.id]);
+        runtime.assertAllowed([(this as Agent).id]);
         runtime.barrier.assertSynchronousPublication();
         return Reflect.apply(original, this, args);
       }, false, restorers);
     }
   }
-  private captureFactory(factory: Dynamic): void {
+  private captureFactory(factory: object): void {
     const runtime = this;
     for (const name of ['createAgent', 'resume']) this.patch(factory, name, original => function (owner, options) {
-      const ids = [options.sessionId, options.resumeSessionId, options.parentAgent?.id, options.meta?.parentSession].filter((x): x is string => typeof x === 'string');
+      const input = options as FactoryOptions;
+      const ids = [input.sessionId, input.resumeSessionId, input.parentAgent?.id, input.meta?.parentSession].filter((x): x is string => typeof x === 'string');
       return runtime.operation(ids, async () => {
-        const handle: Handle = await Reflect.apply(original, this, [owner, options]);
+        const handle = await Reflect.apply(original, this, [owner, options]) as Handle;
         runtime.handles.set(handle.agent.id, handle);
         runtime.trackAgent(handle.agent);
         if (ids.some(id => runtime.isLocked(id))) {
@@ -157,19 +213,20 @@ export class DeletionRuntime {
     const unarchive = workspaces.unarchiveSession;
     this.unarchiveForCleanup = id => Reflect.apply(unarchive, workspaces, [id]);
     for (const name of ['pinSession', 'unarchiveSession', 'archiveSession']) this.patch(workspaces, name, original => function (id, ...args) {
-      return runtime.operation([id], () => Reflect.apply(original, this, [id, ...args]));
+      return runtime.operation([id as string], () => Reflect.apply(original, this, [id, ...args]));
     });
     const registry = this.unwrap(this.ctx.agents);
     if (typeof registry.requireFactory !== 'function') throw new Error('Unsupported AgentRegistry lifecycle');
     this.patch(registry, 'setFactory', original => function (...args) {
       const disposer = Reflect.apply(original, this, args);
-      runtime.captureFactory(this.requireFactory().target);
+      runtime.captureFactory((this as RuntimeContext['agents']).requireFactory().target);
       return disposer;
     });
     if (registry.factory?.target) this.captureFactory(registry.factory.target);
     const cache = this.unwrap(this.ctx.sessionProjectionCache);
     if (!cache.table || typeof cache.table.delete !== 'function') throw new Error('Projection cache deletion capability is missing');
-    this.patch(cache, 'put', original => function (id, ...args) {
+    this.patch(cache, 'put', original => function (key, ...args) {
+      const id = key as string;
       if (runtime.isLocked(id)) return Promise.resolve();
       const promise = Promise.resolve(Reflect.apply(original, this, [id, ...args]));
       const writes = runtime.cacheWrites.get(id) || new Set<Promise<unknown>>();
@@ -184,10 +241,11 @@ export class DeletionRuntime {
     const uploads = this.unwrap(this.ctx.fileUploads);
     if (!(uploads.stagedFiles instanceof WeakMap)) throw new Error('Unsupported staged file ownership');
     for (const method of ['upload', 'uploadStream', 'uploadImageStream']) this.patch(uploads, method, original => async function (owner, ...args) {
-      return runtime.operation([owner.id ?? owner.sessionId], () => Reflect.apply(original, this, [owner, ...args]));
+      const input = owner as { id?: string; sessionId?: string };
+      return runtime.operation([(input.id ?? input.sessionId)!], () => Reflect.apply(original, this, [owner, ...args]));
     });
     this.patch(uploads, 'bindPrompt', original => function (agent, ...args) {
-      runtime.assertAllowed([agent.id]); runtime.barrier.assertSynchronousPublication();
+      runtime.assertAllowed([(agent as Agent).id]); runtime.barrier.assertSynchronousPublication();
       return Reflect.apply(original, this, [agent, ...args]);
     });
     this.ctx.on('agent/created', ({ agent }: { agent: Agent }) => {
@@ -202,17 +260,18 @@ export class DeletionRuntime {
     });
     this.ctx.on('agent/pre-step', async ({ agent }: { agent: Agent }, next: () => Promise<unknown>) =>
       runtime.barrier.read(() => runtime.isLocked(agent.id) ? { kind: 'reject' } : next()));
-    this.ctx.inject(['sessionController'], (ctx: Dynamic) => {
+    this.ctx.inject(['sessionController'], (ctx: RuntimeContext) => {
       runtime.controller = ctx.sessionController;
       for (const name of ['prompt', 'attachment', 'updateQueue', 'fork', 'rename', 'selectModel', 'create']) {
         runtime.patch(ctx.sessionController, name, original => function (request, ...args) {
-          const ids = [request?.sessionId, request?.parentSession].filter((x): x is string => typeof x === 'string');
+          const input = request as SessionRequest | undefined;
+          const ids = [input?.sessionId, input?.parentSession].filter((x): x is string => typeof x === 'string');
           return runtime.operation(ids, () => Reflect.apply(original, this, [request, ...args]));
         });
       }
       for (const name of ['resolveAgent', 'inspect', 'page', 'projections']) {
         runtime.patch(ctx.sessionController, name, original => function (request, ...args) {
-          const id = typeof request === 'string' ? request : request?.sessionId;
+          const id = typeof request === 'string' ? request : (request as SessionRequest | undefined)?.sessionId;
           return runtime.operation(id ? [id] : [], async () => {
             const result = await Reflect.apply(original, this, [request, ...args]);
             if (id) runtime.assertAllowed([id]);
@@ -221,20 +280,20 @@ export class DeletionRuntime {
         });
       }
       runtime.patch(ctx.sessionController, 'list', original => async function (...args) {
-        const result = await Reflect.apply(original, this, args);
+        const result = await Reflect.apply(original, this, args) as { items: Array<{ sessionId: string }> };
         if (!Array.isArray(result?.items)) throw new Error('Unsupported session list response');
-        return { ...result, items: result.items.filter((row: Dynamic) => !runtime.deleted.has(digest(row.sessionId))) };
+        return { ...result, items: result.items.filter((row: { sessionId: string }) => !runtime.deleted.has(digest(row.sessionId))) };
       });
     });
-    this.ctx.inject(['schedule'], (ctx: Dynamic) => {
+    this.ctx.inject(['schedule'], (ctx: RuntimeContext) => {
       runtime.schedule = ctx.schedule;
-      runtime.patch(ctx.schedule, 'create', original => function (id, ...args) { return runtime.operation([id], () => Reflect.apply(original, this, [id, ...args])); });
-      runtime.patch(ctx.schedule, 'update', original => function (request, ...args) { return runtime.operation([request.sessionId], () => Reflect.apply(original, this, [request, ...args])); });
+      runtime.patch(ctx.schedule, 'create', original => function (id, ...args) { return runtime.operation([id as string], () => Reflect.apply(original, this, [id, ...args])); });
+      runtime.patch(ctx.schedule, 'update', original => function (request, ...args) { return runtime.operation([(request as { sessionId: string }).sessionId], () => Reflect.apply(original, this, [request, ...args])); });
     });
-    this.ctx.inject(['terminals'], (ctx: Dynamic) => {
+    this.ctx.inject(['terminals'], (ctx: RuntimeContext) => {
       runtime.terminals = ctx.terminals;
       for (const name of ['spawn', 'send', 'signal']) runtime.patch(ctx.terminals, name, original => function (owner, ...args) {
-        runtime.assertAllowed([owner.id]); runtime.barrier.assertSynchronousPublication(); return Reflect.apply(original, this, [owner, ...args]);
+        runtime.assertAllowed([(owner as { id: string }).id]); runtime.barrier.assertSynchronousPublication(); return Reflect.apply(original, this, [owner, ...args]);
       }, false);
     });
     this.ctx.effect(() => () => {
@@ -244,7 +303,7 @@ export class DeletionRuntime {
     }, 'session-deletion runtime adapters');
   }
   async headers(): Promise<Map<string, SessionHeader>> {
-    const map = new Map<string, SessionHeader>((await this.ctx.sessionPersistence.list()).map((s: Dynamic) => [s.header.id, s.header]));
+    const map = new Map<string, SessionHeader>((await this.ctx.sessionPersistence.list()).map((s) => [s.header.id, s.header]));
     for (const session of this.ctx.sessions.list()) map.set(session.id, session.header);
     return map;
   }
@@ -257,7 +316,7 @@ export class DeletionRuntime {
     const reasons: string[] = [];
     if (!this.controller || !this.schedule) reasons.push('会话服务仍在初始化');
     const targets = new Set(ids);
-    const all = new Set(global ? this.ctx.sessions.list().map((session: Dynamic) => session.id) as string[] : ids);
+    const all = new Set(global ? this.ctx.sessions.list().map((session) => session.id) as string[] : ids);
     for (const id of all) {
       if (targets.has(id)) {
         const stored = await this.ctx.sessionPersistence.stat(id);
@@ -271,7 +330,7 @@ export class DeletionRuntime {
         if (targets.has(id) && !this.handles.has(id)) reasons.push('缺少完整生命周期句柄，请重启 DSH');
         const idle = await Promise.race([agent.whenIdle().then(() => true), delay(0).then(() => false)]);
         if (!idle) reasons.push('会话后台维护尚未结束');
-        if (this.terminals?.list(agent).some((terminal: Dynamic) => terminal.status?.kind === 'running')) reasons.push('交互终端仍打开，请先关闭');
+        if (this.terminals?.list(agent).some((terminal) => terminal.status?.kind === 'running')) reasons.push('交互终端仍打开，请先关闭');
       } else if (this.ctx.sessions.get(id)) reasons.push('存在无法安全释放的驻留会话');
       try {
         const activity = await this.ctx.waterfall('workspace/session-activity', { sessionId: id }, () => Promise.resolve([]));
@@ -293,7 +352,7 @@ export class DeletionRuntime {
         const staged = this.unwrap(this.ctx.fileUploads).stagedFiles.get(session);
         map.set(session.id, { header: observation.header, events: [
           ...observation.events,
-          ...[...(staged?.values() || [])].map((upload: Dynamic) => upload.attachment),
+          ...[...(staged?.values() || [])].map((upload) => upload.attachment),
         ] });
       }
       finally { observation[Symbol.dispose](); }
@@ -309,10 +368,10 @@ export class DeletionRuntime {
   async garbageSize(): Promise<number> {
     if (this.maintenance) throw new DeletionRefused('另一项清理正在进行，请稍后重试。');
     let changed = false;
-    const subscriptions = ['session/created', 'session/disposed', 'session/event'].map(name => this.ctx.on(name, () => { changed = true; }));
+    const subscriptions = (['session/created', 'session/disposed', 'session/event'] as const).map(name => this.ctx.on(name, () => { changed = true; }));
     // Session events cover log/lifecycle changes; staged uploads can change without an event.
-    const current = () => JSON.stringify([this.receiptRevision, this.ctx.sessions.list().map((session: Dynamic) => [
-      session.id, [...(this.unwrap(this.ctx.fileUploads).stagedFiles.get(session)?.values() || [])].map((upload: Dynamic) => upload.attachment),
+    const current = () => JSON.stringify([this.receiptRevision, this.ctx.sessions.list().map((session) => [
+      session.id, [...(this.unwrap(this.ctx.fileUploads).stagedFiles.get(session)?.values() || [])].map((upload) => upload.attachment),
     ])]);
     try {
       const before = current();
@@ -345,7 +404,7 @@ export class DeletionRuntime {
   private async removeUploadMappings(hashes: ReadonlySet<string>): Promise<void> {
     const path = join(this.home, 'llm-deepseek/files-v3.json');
     const index = new this.UploadIndex(path); const current = await index.load();
-    const groups = new Map<string, Dynamic[]>();
+    const groups = new Map<string, UploadRecord[]>();
     for (const record of current.records) if (hashes.has(String(record.attachmentId).replace(/^sha256:/, ''))) {
       const rows = groups.get(record.scope) || []; rows.push(record); groups.set(record.scope, rows);
     }
@@ -407,7 +466,7 @@ export class DeletionRuntime {
             const registry = this.unwrap(this.ctx.workspaceRegistry);
             for (const member of targets) {
               await registry.unpinSession(member); await this.unarchiveForCleanup(member);
-              for (const key of ['headers', 'sessionPaths', 'missingSessionPaths', 'invalidSessionPaths']) registry[key]?.delete(member);
+              for (const key of ['headers', 'sessionPaths', 'missingSessionPaths', 'invalidSessionPaths'] as const) registry[key]?.delete(member);
             }
           } else if (path === join('storages', 'schedule.json')) {
             for (const task of await this.schedule!.catalog()) if (targets.has(task.sessionId)) await this.schedule!.delete({ sessionId: task.sessionId, id: task.id });
@@ -439,10 +498,10 @@ export class DeletionRuntime {
 
 export const name = 'session-deletion-runtime';
 export const inject = ['sessionDeletionGate', 'agents', 'sessions', 'sessionPersistence', 'sessionProjectionCache', 'sessionQuery', 'workspaceRegistry', 'attachments', 'fileUploads'];
-export async function apply(ctx: Dynamic): Promise<void> {
+export async function apply(ctx: RuntimeContext): Promise<void> {
   const require = await hostRequire();
   const cordis = await import(pathToFileURL(require.resolve('@deepseek-ai/cordis')).href);
   const provider = await import(pathToFileURL(require.resolve('@deepseek-ai/dsh-llm-deepseek')).href);
-  const runtime = new DeletionRuntime(ctx, object => object?.[cordis.symbols.original] ?? object, provider.DeepSeekUploadIndex);
+  const runtime = new DeletionRuntime(ctx, object => ((object as Record<symbol, unknown> | undefined)?.[cordis.symbols.original] ?? object) as typeof object, provider.DeepSeekUploadIndex);
   await runtime.initialize(); ctx.provide('sessionDeletionRuntime', runtime);
 }
