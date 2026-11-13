@@ -1,6 +1,7 @@
 {
   "meta": {
-    "title": "DSH 会话删除"
+    "title": "DSH 会话删除",
+    "description": "DSH 会话的即时删除与残留附件的清理"
   },
   "messages": {
     "common.close": "关闭",

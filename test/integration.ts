@@ -375,6 +375,8 @@ try{
  assert.equal(await page.evaluate(id=>localStorage.getItem('dsh.conversation.'+id),id),null);
  assert.equal(await page.getByText('Offline deletion integration fixture',{exact:true}).count(),0);
  // The native inventory lists one external entry and resolves its shipped locale metadata.
+ const zhDescription='DSH 会话的即时删除与残留附件的清理';
+ const enDescription='Immediate session deletion and orphan attachment cleanup for DSH.';
  await page.getByRole('button',{name:'账号菜单',exact:true}).click();
  await page.getByRole('menuitem',{name:'设置',exact:true}).click();
  const settings=page.locator('[data-shortcut-modal="settings"]');
@@ -382,6 +384,8 @@ try{
  await settings.getByRole('searchbox',{name:'搜索插件',exact:true}).fill('dsh-session-deletion');
  const pluginCard=settings.locator('[data-plugin-module^="dsh-session-deletion"]');
  await pluginCard.getByText('DSH 会话删除',{exact:true}).waitFor();
+ await pluginCard.getByText(zhDescription,{exact:true}).waitFor();
+ assert.equal(await pluginCard.getByText(enDescription,{exact:true}).count(),0);
  assert.equal(await pluginCard.count(),1,'internal gate/runtime fibers must not become Loader inventory entries');
  assert.equal(await pluginCard.getAttribute('data-plugin-module'),'dsh-session-deletion');
  assert.equal(await pluginCard.getAttribute('data-failed'),null);
@@ -391,6 +395,8 @@ try{
  await settings.getByRole('button',{name:'Built-in plugins',exact:true}).click();
  await settings.getByRole('searchbox',{name:'Search plugins',exact:true}).fill('dsh-session-deletion');
  await pluginCard.getByText('DSH Session Deletion',{exact:true}).waitFor();
+ await pluginCard.getByText(enDescription,{exact:true}).waitFor();
+ assert.equal(await pluginCard.getByText(zhDescription,{exact:true}).count(),0);
  assert.equal(await pluginCard.count(),1);
  assert.equal(await pluginCard.getByText('DSH 会话删除',{exact:true}).count(),0);
  // The same plugin renders its English menu, dialog and buttons through the native locale service.
@@ -410,8 +416,10 @@ try{
  await settings.getByRole('button',{name:'内置插件',exact:true}).click();
  await settings.getByRole('searchbox',{name:'搜索插件',exact:true}).fill('dsh-session-deletion');
  await pluginCard.getByText('DSH 会话删除',{exact:true}).waitFor();
+ await pluginCard.getByText(zhDescription,{exact:true}).waitFor();
+ assert.equal(await pluginCard.getByText(enDescription,{exact:true}).count(),0);
  assert.deepEqual(errors,[]);
- console.log('INTEGRATION PASS: native menu and GC entry, private deletion during other maintenance/uploads, target-only locking, explicit idle GC, staged/shared references, GC publication barrier, recovery and restart, single plugin entry with live zh/en names and English UI');
+ console.log('INTEGRATION PASS: native menu and GC entry, private deletion during other maintenance/uploads, target-only locking, explicit idle GC, staged/shared references, GC publication barrier, recovery and restart, single plugin entry with live zh/en names and descriptions and English UI');
 }catch(e){
  if(browser){const pages=browser.contexts().flatMap(c=>c.pages());if(pages[0]){await fs.mkdir('test-results',{recursive:true});await pages[0].screenshot({path:'test-results/failure.png'});console.error((await pages[0].locator('body').innerText()).slice(0,6000));}}
  console.error('Browser errors:',errors);

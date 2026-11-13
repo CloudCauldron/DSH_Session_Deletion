@@ -1,6 +1,7 @@
 {
   "meta": {
-    "title": "DSH Session Deletion"
+    "title": "DSH Session Deletion",
+    "description": "Immediate session deletion and orphan attachment cleanup for DSH."
   },
   "messages": {
     "common.close": "Close",
