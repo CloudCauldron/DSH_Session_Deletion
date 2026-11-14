@@ -8,6 +8,8 @@ type RuntimeStubs = {
 type RuntimeInternals = Pick<DeletionRuntime, keyof DeletionRuntime> & {
   operation: RuntimeSource['operation']; snapshots: RuntimeSource['snapshots']; quiescence: RuntimeSource['quiescence'];
   maintenance: RuntimeSource['maintenance']; controller: RuntimeSource['controller']; schedule: RuntimeSource['schedule'];
+  handles: RuntimeSource['handles']; stopTimeoutMs: RuntimeSource['stopTimeoutMs']; terminals: RuntimeSource['terminals'];
+  manager: RuntimeSource['manager']; activations: RuntimeSource['activations']; stop: RuntimeSource['stop'];
 };
 
 class UnusedUploadIndex implements UploadIndex {
@@ -17,5 +19,11 @@ class UnusedUploadIndex implements UploadIndex {
 
 /** Each unit supplies only the services used by the operation under test. */
 export function makeRuntime(ctx: RuntimeStubs): RuntimeInternals {
-  return new DeletionRuntime(ctx as RuntimeContext, value => value, UnusedUploadIndex) as unknown as RuntimeInternals;
+  const manager = { resident: new Map(), materializations: new Set(),
+    dispose: async () => {}, assertAdmitting() {}, rootOf: (agent: unknown) => agent };
+  return new DeletionRuntime({
+    subagents: { manager },
+    jobs: { start() {}, list: () => [], kill() {}, events: { subscribe: () => () => {} } },
+    on: () => () => {}, ...ctx,
+  } as RuntimeContext, value => value, UnusedUploadIndex) as unknown as RuntimeInternals;
 }

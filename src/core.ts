@@ -29,7 +29,13 @@ interface WorkspaceData {
   global: { archivedSessionIds: string[]; pinnedSessionIds: string[] };
   tables: { workspaces: Record<string, { sessionIds: string[] }> };
 }
-interface ScheduleData { unit: { name: string }; tables: { tasks: Record<string, { sessionId: string }> } }
+export interface ScheduleTask {
+  sessionId?: string;
+  target?: { kind: 'session' | 'new_once' | 'new'; sessionId?: string };
+  record?: { id: string };
+  pendingDelivery?: { targetSessionId: string };
+}
+interface ScheduleData { unit: { name: string }; tables: { tasks: Record<string, ScheduleTask> } }
 interface RemoteCache { formatVersion: number; records: { attachmentId: string }[] }
 interface Edit { path: string; data: unknown }
 export interface LiveSnapshot { header: SessionHeader; events: readonly unknown[] }
@@ -49,6 +55,21 @@ export const STATE_NAME = 'session-deletion';
 export const digest = (value: string) => createHash('sha256').update(value).digest('hex');
 export const stateDir = (home: string) => join(home, STATE_NAME);
 export const requestPath = (home: string, id: string) => join(stateDir(home), 'pending', digest(id) + '.json');
+/** DSH's explicit destination wins over the legacy session binding. */
+export function scheduledSession(task: ScheduleTask): string | undefined {
+  if (task.target?.kind === 'new') return undefined;
+  if (task.target) {
+    if (!['session', 'new_once'].includes(task.target.kind)) throw new Error('Invalid schedule destination');
+    if (task.target.sessionId) return task.target.sessionId;
+    if (task.target.kind !== 'new_once') throw new Error('Invalid schedule destination');
+  } else if (task.sessionId) return task.sessionId;
+  return task.record ? 'session-schedule-' + digest(task.record.id) : undefined;
+}
+export async function readSchedule(home: string): Promise<ScheduleData | undefined> {
+  const schedule = await readJSON<ScheduleData | undefined>(join(home, 'storages/schedule.json'));
+  if (schedule && (schedule.unit?.name !== 'schedule' || !schedule.tables?.tasks)) throw new Error('Unsupported schedule schema');
+  return schedule;
+}
 export function encodeSegment(raw: string) {
   if (typeof raw !== 'string' || !raw || raw.length > 1024) throw new Error('Invalid session ID');
   let out = '';
@@ -384,11 +405,10 @@ async function privateInventory(home: string, ids: ReadonlySet<string>) {
     if (changed) rewrite.push({ path: workspacePath, data: workspace });
   }
   const schedulePath = join(home, 'storages/schedule.json');
-  const schedule = await readJSON<ScheduleData | undefined>(schedulePath);
+  const schedule = await readSchedule(home);
   if (schedule) {
-    if (schedule.unit?.name !== 'schedule' || !schedule.tables?.tasks) throw new Error('Unsupported schedule schema');
     let changed = false;
-    for (const [key, task] of Object.entries(schedule.tables.tasks)) if (ids.has(task.sessionId)) { delete schedule.tables.tasks[key]; changed = true; }
+    for (const [key, task] of Object.entries(schedule.tables.tasks)) if (ids.has(scheduledSession(task)!)) { delete schedule.tables.tasks[key]; changed = true; }
     if (changed) rewrite.push({ path: schedulePath, data: schedule });
   }
   return { rewrite, remove };

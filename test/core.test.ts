@@ -6,7 +6,7 @@ import { createHash, randomBytes } from 'node:crypto';
 import { join } from 'node:path';
 import { zstdCompressSync, constants } from 'node:zlib';
 import { syncBuiltinESMExports } from 'node:module';
-import { scanSessions, sweep, collectGarbage, garbageSize, exists, digest, encodeSegment, listRequests, readJSON, stateDir, enqueue, planSessionDeletion, atomicJSON, safePath, readLog, SUPPORTED_DSH } from '../lib/core.js';
+import { scanSessions, sweep, collectGarbage, garbageSize, exists, digest, encodeSegment, listRequests, readJSON, stateDir, enqueue, planSessionDeletion, atomicJSON, safePath, readLog, SUPPORTED_DSH, scheduledSession } from '../lib/core.js';
 import type { Receipt, DeletionRequest } from '../lib/core.js';
 import { birth } from '../lib/platform/index.js';
 import { fixture } from './fixtures.ts';
@@ -51,6 +51,26 @@ void test('unsupported host versions cannot authorize a deletion', async () => {
 });
 
 const attachment = (f: Awaited<ReturnType<typeof fixture>>, hash: string, kind = 'objects') => join(f.home, 'attachments/v1', kind, hash.slice(0, 2), hash);
+
+void test('schedule cleanup follows explicit destinations and the native legacy fallback, never actor involvement', async () => {
+  const f = await fixture();
+  try {
+    const path = join(f.home, 'storages/schedule.json');
+    await f.write(path, JSON.stringify({ unit: { name: 'schedule', version: 2 }, tables: { tasks: {
+      legacy: { sessionId: f.ids.main },
+      current: { target: { kind: 'session', sessionId: f.ids.main }, sessionId: f.ids.other },
+      child: { target: { kind: 'new_once', sessionId: f.ids.child } },
+      rebound: { target: { kind: 'session', sessionId: f.ids.other }, sessionId: f.ids.main },
+      independent: { target: { kind: 'new' }, sessionId: f.ids.main },
+      involved: { target: { kind: 'session', sessionId: f.ids.other }, involvedSessionIds: [f.ids.main] },
+    } } }));
+    assert.equal(scheduledSession({ record: { id: 'legacy-unbound' } }), 'session-schedule-' + digest('legacy-unbound'));
+    assert.equal(scheduledSession({ target: { kind: 'new_once' }, record: { id: 'reserved' } }), 'session-schedule-' + digest('reserved'));
+    await f.queue(); await sweep(f.home);
+    const result = await readJSON<{ tables: { tasks: Record<string, unknown> } }>(path);
+    assert.deepEqual(Object.keys(result.tables.tasks), ['rebound', 'independent', 'involved']);
+  } finally { await f.cleanup(); }
+});
 
 void test('atomic writes identify their process owner and preserve the committed file when serialization fails', async () => {
   const f = await fixture();

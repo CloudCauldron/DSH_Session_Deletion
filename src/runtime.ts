@@ -4,8 +4,8 @@ import { AsyncLocalStorage } from 'node:async_hooks';
 import { pathToFileURL } from 'node:url';
 import { join, relative } from 'node:path';
 import { setTimeout as delay } from 'node:timers/promises';
-import { digest, enqueue, familyOf, listRequests, readJSON, stateDir, sweep, planSessionDeletion, collectGarbage, garbageSize,
-  type LiveSnapshot, type Receipt, type SessionHeader, type SessionMap, type GcResult } from './core.js';
+import { digest, enqueue, familyOf, listRequests, readJSON, readSchedule, stateDir, sweep, planSessionDeletion, collectGarbage, garbageSize, scheduledSession,
+  type LiveSnapshot, type Receipt, type SessionHeader, type SessionMap, type GcResult, type ScheduleTask } from './core.js';
 import { tryLock, waitingHosts, otherHosts } from './guard.js';
 import type { Lock } from './platform/index.js';
 import { hostRequire, type Gate } from './gate.js';
@@ -15,6 +15,7 @@ import { LocalizedError, message, type LocalizedMessage } from './locale.js';
 interface Session { id: string; header: SessionHeader }
 interface Agent {
   id: string; session: Session; status: string; whenIdle(): Promise<void>;
+  cancel(cause: { kind: 'user' }): void;
   inbox?: { nextTurn?: readonly unknown[]; nextStep?: readonly unknown[] };
 }
 interface Handle { agent: Agent; dispose(): Promise<void> }
@@ -22,10 +23,36 @@ interface FactoryOptions { sessionId?: string; resumeSessionId?: string; parentA
 interface SessionRequest { sessionId?: string; parentSession?: string }
 interface DeletionCache { delete(id: string): unknown }
 interface Schedule {
-  catalog(): Promise<Array<{ sessionId: string; id: string }>>;
-  delete(request: { sessionId: string; id: string }): Promise<unknown>;
+  catalog(): Promise<Array<ScheduleTask & { id: string; updatedAt?: string }>>;
+  create(request: { target: ScheduleTask['target'] }, actor?: string, signal?: AbortSignal): Promise<unknown>;
+  edit(request: { id: string; action: 'update' | 'delete'; expectedUpdatedAt?: string | null; patch?: { target?: ScheduleTask['target'] } }, actor?: string, signal?: AbortSignal): Promise<unknown>;
 }
-interface Terminals { list(agent: Agent): Array<{ status?: { kind: string } }> }
+interface Terminals {
+  list(agent: Agent): Array<{ sessionId: string; status?: { kind: string } }>;
+  hasOwnerActivity(agent: Agent): boolean;
+  kill(agent: Agent, id: string, reason: string): Promise<boolean>;
+}
+interface Job { id: string; owner?: string; status: string }
+interface Jobs {
+  start(spec: { owner?: string }): unknown;
+  list(owner: string): Job[];
+  kill(id: string, owner: string, reason: string): unknown;
+  events: { subscribe(filter: { owners: 'all' }, listener: (event: { type: string; job?: Job }) => void): () => void };
+}
+interface Activation {
+  childId: string; kind: 'local' | 'external'; root: Agent;
+  handle?: Handle; closing?: Promise<void>;
+  run?: { id: string; result: Promise<unknown>; dispose(): Promise<void> };
+  controller?: AbortController;
+}
+interface SubagentManager {
+  resident: Map<string, Activation>;
+  materializations: Set<{ root: Agent }>;
+  dispose(activation: Activation): Promise<void>;
+  assertAdmitting(agent: Agent): void;
+  rootOf(agent: Agent): Agent;
+}
+interface Operation { done: Promise<void>; startup: boolean }
 interface UploadRecord { scope: string; attachmentId: string; variantId: string; fileId: string }
 export interface UploadIndex {
   load(): Promise<{ records: UploadRecord[] }>;
@@ -60,9 +87,12 @@ export interface RuntimeContext {
   sessionController: object;
   schedule: Schedule;
   terminals: Terminals;
+  jobs: Jobs;
+  subagents: { manager?: unknown };
   on(name: 'agent/created' | 'agent/disposed', listener: (event: { agent: Agent }) => unknown): () => void;
   on(name: 'agent/pre-step', listener: (event: { agent: Agent }, next: () => Promise<unknown>) => unknown): () => void;
   on(name: 'session/created' | 'session/disposed' | 'session/event', listener: () => unknown): () => void;
+  on(name: 'session/event', listener: (session: Session, event: { type: string; data: { jobId?: string; owner?: string; producerReported?: boolean } }) => unknown, options: { global: true }): () => void;
   inject(names: string[], callback: (ctx: RuntimeContext) => void): unknown;
   effect(callback: () => () => void, label?: string): unknown;
   provide(name: string, value: unknown): unknown;
@@ -116,7 +146,7 @@ export class DeletionRuntime {
   readonly locked = new Set<string>();
   readonly barrier = new PublicationBarrier();
   private handles = new Map<string, Handle>();
-  private operations = new Map<string, number>();
+  private operations = new Map<string, Set<Operation>>();
   private deleted = new Set<string>();
   private receiptRevision = '';
   private cacheWrites = new Map<string, Set<Promise<unknown>>>();
@@ -126,6 +156,10 @@ export class DeletionRuntime {
   private controller?: object;
   private schedule?: Schedule;
   private terminals?: Terminals;
+  private subagentBinding?: { manager: SubagentManager; fields: SubagentManager };
+  private stopping?: Promise<void>;
+  private stopTimeoutMs = 30_000;
+  private editSchedule!: Schedule['edit'];
   private unarchiveForCleanup!: (id: string) => Promise<void>;
   private maintenance?: 'delete' | 'gc';
   get gcRunning(): boolean { return this.maintenance === 'gc'; }
@@ -138,18 +172,24 @@ export class DeletionRuntime {
   private assertAllowed(ids: string[]): void {
     if (ids.some(id => this.isLocked(id))) throw new DeletionRefused('error.sessionLocked');
   }
-  private operation<T>(ids: string[], work: () => Promise<T> | T): Promise<T> {
+  private operation<T>(ids: string[], work: () => Promise<T> | T, startup = false): Promise<T> {
+    ids = [...new Set(ids)];
     this.assertAllowed(ids);
     return this.barrier.read(async () => {
       this.assertAllowed(ids);
       // Queued submissions have not published anything and must not make the
       // GC's idle check fail merely because they arrived behind its barrier.
-      for (const id of ids) this.operations.set(id, (this.operations.get(id) || 0) + 1);
+      let finish!: () => void;
+      const operation: Operation = { done: new Promise<void>(resolve => { finish = resolve; }), startup };
+      for (const id of ids) {
+        const pending = this.operations.get(id) ?? new Set<Operation>();
+        pending.add(operation); this.operations.set(id, pending);
+      }
       try { return await work(); }
       finally { for (const id of ids) {
-        const count = (this.operations.get(id) || 1) - 1;
-        if (count) this.operations.set(id, count); else this.operations.delete(id);
-      } }
+        const pending = this.operations.get(id)!;
+        pending.delete(operation); if (!pending.size) this.operations.delete(id);
+      } finish(); }
     });
   }
   private patch(object: object, key: string, wrap: (original: Method) => Method, required = true, restorers = this.restorers): void {
@@ -195,7 +235,7 @@ export class DeletionRuntime {
           throw new DeletionRefused('error.sessionReopen');
         }
         return handle;
-      });
+      }, true);
     });
   }
   private installReceipt(receipt: Receipt): void {
@@ -224,6 +264,22 @@ export class DeletionRuntime {
       return disposer;
     });
     if (registry.factory?.target) this.captureFactory(registry.factory.target);
+    const manager = this.manager();
+    this.patch(manager, 'assertAdmitting', original => function (agent) {
+      const member = agent as Agent;
+      runtime.assertAllowed([member.id, manager.rootOf(member).id]);
+      return Reflect.apply(original, this, [agent]);
+    });
+    this.subagentBinding = { manager, fields: {
+      resident: manager.resident, materializations: manager.materializations,
+      dispose: manager.dispose, assertAdmitting: manager.assertAdmitting, rootOf: manager.rootOf,
+    } };
+    this.patch(this.ctx.jobs, 'start', original => function (spec) {
+      const owner = (spec as { owner?: string }).owner;
+      runtime.assertAllowed(owner ? [owner] : []);
+      runtime.barrier.assertSynchronousPublication();
+      return Reflect.apply(original, this, [spec]);
+    });
     const cache = this.unwrap(this.ctx.sessionProjectionCache);
     if (!cache.table || typeof cache.table.delete !== 'function') throw new Error('Projection cache deletion capability is missing');
     this.patch(cache, 'put', original => function (key, ...args) {
@@ -287,15 +343,32 @@ export class DeletionRuntime {
       });
     });
     this.ctx.inject(['schedule'], (ctx: RuntimeContext) => {
-      runtime.schedule = ctx.schedule;
-      runtime.patch(ctx.schedule, 'create', original => function (id, ...args) { return runtime.operation([id as string], () => Reflect.apply(original, this, [id, ...args])); });
-      runtime.patch(ctx.schedule, 'update', original => function (request, ...args) { return runtime.operation([(request as { sessionId: string }).sessionId], () => Reflect.apply(original, this, [request, ...args])); });
+      const service = runtime.unwrap(ctx.schedule);
+      const edit = service.edit;
+      if (typeof edit !== 'function') throw new Error('Unsupported schedule edit capability');
+      runtime.editSchedule = (...args) => Reflect.apply(edit, service, args);
+      runtime.patch(service, 'create', original => function (request, actor, ...args) {
+        const target = scheduledSession(request as ScheduleTask);
+        const ids = [target, actor].filter((id): id is string => typeof id === 'string');
+        return runtime.operation(ids, () => Reflect.apply(original, this, [request, actor, ...args]));
+      });
+      runtime.patch(service, 'edit', original => async function (request, actor, ...args) {
+        const input = request as Parameters<Schedule['edit']>[0];
+        const task = (await service.catalog()).find(task => task.id === input.id);
+        const ids = [task && scheduledSession(task), input.patch?.target && scheduledSession({ target: input.patch.target }), actor]
+          .filter((id): id is string => typeof id === 'string');
+        return runtime.operation(ids, () => Reflect.apply(original, this, [request, actor, ...args]));
+      });
+      runtime.schedule = service;
     });
     this.ctx.inject(['terminals'], (ctx: RuntimeContext) => {
       runtime.terminals = ctx.terminals;
-      for (const name of ['spawn', 'send', 'signal']) runtime.patch(ctx.terminals, name, original => function (owner, ...args) {
+      runtime.patch(ctx.terminals, 'spawn', original => function (owner, ...args) {
+        return runtime.operation([(owner as Agent).id], () => Reflect.apply(original, this, [owner, ...args]), true);
+      });
+      for (const name of ['startSend', 'signal']) runtime.patch(ctx.terminals, name, original => function (owner, ...args) {
         runtime.assertAllowed([(owner as { id: string }).id]); runtime.barrier.assertSynchronousPublication(); return Reflect.apply(original, this, [owner, ...args]);
-      }, false);
+      });
     });
     this.ctx.effect(() => () => {
       for (const restorers of runtime.agentRestorers.values()) for (const restore of restorers.reverse()) restore();
@@ -308,12 +381,137 @@ export class DeletionRuntime {
     for (const session of this.ctx.sessions.list()) map.set(session.id, session.header);
     return map;
   }
+  /** The public stop APIs do not expose cold-resumed or external Activation cleanup. */
+  private manager(): SubagentManager {
+    const manager = this.ctx.subagents && this.unwrap(this.ctx.subagents).manager as SubagentManager | undefined;
+    if (!manager || !(manager.resident instanceof Map) || !(manager.materializations instanceof Set)
+      || ['dispose', 'assertAdmitting', 'rootOf'].some(key => typeof (manager as unknown as Record<string, unknown>)[key] !== 'function'))
+      throw new DeletionRefused('activity.unconfirmed');
+    const binding = this.subagentBinding;
+    if (binding && (binding.manager !== manager || (Object.keys(binding.fields) as Array<keyof SubagentManager>)
+      .some(key => binding.fields[key] !== manager[key]))) throw new DeletionRefused('activity.unconfirmed');
+    return manager;
+  }
+  private activations(root: SessionHeader, ids: readonly string[], manager: SubagentManager): Activation[] {
+    const owned = (agent: Agent | undefined): boolean => {
+      if (!agent || typeof agent.id !== 'string' || agent.session?.id !== agent.id
+        || agent.session.header?.id !== agent.id || !Number.isSafeInteger(agent.session.header.createdAt))
+        throw new DeletionRefused('activity.unconfirmed');
+      if (agent.id !== root.id) return false;
+      if (agent.session.header.createdAt !== root.createdAt) throw new DeletionRefused('error.sessionChanged');
+      const live = this.ctx.agents.get(agent.id);
+      if (live && live !== agent) throw new DeletionRefused('error.sessionChanged');
+      return true;
+    };
+    for (const pending of manager.materializations) if (owned(pending?.root)) throw new DeletionRefused('activity.operations');
+    const targets: Activation[] = [];
+    for (const [key, activation] of manager.resident) {
+      if (!activation || key !== activation.childId || !['local', 'external'].includes(activation.kind)) throw new DeletionRefused('activity.unconfirmed');
+      if (!owned(activation.root)) {
+        if (ids.includes(key)) throw new DeletionRefused('error.familyChanged');
+        continue;
+      }
+      if (activation.kind === 'local') {
+        const agent = activation.handle?.agent;
+        if (!agent || agent.id !== key || !ids.includes(key)) throw new DeletionRefused('error.familyChanged');
+        const live = this.ctx.agents.get(key);
+        if (live ? live !== agent || this.handles.get(key)?.agent !== agent
+          : typeof activation.closing?.then !== 'function') throw new DeletionRefused('activity.missingHandle');
+      } else if (activation.run?.id !== key || typeof activation.run.result?.then !== 'function'
+        || typeof activation.run.dispose !== 'function' || typeof activation.controller?.abort !== 'function')
+        throw new DeletionRefused('activity.unconfirmed');
+      targets.push(activation);
+    }
+    return targets;
+  }
+  /** Start native cleanup synchronously after locking, retaining the main Session until commit. */
+  private stop(root: SessionHeader, headers: Map<string, SessionHeader>, ids: string[], deadline: number): { done: Promise<void>; manager: SubagentManager } {
+    const manager = this.manager();
+    const activations = this.activations(root, ids, manager);
+    const operations = [...new Set(ids.flatMap(id => [...(this.operations.get(id) ?? [])]))];
+    if (operations.some(operation => operation.startup)) throw new DeletionRefused('activity.operations');
+    const agents = ids.flatMap(id => {
+      const agent = this.ctx.agents.get(id);
+      if (!agent) {
+        if (this.ctx.sessions.get(id)) throw new DeletionRefused('activity.residentSession');
+        return [];
+      }
+      if (this.handles.get(id)?.agent !== agent || agent.session.header.createdAt !== headers.get(id)?.createdAt
+        || typeof agent.cancel !== 'function' || typeof agent.whenIdle !== 'function') throw new DeletionRefused('activity.missingHandle');
+      return [agent];
+    });
+    const jobs = new Map(ids.flatMap(id => this.ctx.jobs.list(id).filter(job => job.owner === id
+      && ['running', 'stopping'].includes(job.status))).map(job => [job.id, job]));
+    const terminals = agents.flatMap(agent => (this.terminals?.list(agent) ?? []).map(terminal => ({ agent, id: terminal.sessionId })));
+    if (this.terminals && (typeof this.terminals.kill !== 'function' || typeof this.terminals.hasOwnerActivity !== 'function'))
+      throw new DeletionRefused('activity.unconfirmed');
+    const failures: unknown[] = [], acknowledged = new Map<string, boolean>(), waiting = new Set(jobs.keys());
+    let jobsFinished!: () => void;
+    const jobsDone = new Promise<void>(resolve => { jobsFinished = resolve; });
+    const offSession = this.ctx.on('session/event', (session, event) => {
+      if (event.type !== 'job/settled') return;
+      const job = jobs.get(event.data.jobId!);
+      if (job && session.id === job.owner && event.data.owner === job.owner) acknowledged.set(job.id, event.data.producerReported === true);
+    }, { global: true });
+    let offJobs: () => void;
+    try {
+      offJobs = this.ctx.jobs.events.subscribe({ owners: 'all' }, event => {
+        const job = event.job;
+        if (event.type !== 'settled' || !job || !waiting.has(job.id) || jobs.get(job.id)?.owner !== job.owner) return;
+        if (acknowledged.get(job.id) !== true) failures.push(new DeletionRefused('activity.unconfirmed'));
+        waiting.delete(job.id); if (!waiting.size) jobsFinished();
+      });
+    } catch (error) { offSession(); throw error; }
+    if (performance.now() >= deadline) { offJobs(); offSession(); throw new DeletionRefused('error.stopTimeout'); }
+    const tasks: Promise<unknown>[] = [jobsDone, ...operations.map(operation => operation.done)];
+    const run = (work: () => unknown) => {
+      try { tasks.push(Promise.resolve(work())); } catch (error) { failures.push(error); }
+    };
+    for (const member of ids) this.locked.add(member);
+    // Do not defer these calls to microtasks: closing must precede natural settlement watchers.
+    for (const activation of activations) run(() => manager.dispose(activation));
+    for (const agent of agents) {
+      if (agent.id !== root.id) {
+        if (!activations.some(activation => activation.handle?.agent === agent)) run(() => this.handles.get(agent.id)!.dispose());
+      } else {
+        run(() => agent.cancel({ kind: 'user' }));
+        run(() => agent.whenIdle());
+      }
+    }
+    for (const job of jobs.values()) run(() => this.ctx.jobs.kill(job.id, job.owner!, 'session deleted'));
+    for (const terminal of terminals) run(() => this.terminals!.kill(terminal.agent, terminal.id, 'session deleted'));
+    if (!waiting.size) jobsFinished();
+    const stopping = Promise.allSettled(tasks).then(results => {
+      for (const result of results) if (result.status === 'rejected') failures.push(result.reason);
+      if (agents.some(agent => this.terminals?.hasOwnerActivity(agent))) failures.push(new DeletionRefused('activity.terminal'));
+      if (failures.length) throw new DeletionRefused('error.stopIncomplete', {
+        detail: failures.map(error => error instanceof Error ? error.message : String(error)).join('; '),
+      });
+    }).finally(() => { offJobs(); offSession(); if (this.stopping === stopping) this.stopping = undefined; });
+    this.stopping = stopping;
+    return { done: stopping, manager };
+  }
+  private async until<T>(work: Promise<T>, deadline: number): Promise<T> {
+    let timer: ReturnType<typeof setTimeout> | undefined;
+    try {
+      return await Promise.race([work, new Promise<never>((_, reject) => {
+        timer = setTimeout(() => { reject(new DeletionRefused('error.stopTimeout')); }, Math.max(0, deadline - performance.now()));
+      })]);
+    } finally { clearTimeout(timer); }
+  }
+  private async checkScheduleDelivery(ids: readonly string[], deadline: number): Promise<void> {
+    const schedule = await this.until(readSchedule(this.home), deadline);
+    // A fresh-session reminder persists this reservation before creating its Agent.
+    // Deleting that Agent before delivery commits would strand the future reminder.
+    if (Object.values(schedule?.tables.tasks ?? {}).some(task => task.target?.kind === 'new'
+      && ids.includes(task.pendingDelivery?.targetSessionId ?? ''))) throw new DeletionRefused('activity.operations');
+  }
   family(headers: Map<string, SessionHeader>, id: string): string[] {
     const sessions = new Map([...headers].map(([key, header]) => [key, { header }])) as SessionMap;
     return [...familyOf(sessions, id)].sort();
   }
-  /** One final check after native archival, never a continuous activity monitor. */
-  private async quiescence(ids: string[], global = false): Promise<Activity> {
+  /** Final validation; native promises own stopping and lifecycle settlement. */
+  private async quiescence(ids: string[], global = false, deleting = false): Promise<Activity> {
     const reasons: LocalizedMessage[] = [];
     if (!this.controller || !this.schedule) reasons.push(message('activity.initializing'));
     const targets = new Set(ids);
@@ -323,7 +521,7 @@ export class DeletionRuntime {
         const stored = await this.ctx.sessionPersistence.stat(id);
         if (!stored || !(stored.sizeBytes > 0)) reasons.push(message('activity.unsaved'));
       }
-      if (this.operations.get(id)) reasons.push(message('activity.operations'));
+      if (this.operations.get(id)?.size) reasons.push(message('activity.operations'));
       const agent = this.ctx.agents.get(id) as Agent | undefined;
       if (agent) {
         if (agent.status !== 'idle') reasons.push(message(global ? 'activity.globalAgentBusy' : 'activity.targetAgentBusy'));
@@ -331,13 +529,13 @@ export class DeletionRuntime {
         if (targets.has(id) && !this.handles.has(id)) reasons.push(message('activity.missingHandle'));
         const idle = await Promise.race([agent.whenIdle().then(() => true), delay(0).then(() => false)]);
         if (!idle) reasons.push(message('activity.maintenance'));
-        if (this.terminals?.list(agent).some((terminal) => terminal.status?.kind === 'running')) reasons.push(message('activity.terminal'));
+        if (deleting ? this.terminals?.hasOwnerActivity(agent) : this.terminals?.list(agent).some((terminal) => terminal.status?.kind === 'running')) reasons.push(message('activity.terminal'));
       } else if (this.ctx.sessions.get(id)) reasons.push(message('activity.residentSession'));
       try {
         const activity = await this.ctx.waterfall('workspace/session-activity', { sessionId: id }, () => Promise.resolve([]));
         for (const item of activity) {
           // Future reminders in another conversation are not work in flight.
-          if (global && item.kind === 'schedule') continue;
+          if ((global || deleting) && item.kind === 'schedule') continue;
           reasons.push(item.kind ? message('activity.nativeBusy', { kind: item.kind }) : message('activity.nativeBusyUnknown'));
         }
       } catch { reasons.push(message('activity.unconfirmed')); }
@@ -364,7 +562,11 @@ export class DeletionRuntime {
     if (this.maintenance) throw new DeletionRefused('error.cleanupBusy');
     this.maintenance = 'delete';
     try { return await this.removeOne(id, createdAt, expectedIds); }
-    finally { this.maintenance = undefined; }
+    finally {
+      if (this.stopping) void this.stopping.then(
+        () => { this.maintenance = undefined; }, () => { this.maintenance = undefined; });
+      else this.maintenance = undefined;
+    }
   }
   async garbageSize(): Promise<number> {
     if (this.maintenance) throw new DeletionRefused('error.cleanupBusy');
@@ -412,32 +614,38 @@ export class DeletionRuntime {
     for (const [scope, rows] of groups) await index.remove(scope, rows.map(r => ({ variantId: r.variantId, fileId: r.fileId })));
   }
   private async removeOne(id: string, createdAt: number, expectedIds: readonly string[]): Promise<{ deleted: number }> {
+    const deadline = performance.now() + this.stopTimeoutMs;
     if (!(this.ctx.sessionDeletionGate as Gate).healthy()) throw new DeletionRefused('error.guardUnavailable');
-    if ((await listRequests(this.home)).length) throw new DeletionRefused('error.pendingCleanup');
-    const headers = await this.headers(); const root = headers.get(id);
+    if ((await this.until(listRequests(this.home), deadline)).length) throw new DeletionRefused('error.pendingCleanup');
+    const headers = await this.until(this.headers(), deadline); const root = headers.get(id);
     if (!root || root.createdAt !== createdAt) throw new DeletionRefused('error.sessionChanged');
+    if (root.origin === 'subagent' || (root.delegationDepth ?? 0) > 0) throw new DeletionRefused('error.mainSessionRequired');
     const ids = this.family(headers, id);
     if (JSON.stringify(ids) !== JSON.stringify(expectedIds)) throw new DeletionRefused('error.familyChanged');
-    // Reuse DSH's own admission and durable archive write. Do not reimplement
-    // its running-turn/job/subagent/schedule monitor or force-stop active work.
-    try { await this.ctx.workspaceRegistry.archiveSession(id); }
-    catch (e) { throw new DeletionRefused('error.archiveIncomplete', { detail: e instanceof Error ? e.message : '' }); }
-    if (!this.ctx.workspaceRegistry.archivedSessionIds.includes(id)) throw new DeletionRefused('error.archiveUnconfirmed');
     this.assertAllowed(ids);
-    // No await between publishing these locks: other tabs and background input
-    // are rejected before the asynchronous authoritative activity checks begin.
-    for (const member of ids) this.locked.add(member);
-    let journaled = false; let committed = false;
+    await this.checkScheduleDelivery(ids, deadline);
+    const excluded = await this.until(waitingHosts(stateDir(this.home)), deadline); excluded.add(process.pid);
+    if ((await this.until(otherHosts(this.home, excluded), deadline)).length) throw new DeletionRefused('error.otherHost');
+    if (performance.now() >= deadline) throw new DeletionRefused('error.stopTimeout');
+    let enqueueAttempted = false; let committed = false;
     const writerLocks: Lock[] = [];
     try {
-      const excluded = await waitingHosts(stateDir(this.home)); excluded.add(process.pid);
-      if ((await otherHosts(this.home, excluded)).length) throw new DeletionRefused('error.otherHost');
-      const again = await this.quiescence(ids);
+      const stopped = this.stop(root, headers, ids, deadline);
+      await this.until(stopped.done, deadline);
+      if (this.manager() !== stopped.manager || this.activations(root, ids, stopped.manager).length) throw new DeletionRefused('activity.unconfirmed');
+      const again = await this.until(this.quiescence(ids, false, true), deadline);
       if (again.busy) throw new DeletionRefused(again.reasons);
-      if (JSON.stringify(this.family(await this.headers(), id)) !== JSON.stringify(ids)) throw new DeletionRefused('error.familyChanged');
+      const current = await this.until(this.headers(), deadline);
+      if (JSON.stringify(this.family(current, id)) !== JSON.stringify(ids)) throw new DeletionRefused('error.familyChanged');
+      if (ids.some(member => current.get(member)?.createdAt !== headers.get(member)?.createdAt)) throw new DeletionRefused('error.sessionChanged');
+      const plan = await this.until(planSessionDeletion(this.home, current, id), deadline);
+      await this.checkScheduleDelivery(ids, deadline);
+      if (performance.now() >= deadline) throw new DeletionRefused('error.stopTimeout');
+      if (this.manager() !== stopped.manager || this.activations(root, ids, stopped.manager).length) throw new DeletionRefused('activity.unconfirmed');
+      if (!(this.ctx.sessionDeletionGate as Gate).healthy()) throw new DeletionRefused('error.guardUnavailable');
       // Commit only private paths. No attachment reference snapshot is needed.
-      const request = await enqueue(this.home, root, await planSessionDeletion(this.home, headers, id));
-      journaled = true;
+      enqueueAttempted = true;
+      const request = await enqueue(this.home, root, plan);
       for (const member of [...ids].reverse()) {
         const agent = this.ctx.agents.get(member);
         if (agent) {
@@ -470,35 +678,41 @@ export class DeletionRuntime {
               for (const key of ['headers', 'sessionPaths', 'missingSessionPaths', 'invalidSessionPaths'] as const) registry[key]?.delete(member);
             }
           } else if (path === join('storages', 'schedule.json')) {
-            for (const task of await this.schedule!.catalog()) if (targets.has(task.sessionId)) await this.schedule!.delete({ sessionId: task.sessionId, id: task.id });
+            for (const task of await this.schedule!.catalog()) if (targets.has(scheduledSession(task)!)) {
+              const result = await this.editSchedule({ id: task.id, action: 'delete', expectedUpdatedAt: task.updatedAt ?? null }) as { deleted?: boolean };
+              if (!result.deleted) throw new Error('Schedule deletion was not confirmed');
+            }
           } else throw new Error('Unsupported live storage edit: ' + path);
         },
       } });
       return { deleted: result.reduce((n, value) => n + value.sessions, 0) };
     } finally {
       await Promise.all(writerLocks.map(lock => lock.close()));
-      if (journaled) {
-        // A request unlink/fsync or diagnostic write can fail after commit.
-        // Install every tombstone before notifying fallible downstream listeners.
-        // A rename may have succeeded even when its directory sync failed before the commit notification.
-        if (!committed) await this.loadReceipt();
-        const completed = ids.filter(member => this.deleted.has(digest(member)));
-        for (const member of completed) {
-          this.unwrap(this.ctx.sessionPersistence).coldLogMemo?.delete(member);
-          this.unwrap(this.ctx.sessionQuery)._observations?.cache?.delete(member);
-          try { this.ctx.emit('api-session/removed', member); }
-          catch (error) { this.ctx.logger.warn('Session removal notification failed', error); }
+      const finish = async () => {
+        // rename may commit a request even when the subsequent directory fsync fails.
+        const pending = enqueueAttempted && (await listRequests(this.home)).some(request => request.sessionId === id);
+        if (pending || committed) {
+          // Install every tombstone before notifying fallible downstream listeners.
+          if (!committed) await this.loadReceipt();
+          const completed = ids.filter(member => this.deleted.has(digest(member)));
+          for (const member of completed) {
+            this.unwrap(this.ctx.sessionPersistence).coldLogMemo?.delete(member);
+            this.unwrap(this.ctx.sessionQuery)._observations?.cache?.delete(member);
+            try { this.ctx.emit('api-session/removed', member); }
+            catch (error) { this.ctx.logger.warn('Session removal notification failed', error); }
+          }
         }
-      }
-      // A partial deletion remains locked until journal recovery; never reopen
-      // a transcript whose private files or metadata may already have been removed.
-      if (!journaled || !(await listRequests(this.home)).some(r => r.sessionId === id)) for (const member of ids) this.locked.delete(member);
+        // Only settled native cleanup may release an uncommitted attempt's locks.
+        if (!pending) for (const member of ids) this.locked.delete(member);
+      };
+      if (this.stopping) void this.stopping.then(finish, finish).catch(error => { this.ctx.logger.warn('Session stop finalization failed', error); });
+      else await finish();
     }
   }
 }
 
 export const name = 'session-deletion-runtime';
-export const inject = ['sessionDeletionGate', 'agents', 'sessions', 'sessionPersistence', 'sessionProjectionCache', 'sessionQuery', 'workspaceRegistry', 'attachments', 'fileUploads'];
+export const inject = ['sessionDeletionGate', 'agents', 'sessions', 'sessionPersistence', 'sessionProjectionCache', 'sessionQuery', 'workspaceRegistry', 'attachments', 'fileUploads', 'subagents', 'jobs'];
 export async function apply(ctx: RuntimeContext): Promise<void> {
   const require = await hostRequire();
   const cordis = await import(pathToFileURL(require.resolve('@deepseek-ai/cordis')).href);

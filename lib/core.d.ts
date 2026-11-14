@@ -51,6 +51,27 @@ export interface Receipt {
     lastCompletedAt?: string;
     lastResult?: Result;
 }
+export interface ScheduleTask {
+    sessionId?: string;
+    target?: {
+        kind: 'session' | 'new_once' | 'new';
+        sessionId?: string;
+    };
+    record?: {
+        id: string;
+    };
+    pendingDelivery?: {
+        targetSessionId: string;
+    };
+}
+interface ScheduleData {
+    unit: {
+        name: string;
+    };
+    tables: {
+        tasks: Record<string, ScheduleTask>;
+    };
+}
 interface Edit {
     path: string;
     data: unknown;
@@ -74,6 +95,9 @@ export declare const STATE_NAME = "session-deletion";
 export declare const digest: (value: string) => string;
 export declare const stateDir: (home: string) => string;
 export declare const requestPath: (home: string, id: string) => string;
+/** DSH's explicit destination wins over the legacy session binding. */
+export declare function scheduledSession(task: ScheduleTask): string | undefined;
+export declare function readSchedule(home: string): Promise<ScheduleData | undefined>;
 export declare function encodeSegment(raw: string): string;
 export declare function exists(path: string): Promise<boolean>;
 export declare function safePath(path: string, { missing, directory }?: {

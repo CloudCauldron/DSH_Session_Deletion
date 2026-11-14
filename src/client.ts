@@ -149,12 +149,28 @@ window.__ModuleLoader__.load({ id: 'dsh-session-deletion', factory(require) {
   }
   async function refresh(): Promise<void> {
     if (refreshing) return;
+    const own = generation, wasSubmitting = submitting;
     refreshing = true;
     try {
-      status = await api<DeletionStatus>('status'); publish();
+      // Replacing the existing preview revokes a delete request whose body has
+      // not arrived yet. An idle status alone cannot prove that request ended.
+      const failed = dialog?.error && !submitting && !dialog.preview ? dialog : undefined;
+      if (failed) {
+        try {
+          const preview = await api<DeletionPreview>('preview', { sessionId: failed.id });
+          if (own === generation && dialog === failed) dialog = { ...failed, preview };
+        } catch { /* A lost replacement response still leaves the request uncertain. */ }
+      }
+      status = await api<DeletionStatus>('status');
+      if (own === generation && !wasSubmitting && !submitting && dialog?.error && dialog.preview && status.deletionRunning === false
+        && !status.locked.includes(dialog.id) && !status.pending.some(item => item.sessionId === dialog!.id)) dialog = { ...dialog, busy: false };
+      publish();
       if (!receipt || receipt.revision !== status.receipt.revision) receipt = await api<DeletionReceipt>('receipt');
       // Keep applying cached tombstones: an old tab may write a deleted session's state back later.
       await cleanBrowserState(receipt.deletedIdHashes);
+      const current = dialog;
+      if (current?.error && !submitting && receipt.deletedIdHashes.includes(await hash(current.id))
+        && dialog === current && !submitting) completeDeletion(current.title);
       if (lastMainId && receipt.deletedIdHashes.includes(await hash(lastMainId))) {
         lastMainId = undefined; context?.uiWorkspace.startSession();
       }
@@ -172,16 +188,20 @@ window.__ModuleLoader__.load({ id: 'dsh-session-deletion', factory(require) {
     }
   }
   function close(): void { generation++; dialog = undefined; publish(); }
+  function completeDeletion(title: string): void {
+    toast = { id: ++toastId, message: title ? { key: 'delete.success', params: { title } } : { key: 'delete.successUnnamed' } };
+    close();
+  }
   async function confirm(): Promise<void> {
     if (!dialog?.preview || dialog.busy || submitting || status.gcRunning) return;
     const current = dialog;
-    submitting = true; toast = undefined; dialog = { ...current, busy: true, error: undefined }; publish();
+    generation++; submitting = true; toast = undefined; dialog = { ...current, busy: true, error: undefined }; publish();
     try {
-      await api('delete', { sessionId: current.id, token: current.preview!.token, confirmation: 'DELETE_IDLE_SESSION' });
-      toast = { id: ++toastId, message: current.title ? { key: 'delete.success', params: { title: current.title } } : { key: 'delete.successUnnamed' } };
-      close(); await refresh();
-    } catch (e) { dialog = { ...current, busy: false, error: asError(e) }; publish(); }
-    finally { submitting = false; await refresh(); protectInputs(); }
+      await api('delete', { sessionId: current.id, token: current.preview!.token, confirmation: 'DELETE_SESSION' });
+      submitting = false;
+      completeDeletion(current.title); await refresh();
+    } catch (e) { submitting = false; dialog = { ...current, preview: undefined, busy: true, error: asError(e) }; publish(); }
+    finally { await refresh(); protectInputs(); }
   }
   function useDisabledClose(selector: string, open: boolean, busy: boolean): void {
     React.useLayoutEffect(() => {
@@ -192,9 +212,8 @@ window.__ModuleLoader__.load({ id: 'dsh-session-deletion', factory(require) {
     }, [selector, open, busy]);
   }
   function sessionMenuActions({ sessionId, displayTitle }: { sessionId: string; displayTitle: string }) {
-    const running = context?.sessions.list.getSnapshot().byId[sessionId]?.running;
     const secure = !!globalThis.crypto?.subtle;
-    const disabled = running || status.locked.includes(sessionId) || !status.guardHealthy || !secure;
+    const disabled = status.locked.includes(sessionId) || !status.guardHealthy || !secure;
     return [{ id: 'delete', label: t('delete.menu'), disabled: !!disabled || !!status.gcRunning, danger: true, separatorBefore: true,
       afterContent: true, icon: { key: 'workspace.delete' }, run: () => { void open(sessionId, displayTitle); } }];
   }
@@ -262,7 +281,8 @@ window.__ModuleLoader__.load({ id: 'dsh-session-deletion', factory(require) {
 
   function Overlay(): ElementNode {
     const state = useSnapshot(); const d = state.dialog;
-    const busy = !!d?.busy || submitting || !!state.status.gcRunning;
+    const busy = !!d?.busy || submitting || !!state.status.gcRunning || !!state.status.deletionRunning
+      || !!d && (state.status.locked.includes(d.id) || state.status.pending.some(item => item.sessionId === d.id));
     useDisabledClose('.dsh-session-deletion-confirmation', !!d, busy);
     const gcBusy = !!state.status.gcRunning || !!state.gcDialog?.busy;
     const recovering = !gcBusy && state.status.pending.length > 0 && !submitting && state.status.deletionRunning === false;
@@ -274,15 +294,13 @@ window.__ModuleLoader__.load({ id: 'dsh-session-deletion', factory(require) {
       onDone: () => { if (toast === state.toast) { toast = undefined; publish(); } },
     }) : noticeKey ? h(StatusToast, { key: noticeKey, text: t(noticeKey), warning: recovering }) : null;
     if (!d) return h(React.Fragment, null, notice, null);
-    const active = context?.sessions.list.getSnapshot().byId[d.id]?.running && !submitting;
-    const archived = state.status.archived.includes(d.id);
     const children = Math.max(0, (d.preview?.count ?? 1) - 1);
     const removalText = t(children > 0 ? 'delete.descriptionWithChildren' : 'delete.description', { count: children });
     const dismiss = () => { if (!busy) close(); };
     return h(React.Fragment, null, notice,
       h(ui.Modal, {
         open: true, onClose: dismiss, closeLabel: t('common.close'), className: 'dsh-session-deletion-modal dsh-session-deletion-confirmation',
-        title: t(archived ? 'delete.title' : 'delete.archiveTitle'),
+        title: t('delete.title'),
         description: h(React.Fragment, null,
           h('strong', { style: { display: 'block', fontWeight: 600, overflowWrap: 'anywhere' } }, d.title || t('session.unnamed')),
           h('code', { style: { display: 'block', marginTop: 4, fontFamily: 'var(--ds-font-family-code, monospace)', fontSize: 12, color: 'var(--dsw-alias-label-secondary)', overflowWrap: 'anywhere' } }, d.id),
@@ -290,10 +308,8 @@ window.__ModuleLoader__.load({ id: 'dsh-session-deletion', factory(require) {
             : d.busy ? h('span', { style: { display: 'block', marginTop: 12 } }, t('delete.checking')) : null),
         footer: h(React.Fragment, null,
           h(ui.Button, { variant: 'outline', onClick: dismiss, disabled: busy }, t('common.cancel')),
-          h(ui.Button, { variant: 'outline', className: 'dsh-session-deletion-danger', onClick: () => { void confirm(); }, disabled: busy || !d.preview || !!active }, t(submitting ? 'delete.submitting' : 'delete.confirm'))),
-        children: active || d.error ? h(React.Fragment, null,
-          active ? h('div', { role: 'status', style: { color: 'var(--dsw-alias-label-secondary)', fontSize: 12, lineHeight: '18px' } }, t('delete.running')) : null,
-          d.error ? h('div', { role: 'alert', style: { color: 'var(--dsw-alias-state-error-primary)', marginTop: 8, fontSize: 12, lineHeight: '18px', overflowWrap: 'anywhere' } }, errorText(d.error)) : null) : undefined,
+          h(ui.Button, { variant: 'outline', className: 'dsh-session-deletion-danger', onClick: () => { void confirm(); }, disabled: busy || !d.preview }, t(submitting ? 'delete.submitting' : 'delete.confirm'))),
+        children: d.error ? h('div', { role: 'alert', style: { color: 'var(--dsw-alias-state-error-primary)', marginTop: 8, fontSize: 12, lineHeight: '18px', overflowWrap: 'anywhere' } }, errorText(d.error)) : undefined,
       }));
   }
   return { inject: ['slots', 'sessions', 'uiWorkspace', 'contextMenus', 'locale'], async apply(ctx: DeletionClientContext) {

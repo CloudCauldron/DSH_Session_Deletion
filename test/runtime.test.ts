@@ -145,7 +145,7 @@ void test('synchronous publications reject during deletion but an existing lease
  gate.assertSynchronousPublication();
 });
 
-void test('a child created after HTTP validation requires renewed confirmation before archival', async () => {
+void test('a child created after HTTP validation requires renewed confirmation before stopping', async () => {
  const f = await fixture();
  try {
   let archived = false;
@@ -164,10 +164,10 @@ void test('submissions queued behind GC do not make its global idle check fail',
  const session = { id: 'other', header: { id: 'other', version: 4, createdAt: 1 } };
  const runtime = makeRuntime({
   sessions: { list: () => [session] },
-  agents: { get: () => ({ id: session.id, session, status: 'idle', inbox: { nextTurn: [], nextStep: [] }, whenIdle: async () => {} }) },
+  agents: { get: () => ({ id: session.id, session, status: 'idle', inbox: { nextTurn: [], nextStep: [] }, whenIdle: async () => {}, cancel() {} }) },
   waterfall: async () => [],
  });
- runtime.controller = {}; runtime.schedule = { catalog: async () => [], delete: async () => {} };
+ runtime.controller = {}; runtime.schedule = { catalog: async () => [], create: async () => {}, edit: async () => {} };
  let release!: () => void, published = false;
  const exclusive = runtime.barrier.exclusive(() => new Promise<void>(resolve => { release = resolve; }));
  const queued = runtime.operation(['other'], () => { published = true; });

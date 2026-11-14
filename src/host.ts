@@ -74,6 +74,15 @@ export async function apply(ctx: HostContext): Promise<void> {
       if (typeof data.sessionId !== 'string' || !data.sessionId || data.sessionId.length > 1024) throw new HttpError(400, 'Invalid session ID');
       const id = data.sessionId;
       if (!gate.healthy()) throw new HttpError(503, 'error.guardUnavailable');
+      if (path === '/session-deletion/api/delete') {
+        if (data.confirmation !== 'DELETE_SESSION') throw new HttpError(400, 'error.confirmDeletion');
+        const preview = previews.get(id); const token = typeof data.token === 'string' ? data.token : '';
+        if (!preview || preview.expires < Date.now() || Buffer.byteLength(token) !== Buffer.byteLength(preview.token)
+          || !timingSafeEqual(Buffer.from(token), Buffer.from(preview.token))) throw new HttpError(409, 'error.previewExpired');
+        previews.delete(id);
+        // remove() reserves maintenance synchronously, before its authoritative async reads.
+        send(res, 200, { ok: true, ...await runtime.remove(id, preview.createdAt, preview.ids) }); return;
+      }
       const result = await (async () => {
         const headers = await runtime.headers(); const header = headers.get(id);
         if (!header) throw new HttpError(404, 'error.sessionMissing');
@@ -84,15 +93,6 @@ export async function apply(ctx: HostContext): Promise<void> {
           if (previews.size >= 256) previews.delete(previews.keys().next().value!);
           previews.set(id, { token, expires: Date.now() + 120000, createdAt: header.createdAt, ids });
           return { ok: true, sessionId: id, count: ids.length, token, archived: runtime.archivedIds.includes(id) };
-        }
-        if (path === '/session-deletion/api/delete') {
-          if (data.confirmation !== 'DELETE_IDLE_SESSION') throw new HttpError(400, 'error.confirmDeletion');
-          const preview = previews.get(id); const token = typeof data.token === 'string' ? data.token : '';
-          if (!preview || preview.expires < Date.now() || Buffer.byteLength(token) !== Buffer.byteLength(preview.token)
-            || !timingSafeEqual(Buffer.from(token), Buffer.from(preview.token))) throw new HttpError(409, 'error.previewExpired');
-          if (header.createdAt !== preview.createdAt || JSON.stringify(ids) !== JSON.stringify(preview.ids)) throw new HttpError(409, 'error.previewChanged');
-          previews.delete(id);
-          return { ok: true, ...await runtime.remove(id, preview.createdAt, preview.ids) };
         }
         throw new HttpError(404, 'Unknown route');
       })();

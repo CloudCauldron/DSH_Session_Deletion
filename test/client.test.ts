@@ -174,7 +174,7 @@ void test('receipt sync fetches only on revision changes, retries failures and k
   });
 });
 
-void test('deletion copy and API errors follow locale changes, retain Chinese fallback and reject running sessions', async () => {
+void test('deletion copy and API errors follow locale changes, retain Chinese fallback and allow running sessions', async () => {
   const id = 'session-copy-test';
   const rows = { [id]: { id, running: false, retainedBy: { mainView: 1 } } };
   const components = new Map<string, () => MockNode>();
@@ -182,6 +182,12 @@ void test('deletion copy and API errors follow locale changes, retain Chinese fa
   let cleanup: (() => void) | undefined;
   let previewFailed = false;
   let previewThrown = false;
+  let resolveDelete!: () => void, poll!: () => void, deleteCalls = 0;
+  let disconnected = false, statusFailed = false, deletionRunning = false;
+  let beforeAcceptance = false, losePreview = false, missingPreview = false, completeDespiteDisconnect = false, completed = false;
+  let issuedToken = '', nextToken = 0, lateDelete!: () => boolean;
+  let pending: PendingDeletion[] = [];
+  const closeButton = { disabled: false };
   const locale = localeFixture();
   const translated = { ...dictionaries, en: { 'delete.checking': '[en] checking', 'delete.menu': '[en] delete', 'error.guardUnavailable': '[en] guard unavailable' } };
   const preview = new Promise<DeletionPreview>(resolve => { resolvePreview = resolve; });
@@ -189,22 +195,44 @@ void test('deletion copy and API errors follow locale changes, retain Chinese fa
   const react = {
     Fragment: Symbol('Fragment'),
     createElement,
-    useSyncExternalStore: <T>(_: unknown, read: () => T) => read(), useLayoutEffect() {},
+    useSyncExternalStore: <T>(_: unknown, read: () => T) => read(), useLayoutEffect(callback: () => void) { callback(); },
   };
   const sandbox = {
     TextEncoder,
     crypto: { subtle: { digest: async (_: string, bytes: Uint8Array) => createHash('sha256').update(bytes).digest() } },
     localStorage: browserStorage({}), sessionStorage: browserStorage({}),
     window: { __ModuleLoader__: { load(definition: ClientModule) { plugin = definition.factory(name => name === 'react' ? react : ui); } }, addEventListener() {}, removeEventListener() {} },
-    document: { body: {}, head: { append() {} }, querySelectorAll: () => [], createElement: () => ({ remove() {} }) },
-    MutationObserver: class { observe() {} disconnect() {} }, setInterval() { return 1; }, clearInterval() {},
-    fetch: async (url: string) => {
+    document: { body: {}, head: { append() {} }, querySelector: () => closeButton, querySelectorAll: () => [], createElement: () => ({ remove() {} }) },
+    MutationObserver: class { observe() {} disconnect() {} }, setInterval(callback: () => void) { poll = callback; return 1; }, clearInterval() {},
+    fetch: async (url: string, options?: { body?: string }) => {
       if (url.endsWith('/locales')) return { ok: true, json: async () => ({ dictionaries: translated }) };
       if (url.endsWith('/preview') && previewThrown) throw 0;
-      if (url.endsWith('/preview')) return { ok: !previewFailed, json: () => previewFailed
-        ? Promise.resolve({ error: 'Host fallback', messages: [{ key: 'error.guardUnavailable' }] }) : preview };
-      return { ok: true, json: async () => url.endsWith('/receipt') ? { revision: 'empty', deletedIdHashes: [] }
-        : { pending: [], locked: [], archived: [], guardHealthy: true, receipt: { revision: 'empty', count: 0 } } };
+      if (url.endsWith('/preview')) {
+        if (missingPreview) return { ok: false, status: 404, json: async () => ({ error: 'Session missing' }) };
+        if (previewFailed) return { ok: false, json: async () => ({ error: 'Host fallback', messages: [{ key: 'error.guardUnavailable' }] }) };
+        const token = issuedToken = 'fixture-' + ++nextToken;
+        if (losePreview) throw new Error('Replacement response lost');
+        return { ok: true, json: async () => ({ ...await preview, token }) };
+      }
+      if (url.endsWith('/delete')) {
+        deleteCalls++; const request = JSON.parse(options!.body!);
+        assert.equal(request.confirmation, 'DELETE_SESSION'); assert.equal(request.token, issuedToken);
+        if (beforeAcceptance) {
+          lateDelete = () => { const accepted = request.token === issuedToken; if (accepted) deletionRunning = true; return accepted; };
+          throw new Error('Request body delayed');
+        }
+        deletionRunning = true;
+        if (disconnected) {
+          if (completeDespiteDisconnect) { completed = true; deletionRunning = false; }
+          throw new Error('Disconnected');
+        }
+        await new Promise<void>(resolve => { resolveDelete = resolve; }); deletionRunning = false;
+        return { ok: true, json: async () => ({ deleted: 1 }) };
+      }
+      if (url.endsWith('/status') && statusFailed) throw new Error('Disconnected');
+      return { ok: true, json: async () => url.endsWith('/receipt')
+        ? { revision: completed ? 'deleted' : 'empty', deletedIdHashes: completed ? [createHash('sha256').update(id).digest('hex')] : [] }
+        : { pending, deletionRunning, locked: deletionRunning ? [id] : [], archived: [], guardHealthy: true, receipt: { revision: completed ? 'deleted' : 'empty', count: completed ? 1 : 0 } } };
     },
   };
   vm.runInNewContext(await readFile(new URL('../lib/client.js', import.meta.url), 'utf8'), sandbox);
@@ -230,10 +258,11 @@ void test('deletion copy and API errors follow locale changes, retain Chinese fa
     await new Promise(setImmediate);
     rows[id].running = true;
     const current = render();
-    assert.ok(current.includes('会话正在运行，暂时无法删除'));
+    assert.equal(current.includes('会话正在运行，暂时无法删除'), false);
     const confirm = current.find((node): node is MockElement => isElement(node) && node.type === ui.Button && nodes(node.props.children).includes('确认删除'));
     assert(confirm);
-    assert.equal(confirm.props.disabled, true);
+    assert.equal(confirm.props.disabled, false);
+    assert.equal(menu.resolve({ sessionId: id, displayTitle: 'Test' })[0].disabled, false);
     rows[id].running = false; previewFailed = true;
     menu.resolve({ sessionId: id, displayTitle: 'Test' })[0].run();
     await new Promise(setImmediate);
@@ -244,6 +273,48 @@ void test('deletion copy and API errors follow locale changes, retain Chinese fa
     menu.resolve({ sessionId: id, displayTitle: 'Test' })[0].run();
     await new Promise(setImmediate);
     assert.ok(render().includes('0'), 'non-Error failures remain visible without localization metadata');
+    previewThrown = previewFailed = false;
+    const buttons = () => render().filter((node): node is MockElement => isElement(node) && node.type === ui.Button);
+    const modal = () => render().find((node): node is MockElement => isElement(node) && node.type === ui.Modal);
+    const tick = async () => { poll(); await new Promise(setImmediate); };
+    menu.resolve({ sessionId: id, displayTitle: 'Test' })[0].run(); await new Promise(setImmediate);
+    assert.equal(modal()!.props.title, '删除此会话？');
+    (buttons().at(-1)!.props.onClick as () => void)(); await new Promise(setImmediate);
+    assert(buttons().every(button => button.props.disabled)); assert.equal(closeButton.disabled, true);
+    (modal()!.props.onClose as () => void)(); assert(modal());
+    (buttons().at(-1)!.props.onClick as () => void)(); assert.equal(deleteCalls, 1);
+    resolveDelete(); await new Promise(setImmediate); assert.equal(modal(), undefined);
+
+    menu.resolve({ sessionId: id, displayTitle: 'Test' })[0].run(); await new Promise(setImmediate);
+    disconnected = statusFailed = true;
+    (buttons().at(-1)!.props.onClick as () => void)(); await new Promise(setImmediate);
+    assert(buttons().every(button => button.props.disabled)); assert.equal(closeButton.disabled, true);
+    await tick(); assert(buttons().every(button => button.props.disabled), 'failed status reads cannot release unknown server work');
+    statusFailed = false; await tick(); assert(buttons().every(button => button.props.disabled));
+    deletionRunning = false; pending = [{ sessionId: id, queuedAt: 'fixture' }];
+    await tick(); assert(buttons().every(button => button.props.disabled), 'a journal awaiting recovery still owns the target');
+    pending = []; await tick();
+    assert(buttons().every(button => !button.props.disabled)); assert.equal(closeButton.disabled, false);
+    (modal()!.props.onClose as () => void)(); assert.equal(modal(), undefined);
+
+    disconnected = false; beforeAcceptance = true;
+    menu.resolve({ sessionId: id, displayTitle: 'Test' })[0].run(); await new Promise(setImmediate);
+    losePreview = true;
+    (buttons().at(-1)!.props.onClick as () => void)(); await new Promise(setImmediate);
+    assert.equal(deletionRunning, false);
+    assert(buttons().every(button => button.props.disabled), 'an idle status cannot revoke a delayed delete body');
+    await tick(); assert(buttons().every(button => button.props.disabled), 'a lost replacement response is not proof of revocation');
+    losePreview = false; await tick();
+    assert(buttons().every(button => !button.props.disabled));
+    assert.equal(lateDelete(), false, 'the delayed request cannot consume the replacement token');
+    beforeAcceptance = false;
+    (buttons().at(-1)!.props.onClick as () => void)(); await new Promise(setImmediate);
+    resolveDelete(); await new Promise(setImmediate); assert.equal(modal(), undefined);
+
+    menu.resolve({ sessionId: id, displayTitle: 'Test' })[0].run(); await new Promise(setImmediate);
+    disconnected = completeDespiteDisconnect = missingPreview = true;
+    (buttons().at(-1)!.props.onClick as () => void)(); await new Promise(setImmediate);
+    assert.equal(modal(), undefined, 'a durable deletion receipt resolves a lost success response even when preview now returns 404');
   } finally { cleanup?.(); }
 });
 

@@ -3,6 +3,7 @@ import * as fs from 'node:fs/promises';
 import { join, resolve } from 'node:path';
 import { tmpdir } from 'node:os';
 import { spawn } from 'node:child_process';
+import { request as httpRequest } from 'node:http';
 import { randomUUID, createHash } from 'node:crypto';
 import { zstdCompressSync } from 'node:zlib';
 import { setTimeout as delay } from 'node:timers/promises';
@@ -19,7 +20,7 @@ process.env.TMP=process.env.TEMP=process.env.TMPDIR=temporary;
 const home=join(base,'home');
 await fs.mkdir(join(home,'profiles/web'),{recursive:true,mode:0o700});
 if(!(await exists(join(home,'profiles/web/package.json')))){
-  await fs.writeFile(join(home,'profiles/web/package.json'),JSON.stringify({name:'dsh-profile-web',private:true,dependencies:{},dsh:{profile:{bundles:['@deepseek-ai/dsh-base','@deepseek-ai/dsh-web-app']}}}));
+  await fs.writeFile(join(home,'profiles/web/package.json'),JSON.stringify({name:'dsh-profile-web',private:true,dependencies:{'@deepseek-ai/dsh-terminal':'0.2.2-rc.2'},dsh:{profile:{bundles:['@deepseek-ai/dsh-base','@deepseek-ai/dsh-web-app']}}}));
   await fs.writeFile(join(home,'profiles/web/pnpm-workspace.yaml'),'packages:\n  - .\nnodeLinker: hoisted\nautoInstallPeers: false\nallowBuilds:\n  koffi: true\n');
   await fs.writeFile(join(home,'profiles/web/cordis.yml'),'[]\n');
   await fs.writeFile(join(home,'profiles/web/cordis.patch.yml'),'[]\n');
@@ -32,7 +33,7 @@ const spawnDsh=(args: string[])=>spawn(dshArgs.length?process.execPath:'dsh',[..
 const install=spawnDsh(['plugin','--profile','web','add','file:'+repo]);
 let installText='';install.stdout.on('data',d=>{installText+=d});install.stderr.on('data',d=>{installText+=d});
 assert.equal(await new Promise(r=>install.on('exit',r)),0,'Install failed: '+installText);
-await fs.writeFile(join(home,'profiles/web/cordis.patch.yml'),'- insert:\n    - id: deletion-test-controls\n      name: '+JSON.stringify(join(repo,'test/host-fixture.ts'))+'\n');
+await fs.writeFile(join(home,'profiles/web/cordis.patch.yml'),'- insert:\n    - id: deletion-test-terminals\n      name: "@deepseek-ai/dsh-terminal"\n    - id: deletion-test-controls\n      name: '+JSON.stringify(join(repo,'test/host-fixture.ts'))+'\n');
 const cwd=join(base,'project');await fs.mkdir(cwd,{recursive:true});
 await fs.writeFile(join(cwd,'keep.txt'),'project file');
 const id='session-'+randomUUID();
@@ -57,6 +58,8 @@ async function extraSession(name: string,age: number,attachment?: string,meta: P
 const preserved=await extraSession('Preserved fixture',20000,shared);const cold=await extraSession('Archived deletion fixture',10000);
 const draftOwner=await extraSession('Draft owner fixture',30000);
 const interrupted=await extraSession('Interrupted deletion fixture',50000);
+const nativeActive=await extraSession('Native active deletion fixture',60000);
+const raceDestination=await extraSession('Concurrent reminder destination',70000);
 const family=await extraSession('测试含子代理的会话',40000);
 const child=await extraSession('Child fixture',39000,undefined,{origin:'subagent',parentSession:family.id,delegationDepth:1});
 const grandchild=await extraSession('Grandchild fixture',38000,undefined,{origin:'subagent',parentSession:child.id,delegationDepth:2});
@@ -164,7 +167,7 @@ try{
  const familyRow=page.getByText('测试含子代理的会话',{exact:true}).first();
  await familyRow.hover();await familyRow.locator('xpath=ancestor::*[.//button][1]').locator('button').first().click();
  await page.getByRole('menuitem',{name:'删除会话',exact:true}).click();
- const familyDialog=page.getByRole('dialog',{name:'归档并删除此会话？',exact:true});
+ const familyDialog=page.getByRole('dialog',{name:'删除此会话？',exact:true});
  await familyDialog.getByText('该会话将被彻底移除（包含与之关联的 2 个子代理），已保存的文件与附件不受影响；如需释放存储空间，可前往左侧「更多」→「清理残留附件与缓存」。',{exact:true}).waitFor();
  assert.equal(await familyDialog.getByRole('checkbox').count(),0);
  assert.equal(await familyDialog.locator('strong').innerText(),'测试含子代理的会话');
@@ -179,17 +182,21 @@ try{
   const staged=await controls('stage',{id:sessionId,text});assert.equal(staged.status(),200,await staged.text());
  }
  assert.equal((await controls('maintain',{id})).status(),200);
+ await controls('stop-timeout',{ms:100});
 
  await page.waitForTimeout(1200);
  await row.hover();await row.locator('xpath=ancestor::*[.//button][1]').locator('button').first().click();
  await page.getByRole('menuitem',{name:'删除会话',exact:true}).waitFor({timeout:5000});
  assert.equal(await page.getByRole('menuitem',{name:'删除会话',exact:true}).count(),1);
  const busyPreview=await (await context.request.post(`http://127.0.0.1:${port}/session-deletion/api/preview`,{headers:{'X-DSH-Session-Deletion':'1'},data:{sessionId:id}})).json();
- const refused=await context.request.post(`http://127.0.0.1:${port}/session-deletion/api/delete`,{headers:{'X-DSH-Session-Deletion':'1'},data:{sessionId:id,token:busyPreview.token,confirmation:'DELETE_IDLE_SESSION'}});
+ const refused=await context.request.post(`http://127.0.0.1:${port}/session-deletion/api/delete`,{headers:{'X-DSH-Session-Deletion':'1'},data:{sessionId:id,token:busyPreview.token,confirmation:'DELETE_SESSION'}});
  assert.equal(refused.status(),409,'backend must reject busy deletion even if UI is bypassed');
  assert.equal((await status()).pending.length,0);assert.equal(await exists(log),true);
- assert.ok((await status()).archived.includes(id),'native archive remains even when final cleanup refuses unsettled maintenance');
- await page.keyboard.press('Escape');await controls('release-maintenance',{id});await controls('unarchive',{id});
+ assert.equal((await status()).archived.includes(id),false,'a refused stop must preserve the original archive state');
+ assert.equal((await status()).deletionRunning,true,'a timed-out request retains protection until actual cleanup settles');
+ await page.keyboard.press('Escape');await controls('release-maintenance',{id});
+ await page.waitForFunction(async()=>!(await (await fetch('/session-deletion/api/status')).json()).deletionRunning);
+ await controls('stop-timeout',{ms:30000});
  await controls('maintain',{id:draftOwner.id});
  const busyGc=await context.request.post(`http://127.0.0.1:${port}/session-deletion/api/gc`,{headers:{'X-DSH-Session-Deletion':'1'},data:{confirmation:'COLLECT_ORPHAN_ATTACHMENTS'}});
  assert.equal(busyGc.status(),409,'GC requires every agent to be idle');
@@ -215,7 +222,7 @@ try{
  assert.equal(await deletionItem.evaluate(el=>getComputedStyle(el).fontSize),await menuItems.first().evaluate(el=>getComputedStyle(el).fontSize));
  await deletionItem.hover();
  await deletionItem.click({timeout:5000});
- const deletionDialog=page.getByRole('dialog',{name:'归档并删除此会话？',exact:true});
+ const deletionDialog=page.getByRole('dialog',{name:'删除此会话？',exact:true});
  await deletionDialog.getByText('该会话将被彻底移除，已保存的文件与附件不受影响；如需释放存储空间，可前往左侧「更多」→「清理残留附件与缓存」。',{exact:true}).waitFor();
  assert.equal(await deletionDialog.getByRole('checkbox').count(),0);
  assert.equal(await deletionDialog.locator('strong').innerText(),'Offline deletion integration fixture');
@@ -237,6 +244,7 @@ try{
  assert.equal(await deletingDialog.locator('button').evaluateAll((buttons: HTMLButtonElement[])=>buttons.every(button=>button.disabled)),true);
  await page.keyboard.press('Escape');
  assert.equal(await deletingDialog.count(),1,'native deletion modal stays open until submission completes');
+ await page.mouse.click(5,5);assert.equal(await deletingDialog.count(),1,'backdrop clicks cannot dismiss an executing deletion');
  await page.waitForFunction(()=>document.querySelector<HTMLElement>('#deletion-lock-probe')?.inert===true);
  await otherPage.waitForFunction(()=>document.querySelector<HTMLElement>('#deletion-lock-probe')?.inert===true);
  assert.equal((await controls('input',{id})).status(),409,'another tab/API cannot send input during deletion');
@@ -345,16 +353,68 @@ try{
  const coldProbe=await (await controls('archive-probe',{id:cold.id})).json();assert.equal(coldProbe.archived,true);
  const coldPreview=await (await context.request.post(`http://127.0.0.1:${port}/session-deletion/api/preview`,{headers:{'X-DSH-Session-Deletion':'1'},data:{sessionId:cold.id}})).json();assert.equal(coldPreview.archived,true);
  await controls('block-status');
- const coldDeleted=await context.request.post(`http://127.0.0.1:${port}/session-deletion/api/delete`,{headers:{'X-DSH-Session-Deletion':'1'},data:{sessionId:cold.id,token:coldPreview.token,confirmation:'DELETE_IDLE_SESSION'}});
+ const coldDeleted=await context.request.post(`http://127.0.0.1:${port}/session-deletion/api/delete`,{headers:{'X-DSH-Session-Deletion':'1'},data:{sessionId:cold.id,token:coldPreview.token,confirmation:'DELETE_SESSION'}});
  assert.equal(coldDeleted.status(),500,'inject a diagnostic write failure after the durable deletion receipt');
  await controls('unblock-status');
  assert.equal(await exists(cold.path),false);
  assert.ok((await receipt()).deletedIdHashes.includes(createHash('sha256').update(cold.id).digest('hex')),'post-commit diagnostic failure still publishes the new receipt');
  assert.equal((await controls('input',{id:cold.id})).status(),409,'post-commit failure must still install the deleted-session tombstone');
+ // Real native cold resume, external Activation, owned job, and current schedule schema.
+ const nativeStarted=await controls('native-tree',{id:nativeActive.id,otherId:preserved.id});assert.equal(nativeStarted.status(),200,await nativeStarted.text());
+ const nativeTree=await nativeStarted.json();
+ for(let i=0;i<100;i++){const state=await(await controls('native-tree-state',{id:nativeActive.id})).json();if(state.rootActive&&state.childActive)break;await delay(20)}
+ const nativeBefore=await(await controls('native-tree-state',{id:nativeActive.id})).json();
+ assert.equal(nativeBefore.rootActive,true);assert.equal(nativeBefore.childActive,true);assert.equal(nativeBefore.externalStopped,false);
+ assert.equal((await status()).archived.includes(nativeActive.id),false);
+ const nativePreview=await(await context.request.post(`http://127.0.0.1:${port}/session-deletion/api/preview`,{headers:{'X-DSH-Session-Deletion':'1'},data:{sessionId:nativeActive.id}})).json();
+ assert.equal(nativePreview.count,2);
+ const activeRow=page.locator(`[data-row-key="session:${nativeActive.id}"]`);
+ await activeRow.hover();await activeRow.locator('button').first().click();
+ assert.equal(await page.getByRole('menuitem',{name:'删除会话',exact:true}).isEnabled(),true,'running native work does not disable deletion');
+ await page.getByRole('menuitem',{name:'删除会话',exact:true}).click();
+ const stoppingDialog=page.getByRole('dialog',{name:'删除此会话？',exact:true});
+ await stoppingDialog.getByRole('button',{name:'确认删除',exact:true}).click();
+ for(let i=0;i<100;i++){if((await(await controls('native-tree-state',{id:nativeActive.id})).json()).externalPending)break;await delay(20)}
+ assert.equal((await(await controls('native-tree-state',{id:nativeActive.id})).json()).externalPending,true);
+ assert.equal(await activeRow.count(),1,'the visible main row remains throughout native preparation');
+ assert.equal(await exists(nativeActive.path),true);assert.equal((await status()).pending.length,0);
+ assert.equal(await stoppingDialog.locator('button').evaluateAll((buttons:HTMLButtonElement[])=>buttons.every(button=>button.disabled)),true);
+ await page.keyboard.press('Escape');await page.mouse.click(5,5);assert.equal(await stoppingDialog.count(),1);
+ assert.equal((await controls('native-tree-admit',{id:nativeActive.id})).status(),409,'native admission cannot start another external child while stopping');
+ await controls('release-external');await stoppingDialog.waitFor({state:'hidden',timeout:30000});
+ const nativeAfter=await(await controls('native-tree-state',{id:nativeActive.id})).json();
+ assert.equal(nativeAfter.rootActive,false);assert.equal(nativeAfter.childActive,false);assert.equal(nativeAfter.externalStopped,true);assert.equal(nativeAfter.jobStopped,true);
+ assert.equal(nativeAfter.tasks.includes(nativeTree.targetTask),false,'remove the actual reminder destination');
+ assert.equal(nativeAfter.tasks.includes(nativeTree.otherTask),true,'an involved actor does not own an unrelated destination');
+ assert.equal(nativeAfter.terminalClosed,true);assert.equal(nativeAfter.hasTerminalActivity,false,'the real terminal registry released its native sessionId');
+ assert.equal(await exists(nativeActive.path),false);assert.equal((await status()).archived.includes(nativeActive.id),false);
+ // A lost request body can arrive after an idle status. Replacing the preview revokes it.
+ const delayedPreview=await(await context.request.post(`http://127.0.0.1:${port}/session-deletion/api/preview`,{headers:{'X-DSH-Session-Deletion':'1'},data:{sessionId:family.id}})).json();
+ const delayedBody=JSON.stringify({sessionId:family.id,token:delayedPreview.token,confirmation:'DELETE_SESSION'});
+ const cookie=(await context.cookies()).map(value=>value.name+'='+value.value).join('; ');
+ let finishResponse!: (status:number)=>void;
+ const delayedResult=new Promise<number>(resolve=>{finishResponse=resolve});
+ const delayed=httpRequest(`http://127.0.0.1:${port}/session-deletion/api/delete`,{method:'POST',headers:{'Content-Type':'application/json','X-DSH-Session-Deletion':'1','Content-Length':Buffer.byteLength(delayedBody),Cookie:cookie}},response=>{response.resume();finishResponse(response.statusCode!)});
+ delayed.on('error',()=>finishResponse(0));delayed.write(delayedBody.slice(0,10));
+ const replacement=await context.request.post(`http://127.0.0.1:${port}/session-deletion/api/preview`,{headers:{'X-DSH-Session-Deletion':'1'},data:{sessionId:family.id}});
+ assert.equal(replacement.status(),200);assert.equal((await status()).deletionRunning,false);
+ delayed.end(delayedBody.slice(10));assert.equal(await delayedResult,409);assert.equal(await exists(family.path),true);
+ // A new-session reminder reserves its current destination before publishing it.
+ const pendingStarted=await controls('pending-schedule',{cwd});assert.equal(pendingStarted.status(),200,await pendingStarted.text());
+ const pendingTask=await pendingStarted.json();
+ const pendingPreview=await(await context.request.post(`http://127.0.0.1:${port}/session-deletion/api/preview`,{headers:{'X-DSH-Session-Deletion':'1'},data:{sessionId:pendingTask.sessionId}})).json();
+ const pendingDeletion=await context.request.post(`http://127.0.0.1:${port}/session-deletion/api/delete`,{headers:{'X-DSH-Session-Deletion':'1'},data:{sessionId:pendingTask.sessionId,token:pendingPreview.token,confirmation:'DELETE_SESSION'}});
+ const pendingResumed=await controls('release-pending-schedule');assert.equal(pendingResumed.status(),200,await pendingResumed.text());
+ const resumedPending=await pendingResumed.json();
+ assert.equal(pendingDeletion.status(),409,JSON.stringify({status:pendingDeletion.status(),...resumedPending}));
+ assert.deepEqual(resumedPending,{firstFailed:false,retryFailed:false},'an in-flight reminder remains usable after a refused deletion');
  // A real interrupted private deletion must produce the recovery notice in other tabs.
- assert.equal((await controls('fail-delete',{id:interrupted.id})).status(),200);
+ const raceSetup=await controls('schedule-race',{id:interrupted.id,otherId:raceDestination.id});assert.equal(raceSetup.status(),200,await raceSetup.text());
+ const raceTask=await raceSetup.json();
  const interruptedPreview=await (await context.request.post(`http://127.0.0.1:${port}/session-deletion/api/preview`,{headers:{'X-DSH-Session-Deletion':'1'},data:{sessionId:interrupted.id}})).json();
- const interruptedDelete=await context.request.post(`http://127.0.0.1:${port}/session-deletion/api/delete`,{headers:{'X-DSH-Session-Deletion':'1'},data:{sessionId:interrupted.id,token:interruptedPreview.token,confirmation:'DELETE_IDLE_SESSION'}});
+ const interrupting=context.request.post(`http://127.0.0.1:${port}/session-deletion/api/delete`,{headers:{'X-DSH-Session-Deletion':'1'},data:{sessionId:interrupted.id,token:interruptedPreview.token,confirmation:'DELETE_SESSION'}});
+ assert.equal((await controls('release-schedule-race')).status(),200);
+ const interruptedDelete=await interrupting;
  assert.equal(interruptedDelete.status(),500);
  assert.equal((await status()).deletionRunning,false);
  assert.equal((await status()).pending.length,1);
@@ -372,6 +432,8 @@ try{
  const again=await start();await page.goto(again);await page.waitForTimeout(2000);
  assert.equal((await status()).pending.length,0);
  assert.equal(await exists(interrupted.path),false,'the pending deletion recovers on restart');
+ const scheduleAfterRecovery=JSON.parse(await fs.readFile(join(home,'storages/schedule.json'),'utf8'));
+ assert.equal(scheduleAfterRecovery.tables.tasks[raceTask.taskId].target.sessionId,raceDestination.id,'a concurrently retargeted reminder survives both failure and recovery');
  assert.equal(await page.evaluate(id=>localStorage.getItem('dsh.conversation.'+id),id),null);
  assert.equal(await page.getByText('Offline deletion integration fixture',{exact:true}).count(),0);
  // The native inventory lists one external entry and resolves its shipped locale metadata.
@@ -419,7 +481,7 @@ try{
  await pluginCard.getByText(zhDescription,{exact:true}).waitFor();
  assert.equal(await pluginCard.getByText(enDescription,{exact:true}).count(),0);
  assert.deepEqual(errors,[]);
- console.log('INTEGRATION PASS: native menu and GC entry, private deletion during other maintenance/uploads, target-only locking, explicit idle GC, staged/shared references, GC publication barrier, recovery and restart, single plugin entry with live zh/en names and descriptions and English UI');
+ console.log('INTEGRATION PASS: active native turns, cold-resumed and external subagents, jobs, schedules, preparation UI locks, private deletion, isolated publication, GC, recovery, and live zh/en metadata');
 }catch(e){
  if(browser){const pages=browser.contexts().flatMap(c=>c.pages());if(pages[0]){await fs.mkdir('test-results',{recursive:true});await pages[0].screenshot({path:'test-results/failure.png'});console.error((await pages[0].locator('body').innerText()).slice(0,6000));}}
  console.error('Browser errors:',errors);

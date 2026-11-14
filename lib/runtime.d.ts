@@ -1,4 +1,4 @@
-import { type LiveSnapshot, type SessionHeader, type GcResult } from './core.js';
+import { type LiveSnapshot, type SessionHeader, type GcResult, type ScheduleTask } from './core.js';
 import { type Gate } from './gate.js';
 import { LocalizedError, type LocalizedMessage } from './locale.js';
 interface Session {
@@ -10,6 +10,9 @@ interface Agent {
     session: Session;
     status: string;
     whenIdle(): Promise<void>;
+    cancel(cause: {
+        kind: 'user';
+    }): void;
     inbox?: {
         nextTurn?: readonly unknown[];
         nextStep?: readonly unknown[];
@@ -19,21 +22,51 @@ interface DeletionCache {
     delete(id: string): unknown;
 }
 interface Schedule {
-    catalog(): Promise<Array<{
-        sessionId: string;
+    catalog(): Promise<Array<ScheduleTask & {
         id: string;
+        updatedAt?: string;
     }>>;
-    delete(request: {
-        sessionId: string;
+    create(request: {
+        target: ScheduleTask['target'];
+    }, actor?: string, signal?: AbortSignal): Promise<unknown>;
+    edit(request: {
         id: string;
-    }): Promise<unknown>;
+        action: 'update' | 'delete';
+        expectedUpdatedAt?: string | null;
+        patch?: {
+            target?: ScheduleTask['target'];
+        };
+    }, actor?: string, signal?: AbortSignal): Promise<unknown>;
 }
 interface Terminals {
     list(agent: Agent): Array<{
+        sessionId: string;
         status?: {
             kind: string;
         };
     }>;
+    hasOwnerActivity(agent: Agent): boolean;
+    kill(agent: Agent, id: string, reason: string): Promise<boolean>;
+}
+interface Job {
+    id: string;
+    owner?: string;
+    status: string;
+}
+interface Jobs {
+    start(spec: {
+        owner?: string;
+    }): unknown;
+    list(owner: string): Job[];
+    kill(id: string, owner: string, reason: string): unknown;
+    events: {
+        subscribe(filter: {
+            owners: 'all';
+        }, listener: (event: {
+            type: string;
+            job?: Job;
+        }) => void): () => void;
+    };
 }
 interface UploadRecord {
     scope: string;
@@ -115,6 +148,10 @@ export interface RuntimeContext {
     sessionController: object;
     schedule: Schedule;
     terminals: Terminals;
+    jobs: Jobs;
+    subagents: {
+        manager?: unknown;
+    };
     on(name: 'agent/created' | 'agent/disposed', listener: (event: {
         agent: Agent;
     }) => unknown): () => void;
@@ -122,6 +159,16 @@ export interface RuntimeContext {
         agent: Agent;
     }, next: () => Promise<unknown>) => unknown): () => void;
     on(name: 'session/created' | 'session/disposed' | 'session/event', listener: () => unknown): () => void;
+    on(name: 'session/event', listener: (session: Session, event: {
+        type: string;
+        data: {
+            jobId?: string;
+            owner?: string;
+            producerReported?: boolean;
+        };
+    }) => unknown, options: {
+        global: true;
+    }): () => void;
     inject(names: string[], callback: (ctx: RuntimeContext) => void): unknown;
     effect(callback: () => () => void, label?: string): unknown;
     provide(name: string, value: unknown): unknown;
@@ -170,6 +217,10 @@ export declare class DeletionRuntime {
     private controller?;
     private schedule?;
     private terminals?;
+    private subagentBinding?;
+    private stopping?;
+    private stopTimeoutMs;
+    private editSchedule;
     private unarchiveForCleanup;
     private maintenance?;
     get gcRunning(): boolean;
@@ -194,8 +245,15 @@ export declare class DeletionRuntime {
     private loadReceipt;
     initialize(): Promise<void>;
     headers(): Promise<Map<string, SessionHeader>>;
+    /** The public stop APIs do not expose cold-resumed or external Activation cleanup. */
+    private manager;
+    private activations;
+    /** Start native cleanup synchronously after locking, retaining the main Session until commit. */
+    private stop;
+    private until;
+    private checkScheduleDelivery;
     family(headers: Map<string, SessionHeader>, id: string): string[];
-    /** One final check after native archival, never a continuous activity monitor. */
+    /** Final validation; native promises own stopping and lifecycle settlement. */
     private quiescence;
     get archivedIds(): string[];
     private snapshots;
