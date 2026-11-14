@@ -194,7 +194,7 @@ for (const proof of [true, false, undefined]) void test(`job resource-release ac
     s.runtime.ctx.jobs.kill = id => { killed.push(id); s.settleJob(job, proof); };
     if (proof === true) assert.deepEqual(await s.remove(), { deleted: 3 });
     else {
-      await assert.rejects(s.remove(), /未能确认/);
+      await assert.rejects(s.remove(), /无法确认/);
       assert(s.agents.has(s.root.id)); assert.deepEqual(await listRequests(s.f.home), []);
     }
     assert.deepEqual(killed, [job.id]); assert.equal(other.status, 'running'); assert.equal(s.listeners(), 0);
