@@ -43,6 +43,14 @@
 
 ### **3.2. 清理残留附件与缓存**
 
+<span style="margin-left:2em;">​</span>插件将残留附件与缓存的回收独立为单独的清理功能，而非在删除会话时顺带清理，主要是为了保障多会话并发与资源共享时的数据安全：
+
+- **附件可能被多会话共享**：DSH 的本地附件按内容散列值（Hash Value）存储，同一份文件可能被分叉会话、继承的历史记录或其他会话共同引用，无法仅凭所属会话直接判断是否可删。
+- **防止并发写入引发误删**：删除单个会话时，其他会话可能正在引用同一附件，或存在尚未写入日志的暂存上传。全局清理会在系统空闲状态下统一检查所有存活会话的引用、内存快照及暂存区，并在扫描与删除期间阻止新的相关写入。
+- **区分独占与共享缓存**：目标会话独占的投影缓存会随会话直接删除；而请求图片等可重建的共享缓存，则交由全局清理在无相关生成任务运行时安全回收。
+
+通过将二者分开，日常删除会话只需锁定目标会话及其子代理，不会干扰其他活跃任务；仅在需要释放磁盘空间时，才单独承担全局扫描与并发保护的开销。
+
 1. 点击左侧导航栏底部的 **「更多」** 选项。
 2. 选择 **「清理残留附件与缓存（大小）」**。菜单打开后会估算可清理附件与缓存的体积，按 B、KiB、MiB、GiB、TiB 自动显示（1024 进制）；计算期间括号内显示原生加载圆圈，失败或扫描期间会话、暂存附件发生变化时显示「无法计算体积」，重新打开菜单可重试。实际清理仍会重新扫描确认。
 3. 确认后系统将在空闲状态下完成扫描与清理，并在完成后显示本次释放的资源项数。
@@ -86,7 +94,7 @@
     dsh plugin --profile web add "file:$(cygpath -m "$PWD")"
     ```
 
-3. 如果你的工作区 `pnpm-workspace.yaml` 对原生依赖构建有安全限制，请确保允许 `koffi`：
+3. 若工作区 `pnpm-workspace.yaml` 对原生依赖构建有安全限制，请确保允许 `koffi`：
 
     ```yaml
     allowBuilds:
@@ -97,7 +105,7 @@
 
 ### **5.2 - 卸载插件**
 
-如需移除插件，运行以下命令并重启 DSH：
+<span style="margin-left:2em;">​</span>如需移除插件，运行以下命令并重启 DSH：
 
 ```bash
 dsh plugin --profile web remove dsh-session-deletion
@@ -107,7 +115,7 @@ dsh plugin --profile web remove dsh-session-deletion
 
 ## **6 - 开发与测试**
 
-源码与全部测试均使用 TypeScript，建仍通过 `@typescript/native` 别名使用 TypeScript 7，`typescript` 别名仅为 ESLint 提供 TypeScript 6 兼容 API，参照 [Microsoft 的并行使用说明](https://devblogs.microsoft.com/typescript/announcing-typescript-7-0/#running-side-by-side-with-typescript-60)。
+<span style="margin-left:2em;">​</span>源码与全部测试均使用 TypeScript，建仍通过 `@typescript/native` 别名使用 TypeScript 7，`typescript` 别名仅为 ESLint 提供 TypeScript 6 兼容 API，参照 [Microsoft 的并行使用说明](https://devblogs.microsoft.com/typescript/announcing-typescript-7-0/#running-side-by-side-with-typescript-60)。
 
 ```bash
 pnpm lint              # ESLint 正确性与异步检查
