@@ -43,18 +43,24 @@ window.__ModuleLoader__.load({ id: 'dsh-session-deletion', factory(require) {
   const asError = (error: unknown): Error => error instanceof Error ? error : new Error(String(error));
   const translate = (message: ClientMessage) => t(message.key, message.params);
   function errorContent(error: Error): ElementNode {
-    const known = error instanceof ApiError && error.messages?.length ? error : undefined;
-    const raw = known ? known.diagnostic : error.message;
-    return h(React.Fragment, null, known?.messages?.map((item, i) => {
+    const explanations: ElementNode[] = [];
+    for (const item of error instanceof ApiError ? error.messages ?? [] : []) {
+      const template = t(item.key);
+      if (!template.trim() || template === item.key) continue;
       const params = item.params;
-      const text = params ? t(item.key).split(/(\{\w+\})/g).map((part, j) => {
+      const text = params ? template.split(/(\{\w+\})/g).map((part, j) => {
         const name = part.slice(1, -1);
         return part.startsWith('{') && Object.hasOwn(params, name)
           ? h('code', { key: j, style: { overflowWrap: 'anywhere' } }, String(params[name])) : part;
-      }) : t(item.key);
-      return h(React.Fragment, { key: i }, i > 0 ? t('error.separator') : null, text);
-    }), raw === undefined ? null
-      : h('pre', { style: { whiteSpace: 'pre-wrap', overflowWrap: 'anywhere', margin: 0 } }, h('code', null, raw)));
+      }) : template;
+      explanations.push(h(React.Fragment, { key: explanations.length }, explanations.length ? t('error.separator') : null, text));
+    }
+    const raw = error instanceof ApiError ? error.diagnostic ?? (explanations.length ? undefined : error.message) : error.message;
+    return h('span', { role: 'alert', style: { display: 'block', color: 'var(--dsw-alias-state-error-primary)',
+      marginTop: 8, fontSize: 12, overflowWrap: 'anywhere' } },
+      explanations.length ? explanations : t('error.unknown'),
+      raw ? h('code', { style: { display: 'block', marginTop: 4, fontFamily: 'var(--ds-font-family-code, monospace)', fontSize: 12,
+        color: 'var(--dsw-alias-label-secondary)', overflowWrap: 'anywhere', whiteSpace: 'pre-wrap' } }, raw) : null);
   }
   const ui = require('@deepseek-ai/dsh-client-ui-primitives') as {
     MenuItemButton: import('react').ComponentType<{ children: ElementNode; disabled?: boolean; danger?: boolean; separatorBefore?: boolean; icon?: ElementNode; title?: string; onSelect(): void }>;
@@ -277,11 +283,10 @@ window.__ModuleLoader__.load({ id: 'dsh-session-deletion', factory(require) {
     return h(ui.Modal, {
       open: true, onClose: dismiss, closeLabel: t('common.close'), className: 'dsh-session-deletion-modal dsh-session-deletion-gc',
       title: t('gc.title'),
-      description: t('gc.description'),
+      description: h(React.Fragment, null, t('gc.description'), d.error ? errorContent(d.error) : null),
       footer: h(React.Fragment, null,
         h(ui.Button, { variant: 'outline', onClick: dismiss, disabled: busy }, t('common.cancel')),
         h(ui.Button, { variant: 'outline', onClick: () => { void collect(); }, disabled: busy }, t(busy ? 'gc.busy' : 'gc.confirm'))),
-      children: d.error ? h('div', { role: 'alert', style: { color: 'var(--dsw-alias-state-error-primary)', marginTop: 8, fontSize: 12, lineHeight: '18px' } }, errorContent(d.error)) : undefined,
     });
   }
 
@@ -317,14 +322,14 @@ window.__ModuleLoader__.load({ id: 'dsh-session-deletion', factory(require) {
         open: true, onClose: dismiss, closeLabel: t('common.close'), className: 'dsh-session-deletion-modal dsh-session-deletion-confirmation',
         title: t('delete.title'),
         description: h(React.Fragment, null,
-          h('strong', { style: { display: 'block', fontWeight: 600, overflowWrap: 'anywhere' } }, d.title || t('session.unnamed')),
+          h('strong', { style: { display: 'block', fontWeight: 600, overflowWrap: 'anywhere' } }, d.title?.trim() ? d.title : t('session.unnamed')),
           h('code', { style: { display: 'block', marginTop: 4, fontFamily: 'var(--ds-font-family-code, monospace)', fontSize: 12, color: 'var(--dsw-alias-label-secondary)', overflowWrap: 'anywhere' } }, d.id),
           d.preview ? h('span', { style: { display: 'block', marginTop: 12 } }, removalText)
-            : d.busy ? h('span', { style: { display: 'block', marginTop: 12 } }, t('delete.checking')) : null),
+            : d.busy ? h('span', { style: { display: 'block', marginTop: 12 } }, t('delete.checking')) : null,
+          d.error ? errorContent(d.error) : null),
         footer: h(React.Fragment, null,
           h(ui.Button, { variant: 'outline', onClick: dismiss, disabled: busy }, t('common.cancel')),
           h(ui.Button, { variant: 'outline', className: 'dsh-session-deletion-danger', onClick: () => { void confirm(); }, disabled: busy || !d.preview }, t(submitting ? 'delete.submitting' : 'delete.confirm'))),
-        children: d.error ? h('div', { role: 'alert', style: { color: 'var(--dsw-alias-state-error-primary)', marginTop: 8, fontSize: 12, lineHeight: '18px', overflowWrap: 'anywhere' } }, errorContent(d.error)) : undefined,
       }));
   }
   return { inject: ['slots', 'sessions', 'uiWorkspace', 'contextMenus', 'locale'], async apply(ctx: DeletionClientContext) {

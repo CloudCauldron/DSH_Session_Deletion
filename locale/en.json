@@ -47,6 +47,7 @@
     "activity.unsaved": "Unsaved blank sessions have no logs to delete; please restart to clean up blank subagents",
 
     "error.separator": "; ",
+    "error.unknown": "Unknown error.",
 
     "error.expectedJsonObject": "Expected a JSON object",
     "error.expectedPluginJson": "Expected the plugin JSON request",

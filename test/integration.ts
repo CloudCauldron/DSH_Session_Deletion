@@ -174,7 +174,13 @@ try{
  await familyDialog.getByText('该会话将被彻底移除（包含与之关联的 2 个子代理），已保存的文件与附件不受影响；如需释放存储空间，可前往左侧「更多」→「释放空间」。',{exact:true}).waitFor();
  assert.equal(await familyDialog.getByRole('checkbox').count(),0);
  assert.equal(await familyDialog.locator('strong').innerText(),'测试含子代理的会话');
- assert.equal(await familyDialog.locator('code').innerText(),family.id);
+ const codeAppearance=(code:Locator)=>code.evaluate(el=>{
+  const style=getComputedStyle(el);
+  return [style.display,style.marginTop,style.fontFamily,style.fontSize,style.lineHeight,style.color,style.overflowWrap];
+ });
+ const sessionCode=familyDialog.locator('p code');
+ assert.equal(await sessionCode.innerText(),family.id);
+ const sessionCodeAppearance=await codeAppearance(sessionCode);
  assert.equal(await familyDialog.getByRole('button',{name:'确认删除',exact:true}).isEnabled(),true);
  await controls('archive-probe',{id:family.id});
  const archivedDialog=page.getByRole('dialog',{name:'删除此会话？',exact:true});
@@ -480,6 +486,17 @@ try{
  await englishGc.getByText('Unlinked local attachments and temporary image cache will be removed to free up space. Make sure all other sessions are idle during cleanup.',{exact:true}).waitFor();
  assert.equal(await englishGc.getByRole('button',{name:'Confirm Cleanup',exact:true}).count(),1);
  assert.equal(await englishGc.getByRole('button',{name:'Close',exact:true}).count(),1);
+ const rawDiagnostic='Cannot remove attachment\n<original> & {path}';
+ await page.route('**/session-deletion/api/gc',route=>route.fulfill({status:500,json:{error:rawDiagnostic}}),{times:1});
+ await englishGc.getByRole('button',{name:'Confirm Cleanup',exact:true}).click();
+ const diagnosticAlert=englishGc.locator('p').getByRole('alert');
+ await diagnosticAlert.waitFor();
+ assert.equal(await diagnosticAlert.textContent(),'Unknown error.'+rawDiagnostic);
+ const block=diagnosticAlert.locator('code');
+ assert.equal(await block.textContent(),rawDiagnostic);
+ assert.deepEqual(await codeAppearance(block),sessionCodeAppearance);
+ assert.equal(await block.evaluate(el=>getComputedStyle(el).whiteSpace),'pre-wrap');
+ assert.equal(await englishGc.locator('pre').count(),0);
  await englishGc.getByRole('button',{name:'Cancel',exact:true}).click();
  await page.getByRole('button',{name:'Account menu',exact:true}).click();
  await page.getByRole('menuitem',{name:'Settings',exact:true}).click();

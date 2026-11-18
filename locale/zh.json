@@ -47,6 +47,7 @@
     "activity.unsaved": "尚未保存的空白会话没有可删除的日志；空白子代理请在重启后再清理",
 
     "error.separator": "；",
+    "error.unknown": "未知错误。",
 
     "error.expectedJsonObject": "需要一个 JSON 对象。",
     "error.expectedPluginJson": "需要插件发出的 JSON 请求。",

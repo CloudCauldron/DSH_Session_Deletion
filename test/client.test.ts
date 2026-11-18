@@ -280,17 +280,24 @@ void test('deletion copy and API errors follow locale changes, retain Chinese fa
     menu.resolve({ sessionId: id, displayTitle: 'Test' })[0].run();
     await new Promise(setImmediate);
     assert.ok(render().includes('[en] guard unavailable'));
-    const raw = element(render().find(node => isElement(node) && node.type === 'pre'));
-    assert.deepEqual(nodes(raw.props.children).filter(node => typeof node === 'string'), ['system detail\n<&>']);
+    function checkDiagnostic(lead: string, raw: string) {
+      const dialog = element(render().find(node => isElement(node) && node.type === ui.Modal));
+      assert.equal(dialog.props.children, undefined);
+      const alert = element(nodes(dialog.props.description).find(node => isElement(node) && node.props.role === 'alert'));
+      const content = nodes(alert.props.children);
+      const block = element(content.find(node => isElement(node) && node.type === 'code'));
+      assert.ok(content.includes(lead) && content.indexOf(lead) < content.indexOf(block));
+      assert.deepEqual(block.props.children, [raw]);
+      const style = block.props.style as React.CSSProperties;
+      assert.deepEqual([style.display, style.marginTop, style.whiteSpace], ['block', 4, 'pre-wrap']);
+    }
+    checkDiagnostic('[en] guard unavailable', 'system detail\n<&>');
     locale.setLocale('zh');
     assert.ok(render().includes('恢复监测不可用，请重启 DSH。'));
     previewThrown = true;
     menu.resolve({ sessionId: id, displayTitle: 'Test' })[0].run();
     await new Promise(setImmediate);
-    const pre = element(render().find(node => isElement(node) && node.type === 'pre'));
-    const code = element(nodes(pre.props.children)[0]);
-    assert.equal(code.type, 'code');
-    assert.deepEqual(code.props.children, ['0'], 'unkeyed diagnostics preserve the original text inside pre/code');
+    checkDiagnostic('未知错误。', '0');
     previewThrown = previewFailed = false;
     const buttons = () => render().filter((node): node is MockElement => isElement(node) && node.type === ui.Button);
     const modal = () => render().find((node): node is MockElement => isElement(node) && node.type === ui.Modal);
