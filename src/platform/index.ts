@@ -1,7 +1,8 @@
+import { LocalizedError } from '../locale.js';
 export interface Lock { close(): Promise<void> }
 export interface ProcessInfo { pid: number; cwd: string; env: string[] }
 
-if (!['linux', 'win32'].includes(process.platform)) throw new Error('Session Deletion supports Linux and Windows only');
+if (!['linux', 'win32'].includes(process.platform)) throw LocalizedError.english('error.unsupportedPlatform');
 
 const platform: typeof import('./linux.js') = process.platform === 'win32'
   ? await import('./windows.js') : await import('./linux.js');

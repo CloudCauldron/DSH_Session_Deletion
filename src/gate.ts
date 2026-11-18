@@ -5,6 +5,7 @@ import { fileURLToPath, pathToFileURL } from 'node:url';
 import { createRequire } from 'node:module';
 import { SUPPORTED_DSH, privateDir, stateDir } from './core.js';
 import { birth } from './platform/index.js';
+import { LocalizedError } from './locale.js';
 
 export interface Gate { home: string; version: string; healthy(): boolean }
 export interface GateContext { provide(name: string, value: Gate): unknown }
@@ -22,12 +23,12 @@ async function start(): Promise<Gate> {
   let version: string;
   try { version = require('@deepseek-ai/dsh/package.json').version; }
   catch { version = JSON.parse(await readFile(join(dirname(entry), '..', 'package.json'), 'utf8')).version; }
-  if (version !== SUPPORTED_DSH) throw new Error(`Session Deletion supports DSH ${SUPPORTED_DSH}; found ${version}. Review before upgrading.`);
+  if (version !== SUPPORTED_DSH) throw LocalizedError.english('error.incompatibleDsh', { supported: SUPPORTED_DSH, found: version });
   const { resolveDshHome } = await import(pathToFileURL(require.resolve('@deepseek-ai/dsh-home-paths')).href);
   const home = resolveDshHome();
   await privateDir(stateDir(home));
   const started = await birth(process.pid);
-  if (!started) throw new Error('Cannot identify DSH host');
+  if (!started) throw LocalizedError.english('error.hostIdentity');
   const project = resolve(dirname(fileURLToPath(import.meta.url)), '..');
   let healthy = true;
   const child = spawn(process.execPath, [join(project, 'lib', 'guard.js'), home, String(process.pid), started], {
@@ -36,11 +37,14 @@ async function start(): Promise<Gate> {
   });
   child.on('exit', () => { healthy = false; });
   await new Promise<void>((accept, reject) => {
-    const timer = setTimeout(() => reject(new Error('Session Deletion guard startup timed out')), 65000);
+    const timer = setTimeout(() => reject(LocalizedError.english('error.guardStartTimeout')), 65000);
     let text = '';
     let partial = '';
     child.on('error', e => { clearTimeout(timer); reject(e); });
-    child.on('exit', code => { clearTimeout(timer); reject(new Error(`Session Deletion guard exited: ${code}; ${text.slice(0,1000)}`)); });
+    child.on('exit', code => {
+      clearTimeout(timer);
+      reject(LocalizedError.english('error.guardExit', { code: String(code) }, { failures: text ? [text.slice(0, 1000)] : [] }));
+    });
     child.stdout.on('data', data => {
       text += String(data); partial += String(data);
       const lines = partial.split('\n'); partial = lines.pop()!;

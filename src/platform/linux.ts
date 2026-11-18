@@ -3,6 +3,7 @@ import { constants } from 'node:fs';
 import { basename, dirname, join, resolve } from 'node:path';
 import koffi from 'koffi';
 import type { Lock, ProcessInfo } from './index.js';
+import { LocalizedError } from '../locale.js';
 
 export const homeVariable: string = 'HOME';
 
@@ -14,7 +15,7 @@ export function resolvePath(cwd: string, value: string, _env: readonly string[])
 }
 
 export function assertOwner(path: string, uid: number): void {
-  if (uid !== process.getuid!()) throw new Error(`Not owned by this user: ${path}`);
+  if (uid !== process.getuid!()) throw LocalizedError.english('error.wrongFileOwner', { path });
 }
 export async function mkdir(path: string): Promise<string | undefined> {
   return fs.mkdir(path, { recursive: true, mode: 0o700 });
@@ -43,7 +44,7 @@ export async function birth(pid: number): Promise<string | undefined> {
   try {
     const text = await fs.readFile(`/proc/${pid}/stat`, 'utf8');
     const fields = text.slice(text.lastIndexOf(')') + 2).split(' ');
-    if (!/^\d+$/.test(fields[19] ?? '')) throw new Error('Cannot read process identity');
+    if (!/^\d+$/.test(fields[19] ?? '')) throw LocalizedError.english('error.processIdentityUnreadable');
     return fields[0] === 'Z' ? undefined : fields[19];
   } catch (e) { if (['ENOENT', 'ESRCH'].includes((e as NodeJS.ErrnoException).code || '')) return; throw e; }
 }
@@ -62,7 +63,7 @@ export async function processes(excluded: Set<number>, executables: readonly str
       found.push({ pid, cwd, env });
     } catch (e) {
       if (['ENOENT', 'ESRCH'].includes((e as NodeJS.ErrnoException).code || '') && !(await birth(pid))) continue;
-      throw new Error('Cannot inspect a same-user process; cleanup deferred', { cause: e });
+      throw LocalizedError.english('error.sameUserInspection', undefined, { cause: e });
     }
   }
   return found;
@@ -73,5 +74,5 @@ export async function tryLock(path: string, create = false, _machineWide = false
   const errno = koffi.errno();
   await handle.close();
   if (errno === 11 || errno === 35) return undefined;
-  throw new Error(`Kernel file lock failed (errno ${errno})`);
+  throw LocalizedError.english('error.kernelLock', { errno });
 }

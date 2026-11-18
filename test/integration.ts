@@ -125,6 +125,9 @@ try{
  assert.deepEqual(initialReceipt,{ok:true,revision:'',deletedIdHashes:[]});
  assert.deepEqual((await status()).receipt,{revision:'',count:0});
  assert.equal(receiptRequests,1,'unchanged receipt is fetched only once despite status polling');
+ const unknownRoute=await context.request.post(`http://127.0.0.1:${port}/session-deletion/api/unknown`,{headers:{'X-DSH-Session-Deletion':'1'},data:{sessionId:id}});
+ assert.equal(unknownRoute.status(),404);
+ assert.deepEqual((await unknownRoute.json()).messages,[{key:'error.unknownRoute'}]);
  const debugPreview=await context.request.post(`http://127.0.0.1:${port}/session-deletion/api/preview`,{headers:{'X-DSH-Session-Deletion':'1'},data:{sessionId:id}});
  assert.equal(debugPreview.status(),200,'Fixture must be visible to the persistence service');
  // Wait for the real sidebar row, then use the host context menu.

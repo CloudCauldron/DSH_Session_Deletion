@@ -198,7 +198,7 @@ export class DeletionRuntime {
     if (names.has(key)) return;
     const original = target[key];
     if (typeof original !== 'function') {
-      if (required) throw new Error(`Unsupported DSH capability: ${key}`);
+      if (required) throw LocalizedError.english('error.unsupportedCapability', { capability: key });
       return;
     }
     const own = Object.getOwnPropertyDescriptor(target, key);
@@ -249,7 +249,7 @@ export class DeletionRuntime {
     await this.loadReceipt();
     const runtime = this;
     if (this.ctx.attachments.root !== join(this.home, 'attachments', 'v1')
-      || this.ctx.attachments.cacheRoot !== join(this.home, 'cache', 'attachments')) throw new Error('Unsupported attachment storage');
+      || this.ctx.attachments.cacheRoot !== join(this.home, 'cache', 'attachments')) throw LocalizedError.english('error.attachmentStorage');
     const workspaces = this.unwrap(this.ctx.workspaceRegistry);
     const unarchive = workspaces.unarchiveSession;
     this.unarchiveForCleanup = id => Reflect.apply(unarchive, workspaces, [id]);
@@ -257,7 +257,7 @@ export class DeletionRuntime {
       return runtime.operation([id as string], () => Reflect.apply(original, this, [id, ...args]));
     });
     const registry = this.unwrap(this.ctx.agents);
-    if (typeof registry.requireFactory !== 'function') throw new Error('Unsupported AgentRegistry lifecycle');
+    if (typeof registry.requireFactory !== 'function') throw LocalizedError.english('error.registryLifecycle');
     this.patch(registry, 'setFactory', original => function (...args) {
       const disposer = Reflect.apply(original, this, args);
       runtime.captureFactory((this as RuntimeContext['agents']).requireFactory().target);
@@ -281,7 +281,7 @@ export class DeletionRuntime {
       return Reflect.apply(original, this, [spec]);
     });
     const cache = this.unwrap(this.ctx.sessionProjectionCache);
-    if (!cache.table || typeof cache.table.delete !== 'function') throw new Error('Projection cache deletion capability is missing');
+    if (!cache.table || typeof cache.table.delete !== 'function') throw LocalizedError.english('error.projectionCacheDelete');
     this.patch(cache, 'put', original => function (key, ...args) {
       const id = key as string;
       if (runtime.isLocked(id)) return Promise.resolve();
@@ -296,7 +296,7 @@ export class DeletionRuntime {
       });
     }
     const uploads = this.unwrap(this.ctx.fileUploads);
-    if (!(uploads.stagedFiles instanceof WeakMap)) throw new Error('Unsupported staged file ownership');
+    if (!(uploads.stagedFiles instanceof WeakMap)) throw LocalizedError.english('error.stagedUploadOwnership');
     for (const method of ['upload', 'uploadStream', 'uploadImageStream']) this.patch(uploads, method, original => async function (owner, ...args) {
       const input = owner as { id?: string; sessionId?: string };
       return runtime.operation([(input.id ?? input.sessionId)!], () => Reflect.apply(original, this, [owner, ...args]));
@@ -338,14 +338,14 @@ export class DeletionRuntime {
       }
       runtime.patch(ctx.sessionController, 'list', original => async function (...args) {
         const result = await Reflect.apply(original, this, args) as { items: Array<{ sessionId: string }> };
-        if (!Array.isArray(result?.items)) throw new Error('Unsupported session list response');
+        if (!Array.isArray(result?.items)) throw LocalizedError.english('error.sessionListResponse');
         return { ...result, items: result.items.filter((row: { sessionId: string }) => !runtime.deleted.has(digest(row.sessionId))) };
       });
     });
     this.ctx.inject(['schedule'], (ctx: RuntimeContext) => {
       const service = runtime.unwrap(ctx.schedule);
       const edit = service.edit;
-      if (typeof edit !== 'function') throw new Error('Unsupported schedule edit capability');
+      if (typeof edit !== 'function') throw LocalizedError.english('error.scheduleEdit');
       runtime.editSchedule = (...args) => Reflect.apply(edit, service, args);
       runtime.patch(service, 'create', original => function (request, actor, ...args) {
         const target = scheduledSession(request as ScheduleTask);
@@ -484,9 +484,7 @@ export class DeletionRuntime {
     const stopping = Promise.allSettled(tasks).then(results => {
       for (const result of results) if (result.status === 'rejected') failures.push(result.reason);
       if (agents.some(agent => this.terminals?.hasOwnerActivity(agent))) failures.push(new DeletionRefused('activity.terminal'));
-      if (failures.length) throw new DeletionRefused('error.stopIncomplete', {
-        detail: failures.map(error => error instanceof Error ? error.message : String(error)).join('; '),
-      });
+      if (failures.length) throw new DeletionRefused('error.stopIncomplete', undefined, { failures });
     }).finally(() => { offJobs(); offSession(); if (this.stopping === stopping) this.stopping = undefined; });
     this.stopping = stopping;
     return { done: stopping, manager };
@@ -650,17 +648,17 @@ export class DeletionRuntime {
         const agent = this.ctx.agents.get(member);
         if (agent) {
           const handle = this.handles.get(member);
-          if (!handle || handle.agent !== agent) throw new Error('Lifecycle changed before disposal');
+          if (!handle || handle.agent !== agent) throw LocalizedError.english('error.lifecycleChanged');
           await handle.dispose();
         }
-        if (this.ctx.sessions.get(member) || this.ctx.agents.get(member)) throw new Error('Session did not leave its live stores');
+        if (this.ctx.sessions.get(member) || this.ctx.agents.get(member)) throw LocalizedError.english('error.liveStoresRetained');
         const writes = this.cacheWrites.get(member);
         if (writes?.size) await Promise.all(writes);
         await this.unwrap(this.ctx.sessionProjectionCache).table.delete(member);
       }
       for (const record of request.plan.directories) {
         const lock = await tryLock(join(this.home, record.path, 'session.lock'));
-        if (!lock) throw new Error('A session writer is still active');
+        if (!lock) throw LocalizedError.english('error.activeSessionWriter');
         writerLocks.push(lock);
       }
       const result = await sweep(this.home, { hooks: {
@@ -680,9 +678,9 @@ export class DeletionRuntime {
           } else if (path === join('storages', 'schedule.json')) {
             for (const task of await this.schedule!.catalog()) if (targets.has(scheduledSession(task)!)) {
               const result = await this.editSchedule({ id: task.id, action: 'delete', expectedUpdatedAt: task.updatedAt ?? null }) as { deleted?: boolean };
-              if (!result.deleted) throw new Error('Schedule deletion was not confirmed');
+              if (!result.deleted) throw LocalizedError.english('error.scheduleDeletionUnconfirmed');
             }
-          } else throw new Error('Unsupported live storage edit: ' + path);
+          } else throw LocalizedError.english('error.unsupportedLiveEdit', { path });
         },
       } });
       return { deleted: result.reduce((n, value) => n + value.sessions, 0) };

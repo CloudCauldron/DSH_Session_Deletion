@@ -39,12 +39,23 @@ window.__ModuleLoader__.load({ id: 'dsh-session-deletion', factory(require) {
   const h = React.createElement;
   const namespace = 'session-deletion';
   let t: ReturnType<DeletionClientContext['locale']['bind']>;
-  class ApiError extends Error { constructor(text: string, readonly messages?: ClientMessage[]) { super(text); } }
+  class ApiError extends Error { constructor(text: string, readonly messages?: ClientMessage[], readonly diagnostic?: string) { super(text); } }
   const asError = (error: unknown): Error => error instanceof Error ? error : new Error(String(error));
   const translate = (message: ClientMessage) => t(message.key, message.params);
-  const errorContent = (error: Error): ElementNode => error instanceof ApiError && error.messages?.length
-    ? error.messages.map(translate).join(t('error.separator'))
-    : h('pre', { style: { whiteSpace: 'pre-wrap', overflowWrap: 'anywhere', margin: 0 } }, h('code', null, error.message));
+  function errorContent(error: Error): ElementNode {
+    const known = error instanceof ApiError && error.messages?.length ? error : undefined;
+    const raw = known ? known.diagnostic : error.message;
+    return h(React.Fragment, null, known?.messages?.map((item, i) => {
+      const params = item.params;
+      const text = params ? t(item.key).split(/(\{\w+\})/g).map((part, j) => {
+        const name = part.slice(1, -1);
+        return part.startsWith('{') && Object.hasOwn(params, name)
+          ? h('code', { key: j, style: { overflowWrap: 'anywhere' } }, String(params[name])) : part;
+      }) : t(item.key);
+      return h(React.Fragment, { key: i }, i > 0 ? t('error.separator') : null, text);
+    }), raw === undefined ? null
+      : h('pre', { style: { whiteSpace: 'pre-wrap', overflowWrap: 'anywhere', margin: 0 } }, h('code', null, raw)));
+  }
   const ui = require('@deepseek-ai/dsh-client-ui-primitives') as {
     MenuItemButton: import('react').ComponentType<{ children: ElementNode; disabled?: boolean; danger?: boolean; separatorBefore?: boolean; icon?: ElementNode; title?: string; onSelect(): void }>;
     Modal: import('react').ComponentType<{ open: boolean; onClose(): void; closeLabel: string; title: string; description?: ElementNode; footer?: ElementNode; children?: ElementNode; className?: string }>;
@@ -99,8 +110,11 @@ window.__ModuleLoader__.load({ id: 'dsh-session-deletion', factory(require) {
     const response = await fetch('/session-deletion/api/' + path, { credentials: 'same-origin', cache: 'no-store',
       method: data ? 'POST' : 'GET', headers: data ? { 'Content-Type': 'application/json', 'X-DSH-Session-Deletion': '1' } : {},
       ...(data ? { body: JSON.stringify(data) } : {}) });
-    const result = await response.json() as T & { error?: string; messages?: ClientMessage[] };
-    if (!response.ok) throw new ApiError(result.error || `HTTP ${response.status}`, result.messages);
+    const result = await response.json() as T & { error?: string; messages?: ClientMessage[]; diagnostic?: string };
+    if (!response.ok) {
+      const messages = result.messages ?? (result.error ? undefined : [{ key: 'error.httpStatus', params: { status: response.status } }]);
+      throw new ApiError(result.error ?? `HTTP ${response.status}`, messages, result.diagnostic);
+    }
     return result;
   }
   async function hash(value: string): Promise<string> {

@@ -24,29 +24,31 @@ function send(res: ServerResponse, status: number, value: unknown): void {
   res.end(JSON.stringify(value));
 }
 async function body(req: IncomingMessage): Promise<Record<string, unknown>> {
-  if (!req.headers['content-type']?.startsWith('application/json') || req.headers['x-dsh-session-deletion'] !== '1') throw new HttpError(415, 'Expected the plugin JSON request');
+  if (!req.headers['content-type']?.startsWith('application/json') || req.headers['x-dsh-session-deletion'] !== '1') throw new HttpError(415, 'error.expectedPluginJson');
   const chunks: Buffer[] = []; let bytes = 0;
   for await (const chunk of req) {
     const value = Buffer.from(chunk); bytes += value.length;
-    if (bytes > 16384) throw new HttpError(413, 'Request too large');
+    if (bytes > 16384) throw new HttpError(413, 'error.requestTooLarge');
     chunks.push(value);
   }
   let data: unknown;
-  try { data = JSON.parse(Buffer.concat(chunks).toString('utf8')); } catch { throw new HttpError(400, 'Invalid JSON'); }
-  if (!data || typeof data !== 'object' || Array.isArray(data)) throw new HttpError(400, 'Expected a JSON object');
+  try { data = JSON.parse(Buffer.concat(chunks).toString('utf8')); } catch { throw new HttpError(400, 'error.invalidJson'); }
+  if (!data || typeof data !== 'object' || Array.isArray(data)) throw new HttpError(400, 'error.expectedJsonObject');
   return data as Record<string, unknown>;
 }
 export async function apply(ctx: HostContext): Promise<void> {
   const gate = ctx.sessionDeletionGate; const runtime = ctx.sessionDeletionRuntime;
-  if (ctx.sessionPersistence.name !== 'session-persistence-jsonl' || resolve(ctx.sessionPersistence.root) !== join(gate.home, 'sessions')) throw new Error('Session Deletion requires the default JSONL session root');
+  if (ctx.sessionPersistence.name !== 'session-persistence-jsonl' || resolve(ctx.sessionPersistence.root) !== join(gate.home, 'sessions')) {
+    throw LocalizedError.english('error.defaultSessionRoot');
+  }
   const previews = new Map<string, { token: string; expires: number; createdAt: number; ids: string[] }>();
   ctx.webServer.register({ kind: 'prefix', path: '/session-deletion/api', async handler(req, res) {
     try {
       const rejection = ctx.connection.requestRejection(req);
-      if (rejection) throw new HttpError(rejection, 'Not authorized');
+      if (rejection) throw new HttpError(rejection, 'error.unauthorized');
       const admission = ctx.connection.admit(req);
-      if ('rejection' in admission) throw new HttpError(admission.rejection, 'Not authorized');
-      if (admission.peer.principal.kind !== 'owner') throw new HttpError(403, 'Owner access required');
+      if ('rejection' in admission) throw new HttpError(admission.rejection, 'error.unauthorized');
+      if (admission.peer.principal.kind !== 'owner') throw new HttpError(403, 'error.ownerRequired');
       const path = new URL(req.url || '/', 'http://localhost').pathname;
       if (req.method === 'GET' && path === '/session-deletion/api/locales') {
         send(res, 200, { ok: true, dictionaries }); return;
@@ -65,13 +67,13 @@ export async function apply(ctx: HostContext): Promise<void> {
       if (req.method === 'GET' && path === '/session-deletion/api/gc-size') {
         send(res, 200, { ok: true, bytes: await runtime.garbageSize() }); return;
       }
-      if (req.method !== 'POST') throw new HttpError(405, 'Method not allowed');
+      if (req.method !== 'POST') throw new HttpError(405, 'error.methodNotAllowed');
       const data = await body(req);
       if (path === '/session-deletion/api/gc') {
         if (data.confirmation !== 'COLLECT_ORPHAN_ATTACHMENTS') throw new HttpError(400, 'error.confirmGc');
         send(res, 200, { ok: true, ...await runtime.gc() }); return;
       }
-      if (typeof data.sessionId !== 'string' || !data.sessionId || data.sessionId.length > 1024) throw new HttpError(400, 'Invalid session ID');
+      if (typeof data.sessionId !== 'string' || !data.sessionId || data.sessionId.length > 1024) throw new HttpError(400, 'error.invalidSessionId');
       const id = data.sessionId;
       if (!gate.healthy()) throw new HttpError(503, 'error.guardUnavailable');
       if (path === '/session-deletion/api/delete') {
@@ -94,12 +96,12 @@ export async function apply(ctx: HostContext): Promise<void> {
           previews.set(id, { token, expires: Date.now() + 120000, createdAt: header.createdAt, ids });
           return { ok: true, sessionId: id, count: ids.length, token, archived: runtime.archivedIds.includes(id) };
         }
-        throw new HttpError(404, 'Unknown route');
+        throw new HttpError(404, 'error.unknownRoute');
       })();
       send(res, 200, result);
     } catch (e) {
-      send(res, e instanceof HttpError || e instanceof DeletionRefused ? e.status : 500, { ok: false, error: e instanceof Error ? e.message : 'Operation failed',
-        ...e instanceof LocalizedError ? { messages: e.messages } : {} });
+      send(res, e instanceof HttpError || e instanceof DeletionRefused ? e.status : 500, { ok: false, error: e instanceof Error ? e.message : String(e),
+        ...e instanceof LocalizedError ? { messages: e.messages, diagnostic: e.diagnostic } : {} });
     }
   } });
 }

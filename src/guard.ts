@@ -6,6 +6,7 @@ import { pathToFileURL } from 'node:url';
 import { setTimeout as delay } from 'node:timers/promises';
 import { atomicJSON, cleanAtomicTemps, exists, privateDir, readJSON, safePath, stateDir, sweep } from './core.js';
 import { birth, processes, tryLock as lock, usesLockFiles, homeVariable, resolvePath, type Lock } from './platform/index.js';
+import { LocalizedError } from './locale.js';
 
 interface HostMarker { pid: number; birth: string; phase: 'waiting' | 'running' }
 export interface GuardOptions { home: string; hostPid?: number; hostBirth?: string; startupTimeoutMs?: number }
@@ -53,7 +54,7 @@ async function offline(options: GuardOptions): Promise<void> {
   const pending = join(state, 'pending');
   const excluded = await waitingHosts(state); excluded.add(process.pid);
   if (options.hostPid && await birth(options.hostPid) === options.hostBirth) excluded.add(options.hostPid);
-  if ((await otherHosts(options.home, excluded)).length) throw new Error('Another DSH process is using this home; cleanup deferred');
+  if ((await otherHosts(options.home, excluded)).length) throw LocalizedError.english('error.otherProcessCleanup');
   const hasPending = await exists(pending) && (await fs.readdir(pending)).length > 0;
   const handles: Lock[] = [];
   try {
@@ -65,7 +66,7 @@ async function offline(options: GuardOptions): Promise<void> {
         const path = join(root, project.name, session.name, 'session.lock');
         if (usesLockFiles && !(await exists(path))) continue;
         const lock = await tryLock(path);
-        if (!lock) throw new Error('A session still has a live writer; cleanup deferred');
+        if (!lock) throw LocalizedError.english('error.activeWriterCleanup');
         handles.push(lock);
       }
     }
@@ -86,13 +87,13 @@ export async function runGuard(options: GuardOptions, announce: (line: string) =
   let marker: string | undefined; let lock: Lock | undefined; let ready = false;
   try {
     if (options.hostPid) {
-      if (!options.hostBirth || await birth(options.hostPid) !== options.hostBirth) throw new Error('Host exited before guard initialization');
+      if (!options.hostBirth || await birth(options.hostPid) !== options.hostBirth) throw LocalizedError.english('error.hostExitedBeforeGuard');
       marker = join(state, 'hosts', `${options.hostPid}-${options.hostBirth}.json`);
       await atomicJSON(marker, { pid: options.hostPid, birth: options.hostBirth, phase: 'waiting' });
     }
     const deadline = Date.now() + (options.startupTimeoutMs ?? 60000);
     while (!(lock = await tryLock(lifecycle, true, true))) {
-      if (Date.now() >= deadline) throw new Error('Another DSH host or cleanup owns this home; close it before starting DSH');
+      if (Date.now() >= deadline) throw LocalizedError.english('error.homeBusyAtStartup');
       if (options.hostPid && await birth(options.hostPid) !== options.hostBirth) return;
       await delay(200);
     }
@@ -125,7 +126,7 @@ export async function runGuard(options: GuardOptions, announce: (line: string) =
 if (process.argv[1] && import.meta.url === pathToFileURL(resolve(process.argv[1])).href) {
   const [home, hostPid, hostBirth] = process.argv.slice(2);
   try {
-    if (!home) throw new Error('Usage: node lib/guard.js <DSH_HOME> [host-pid host-start-time]');
+    if (!home) throw LocalizedError.english('error.guardUsage', { command: 'node lib/guard.js <DSH_HOME> [host-pid host-start-time]' });
     await runGuard({ home, hostPid: hostPid ? Number(hostPid) : undefined, hostBirth });
   } catch { process.exitCode = 1; }
 }

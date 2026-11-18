@@ -25,6 +25,10 @@ void test('compressed logs retain every frame across blocks, checksums and input
     assert.deepEqual([...(await readLog(path)).refs.hashes], [f.exclusive]);
     await fs.truncate(path, (await fs.stat(path)).size - 1);
     await assert.rejects(readLog(path));
+    await fs.writeFile(path, zstdCompressSync('not JSON\n'));
+    await assert.rejects(readLog(path), {
+      messages: [{ key: 'error.readSessionLog', params: { path } }, { key: 'error.invalidJsonl', params: { path, record: 1 } }],
+    });
   } finally { await f.cleanup(); }
 });
 

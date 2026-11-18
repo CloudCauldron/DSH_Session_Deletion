@@ -17,12 +17,31 @@ export function message(key: string, params?: LocalizedMessage['params']): Local
   return { key, ...params === undefined ? {} : { params } };
 }
 
+type DiagnosticOptions = ErrorOptions & { locale?: 'zh' | 'en'; failures?: readonly unknown[] };
+
 export class LocalizedError extends Error {
   readonly messages: LocalizedMessage[];
-  constructor(key: string | LocalizedMessage[], params?: LocalizedMessage['params']) {
-    const messages = typeof key === 'string' ? [message(key, params)] : key;
-    super(messages.map(item => (dictionaries.zh[item.key] ?? item.key).replace(/\{(\w+)\}/g,
-      (match, name: string) => String(item.params?.[name] ?? match))).join(dictionaries.zh['error.separator']));
+  readonly diagnostic?: string;
+
+  constructor(key: string | LocalizedMessage[], params?: LocalizedMessage['params'], options?: DiagnosticOptions) {
+    const dict = dictionaries[options?.locale ?? 'zh'];
+    const messages = typeof key === 'string' ? [message(key, params)] : [...key];
+    const raw: string[] = [];
+    for (const cause of options?.failures ?? []) {
+      if (cause instanceof LocalizedError) {
+        messages.push(...cause.messages);
+        if (cause.diagnostic !== undefined) raw.push(cause.diagnostic);
+      } else raw.push(cause instanceof Error ? cause.message : String(cause));
+    }
+    const translated = messages.map(item => (dict[item.key] ?? item.key).replace(/\{(\w+)\}/g,
+      (match, name: string) => String(item.params?.[name] ?? match)));
+    super([...translated, ...raw].join(dict['error.separator']), options);
     this.messages = messages;
+    if (raw.length) this.diagnostic = raw.join('\n');
+  }
+
+  /** Keep the original English CLI diagnostic while exposing its keys to the browser. */
+  static english(key: string, params?: LocalizedMessage['params'], options?: DiagnosticOptions): LocalizedError {
+    return new LocalizedError(key, params, { ...options, locale: 'en' });
   }
 }

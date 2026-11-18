@@ -4,6 +4,7 @@ import { createHash } from 'node:crypto';
 import { dirname, join, resolve, toNamespacedPath } from 'node:path';
 import koffi from 'koffi';
 import type { Lock, ProcessInfo } from './index.js';
+import { LocalizedError } from '../locale.js';
 
 export const homeVariable: string = 'USERPROFILE';
 
@@ -35,7 +36,7 @@ const entryType = koffi.struct({
 function check(value: unknown, operation: string): void {
   if (!value) {
     const code = lastError();
-    throw Object.assign(new Error(`${operation} failed (Win32 ${code})`), { win32Code: code, code: code === 183 || code === 80 ? 'EEXIST' : 'EIO' });
+    throw Object.assign(LocalizedError.english('error.win32Operation', { operation, code }), { win32Code: code, code: code === 183 || code === 80 ? 'EEXIST' : 'EIO' });
   }
 }
 function user(processHandle: number | bigint): Buffer {
@@ -62,7 +63,7 @@ export function resolvePath(cwd: string, value: string, env: readonly string[]):
   const saved = env.find(row => row.slice(0, 4).toUpperCase() === '=' + drive.toUpperCase() + '=')?.slice(4);
   const base = saved || cwd;
   if (!/^[a-z]:[\\/]/i.test(base) || (saved && base.slice(0, 2).toUpperCase() !== drive.toUpperCase()))
-    throw new Error('Cannot resolve target drive cwd; cleanup deferred');
+    throw LocalizedError.english('error.driveCwd');
   return resolve(drive + '\\', base, value);
 }
 
@@ -97,14 +98,14 @@ export async function tryLock(path: string, _create = false, machineWide = false
   } };
   const error = lastError();
   check(close(handle), 'CloseHandle');
-  if (state !== 258) throw new Error(`WaitForSingleObject failed (Win32 ${error})`);
+  if (state !== 258) throw LocalizedError.english('error.processWait', { api: 'WaitForSingleObject', error });
 }
 
 export async function rename(from: string, to: string): Promise<void> {
   check(move(toNamespacedPath(from), toNamespacedPath(to), 9 /* REPLACE_EXISTING | WRITE_THROUGH */), 'MoveFileExW');
 }
 export async function mkdir(path: string): Promise<string | undefined> {
-  try { if ((await fs.lstat(path)).isDirectory()) return; throw new Error('Not a directory: ' + path); }
+  try { if ((await fs.lstat(path)).isDirectory()) return; throw LocalizedError.english('error.notDirectory', { path }); }
   catch (e) { if ((e as NodeJS.ErrnoException).code !== 'ENOENT' || dirname(path) === path) throw e; }
   const firstCreated = await mkdir(dirname(path));
   const staging = await fs.mkdtemp(join(dirname(path), '.session-deletion-dir-'));
@@ -125,7 +126,7 @@ function parameters(handle: number | bigint, matches: (args: readonly string[]) 
   const pointerSize = koffi.sizeof('uintptr_t');
   const basic = Buffer.alloc(6 * pointerSize), wow64 = Buffer.alloc(8);
   if (query(handle, 0, basic, basic.length, null) < 0 || (pointerSize === 8 && query(handle, 26, wow64, wow64.length, null) < 0))
-    throw new Error('Cannot query process parameters');
+    throw LocalizedError.english('error.processParameters');
   const narrow = pointerSize === 4 || wow64.readBigUInt64LE() !== 0n;
   const pointer = (data: Buffer, offset: number) => narrow ? BigInt(data.readUInt32LE(offset)) : data.readBigUInt64LE(offset);
   const read = (address: bigint, size: number) => {
@@ -144,7 +145,7 @@ function parameters(handle: number | bigint, matches: (args: readonly string[]) 
   finally { check(!free(argv), 'LocalFree'); }
   let environment = '', cursor = pointer(params, narrow ? 0x48 : 0x80);
   while (!environment.includes('\0\0')) {
-    if (environment.length > 8 * 1024 * 1024) throw new Error('Unterminated process environment');
+    if (environment.length > 8 * 1024 * 1024) throw LocalizedError.english('error.processEnvironment');
     const size = 4096 - Number(cursor % 4096n);
     environment += read(cursor, size).toString('utf16le'); cursor += BigInt(size);
   }
@@ -173,7 +174,7 @@ export async function processes(excluded: Set<number>, executables: readonly str
         const info = parameters(handle, matches);
         if (info) found.push({ pid: row.pid, ...info });
       } catch (e) {
-        if (wait(handle, 0) !== 0) throw new Error('Cannot inspect a same-user process; cleanup deferred', { cause: e });
+        if (wait(handle, 0) !== 0) throw LocalizedError.english('error.sameUserInspection', undefined, { cause: e });
       } finally { check(close(handle), 'CloseHandle'); }
     }
     if (lastError() !== 18 /* ERROR_NO_MORE_FILES */) check(false, 'Process32NextW');

@@ -1,6 +1,6 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { readFile } from 'node:fs/promises';
+import { readFile, readdir } from 'node:fs/promises';
 import { createHash } from 'node:crypto';
 import vm from 'node:vm';
 
@@ -33,6 +33,19 @@ const dictionaries = Object.fromEntries(await Promise.all(['zh', 'en'].map(async
   const data = JSON.parse(await readFile(new URL(`../locale/${locale}.json`, import.meta.url), 'utf8')) as { messages?: Record<string, string> };
   return [locale, data.messages ?? {}];
 }))) as Record<string, Record<string, string>>;
+
+void test('each error or activity key used by plugin sources has matching bilingual placeholders', async () => {
+  const root = new URL('../src/', import.meta.url);
+  for (const file of await readdir(root, { recursive: true })) {
+    if (!file.endsWith('.ts')) continue;
+    const source = await readFile(new URL(file.replaceAll('\\', '/'), root), 'utf8');
+    for (const [, key] of source.matchAll(/['"]((?:error|activity)\.\w+)['"]/g)) {
+      const en = dictionaries.en[key], zh = dictionaries.zh[key];
+      assert.ok(en && zh, file + ': ' + key);
+      assert.deepEqual((en.match(/\{\w+\}/g) ?? []).sort(), (zh.match(/\{\w+\}/g) ?? []).sort(), key);
+    }
+  }
+});
 
 function localeFixture() {
   const registered = new Map<string, Record<string, string>>();
@@ -209,7 +222,7 @@ void test('deletion copy and API errors follow locale changes, retain Chinese fa
       if (url.endsWith('/preview') && previewThrown) throw 0;
       if (url.endsWith('/preview')) {
         if (missingPreview) return { ok: false, status: 404, json: async () => ({ error: 'Session missing' }) };
-        if (previewFailed) return { ok: false, json: async () => ({ error: 'Host fallback', messages: [{ key: 'error.guardUnavailable' }] }) };
+        if (previewFailed) return { ok: false, json: async () => ({ error: 'Host fallback', messages: [{ key: 'error.guardUnavailable' }], diagnostic: 'system detail\n<&>' }) };
         const token = issuedToken = 'fixture-' + ++nextToken;
         if (losePreview) throw new Error('Replacement response lost');
         return { ok: true, json: async () => ({ ...await preview, token }) };
@@ -267,6 +280,8 @@ void test('deletion copy and API errors follow locale changes, retain Chinese fa
     menu.resolve({ sessionId: id, displayTitle: 'Test' })[0].run();
     await new Promise(setImmediate);
     assert.ok(render().includes('[en] guard unavailable'));
+    const raw = element(render().find(node => isElement(node) && node.type === 'pre'));
+    assert.deepEqual(nodes(raw.props.children).filter(node => typeof node === 'string'), ['system detail\n<&>']);
     locale.setLocale('zh');
     assert.ok(render().includes('恢复监测不可用，请重启 DSH。'));
     previewThrown = true;
