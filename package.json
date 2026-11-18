@@ -34,7 +34,8 @@
     "build": "tsc -p tsconfig.json",
     "check": "tsc -p test/tsconfig.json",
     "test": "pnpm build && node --test test/*.test.ts",
-    "test:integration": "pnpm build && node test/integration.ts"
+    "test:integration": "pnpm build && node test/integration.ts",
+    "test:release": "pnpm check && pnpm lint && pnpm test && pnpm test:integration"
   },
   "devDependencies": {
     "@deepseek-ai/dsh-host-webserver": "0.2.2-rc.2",

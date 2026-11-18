@@ -72,33 +72,34 @@
     pnpm build
     ```
 
-2. 将插件注册到 DSH 的 Web profile：
+2. 若 DSH 配置限制了依赖项构建，请在配置文件的 `pnpm-workspace.yaml` 中允许 `koffi`：
 
-    DSH Desktop 使用内置 CLI，并将以下命令中的 `--profile web` 改为 `--profile desktop`。
+    ```yaml
+    allowBuilds:
+      koffi: true
+    ```
 
-    Linux（Bash）：
+3. DSH Desktop 使用内置 CLI，并将以下命令中的 `--profile web` 改为 `--profile desktop`。
+
+    **Linux（Bash）：**
 
     ```bash
     dsh plugin --profile web add "file:$PWD"
     ```
 
-    Windows（PowerShell）：
+    **Windows（PowerShell）：**
 
     ```powershell
+    $pnpmDir = Split-Path (Get-Command pnpm.exe -CommandType Application -ErrorAction Stop).Source
+    $env:Path = "$pnpmDir;$env:Path"
     dsh plugin --profile web add "file:$($PWD.Path)"
     ```
 
-    Windows（Git Bash）：
+    **Windows（Git Bash）：**
 
     ```bash
-    dsh plugin --profile web add "file:$(cygpath -m "$PWD")"
-    ```
-
-3. 若工作区 `pnpm-workspace.yaml` 对原生依赖构建有安全限制，请确保允许 `koffi`：
-
-    ```yaml
-    allowBuilds:
-      koffi: true
+    pnpm_dir="$(dirname "$(type -P pnpm.exe)")"
+    PATH="$pnpm_dir:$PATH" dsh plugin --profile web add "file:$(cygpath -m "$PWD")"
     ```
 
 4. 重启 DSH 服务即可体验。
@@ -121,5 +122,5 @@ dsh plugin --profile web remove dsh-session-deletion
 pnpm lint              # ESLint 正确性与异步检查
 pnpm check             # 源码与测试的严格 TypeScript 类型检查
 pnpm test              # 运行单元测试
-pnpm test:integration  # 运行集成测试
+pnpm test:release      # 运行发布测试
 ```
