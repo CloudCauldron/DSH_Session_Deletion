@@ -1,93 +1,93 @@
-# **DSH 会话删除与附件清理插件 (dsh-session-deletion)**
+# **DSH Session Deletion**
 
-<span style="margin-left:2em;">​</span>为 **[DeepSeek Harness (DSH)](https://github.com/deepseek-ai/deepseek-harness)** 提供会话永久删除与孤立附件垃圾回收能力的扩展插件。
+<span style="margin-left:2em;">​</span>An extension plugin for **[DeepSeek Harness (DSH)](https://github.com/deepseek-ai/deepseek-harness)** that provides permanent session deletion and orphaned attachment garbage collection.
 
-## **1 - 项目简介**
+## **1 - Overview**
 
-<span style="margin-left:2em;">​</span>DeepSeek Harness `0.2.2-rc.2` 原生仅提供会话归档功能。随着日常使用与多智能体协作的增多，历史会话、子代理记录以及关联的文件和图片附件会长期滞留在本地磁盘中。`dsh-session-deletion` 弥补了这一空缺，为 DSH 带来了两项关键的维护能力：
+<span style="margin-left:2em;">​</span>Out of the box, DeepSeek Harness `0.2.2-rc.2` only supports session archiving. As daily usage and multi-agent collaboration grow, historical sessions, subagent records, and associated file and image attachments remain on the local disk indefinitely. `dsh-session-deletion` fills this gap by bringing two key maintenance capabilities to DSH:
 
-- **会话删除**：移除目标会话及其子代理的日志与投影缓存，清理工作区中的会话关联及相关配置。
-- **残留附件与缓存清理 (GC)**：在系统空闲时智能扫描所有存活会话，精准识别并清理无引用的孤立附件与本地图片缓存，释放磁盘空间。
+- **Session Deletion**: Removes the logs and projection caches of the target session and its subagents, and cleans up session associations and related configurations in the workspace.
+- **Orphaned Attachment and Cache Cleanup (GC)**: Intelligently scans all live sessions when the system is idle to accurately identify and clean up unreferenced orphaned attachments and local image caches, freeing up disk space.
 
-## **2 - 核心特性**
+## **2 - Key Features**
 
-- **完整删除会话与子代理**
-    支持从主会话操作入口一并清理关联的全部子代理记录。未归档与已归档会话均通过「删除会话」操作；运行中的会话会先停止，再执行删除。
-- **细粒度隔离与并发安全**
-    删除操作仅针对目标会话及其子代理加锁，其他正在活跃的会话、AI 任务、后台执行与文件上传完全不受干扰。
-- **全局孤立附件与缓存回收**
-    提供专用的垃圾回收功能。安全扫描所有活跃会话的实际引用，只清理确认无关联的残留附件与临时图片缓存，杜绝误删有效数据。
-- **异常中断自动恢复**
-    采用事务化机制。若在清理过程中遭遇断电或进程异常退出，DSH 下次启动时会自动恢复未完成的删除，防止数据出现不一致或残留。
+- **Complete Deletion of Sessions and Subagents**
+    Supports cleaning up all linked subagent records together from the main session action menu. Both unarchived and archived sessions are deleted via "Delete Session"; running sessions are stopped first before deletion is executed.
+- **Fine-Grained Isolation and Concurrency Safety**
+    Deletion operations lock only the target session and its subagents, leaving other active sessions, AI tasks, background executions, and file uploads completely undisturbed.
+- **Global Orphaned Attachment and Cache Reclamation**
+    Provides a dedicated garbage collection feature. Safely scans actual references across all active sessions and removes only confirmed unlinked orphaned attachments and temporary image caches, preventing accidental deletion of valid data.
+- **Automatic Recovery from Unexpected Interruptions**
+    Uses a transactional mechanism. If a power outage or abnormal process termination occurs during cleanup, DSH automatically resumes and completes unfinished deletions on the next startup, preventing data inconsistency or leftover remnants.
 
-## **3 - 使用指南**
+## **3 - User Guide**
 
-### **3.1 - 删除会话**
+### **3.1 - Deleting a Session**
 
-1. 在左侧会话列表中，点击目标会话条目右侧的 `…` 菜单。
-2. 选择菜单底部的 **「删除会话」**（位于「归档会话」或「取消归档」下方）。
-3. 弹出的确认对话框会提示该会话包含的子代理数量，点击确认即可彻底删除。
+1. In the left session list, click the `…` menu on the right side of the target session item.
+2. Select **"Delete Session"** at the bottom of the menu (below "Archive Session" or "Unarchive").
+3. The confirmation dialog will display the number of subagents included in the session. Click confirm to permanently delete it.
 
-删除与清理的范围如下：
+The scope of deletion and cleanup is as follows:
 
-| 数据 | 处理方式 |
-| --- | --- |
-| 目标会话及子代理的日志、历史版本、投影缓存及其备份 | 随会话删除 |
-| 工作区中的会话关联、归档与置顶记录、关联定时任务 | 随会话删除 |
-| 插件识别的浏览器会话状态 | 对应浏览器运行插件后清理 |
-| 无引用的本地附件、本地上传映射及可重新生成的图片缓存 | 单独运行 GC 清理 |
-| 工具输出临时文件（spill）、上传暂存文件 | 插件不回收 |
-| 工作区及其路径信息、空项目容器目录、用户保存的项目文件 | 保留 |
+| Data | Handling |
+| :---: | :---: |
+| Logs, historical versions, projection caches, and their backups for the target session and subagents | Deleted with the session |
+| Session associations in the workspace, archive and pin records, and linked scheduled tasks | Deleted with the session |
+| Browser session state recognized by the plugin | Cleaned up after the plugin runs in the corresponding browser |
+| Unreferenced local attachments, local upload mappings, and regenerable image caches | Cleaned up by running GC separately |
+| Tool output temporary files (spill) and staged upload files | Not reclaimed by the plugin |
+| Workspaces and their path information, empty project container directories, and user-saved project files | Retained |
 
-其他会话已继承或复制的内容、服务端文件、文件系统快照及备份不属于本插件的删除范围。
+Content already inherited or copied by other sessions, server-side files, and filesystem snapshots and backups are outside the deletion scope of this plugin.
 
-### **3.2. 清理残留附件与缓存**
+### **3.2. Cleaning Up Orphaned Attachments and Cache**
 
-<span style="margin-left:2em;">​</span>插件将残留附件与缓存的回收独立为单独的清理功能，而非在删除会话时顺带清理，主要是为了保障多会话并发与资源共享时的数据安全：
+<span style="margin-left:2em;">​</span>The plugin separates the reclamation of orphaned attachments and caches into a standalone cleanup feature rather than performing it alongside session deletion, primarily to ensure data safety during multi-session concurrency and resource sharing:
 
-- **附件可能被多会话共享**：DSH 的本地附件按内容散列值（Hash Value）存储，同一份文件可能被分叉会话、继承的历史记录或其他会话共同引用，无法仅凭所属会话直接判断是否可删。
-- **防止并发写入引发误删**：删除单个会话时，其他会话可能正在引用同一附件，或存在尚未写入日志的暂存上传。全局清理会在系统空闲状态下统一检查所有存活会话的引用、内存快照及暂存区，并在扫描与删除期间阻止新的相关写入。
-- **区分独占与共享缓存**：目标会话独占的投影缓存会随会话直接删除；而请求图片等可重建的共享缓存，则交由全局清理在无相关生成任务运行时安全回收。
+- **Attachments May Be Shared Across Multiple Sessions**: DSH stores local attachments by content hash value. The same file may be jointly referenced by forked sessions, inherited history, or other sessions, making it impossible to determine whether it can be deleted based solely on the owning session.
+- **Preventing Accidental Deletion from Concurrent Writes**: While a single session is being deleted, other sessions might be referencing the same attachment or holding staged uploads not yet written to logs. Global cleanup uniformly inspects references across all live sessions, in-memory snapshots, and staging areas when the system is idle, while blocking new related writes during scanning and deletion.
+- **Distinguishing Exclusive vs. Shared Caches**: Projection caches exclusive to the target session are deleted directly with the session, whereas rebuildable shared caches (such as request images) are safely reclaimed by global cleanup when no related generation tasks are running.
 
-通过将二者分开，日常删除会话只需锁定目标会话及其子代理，不会干扰其他活跃任务；仅在需要释放磁盘空间时，才单独承担全局扫描与并发保护的开销。
+By separating the two, routine session deletion only needs to lock the target session and its subagents without disturbing other active tasks; the overhead of global scanning and concurrency protection is incurred only when you explicitly need to free up disk space.
 
-1. 点击左侧导航栏底部的 **「更多」** 选项。
-2. 选择 **「清理残留附件与缓存（大小）」**。菜单打开后会估算可清理附件与缓存的体积，按 B、KiB、MiB、GiB、TiB 自动显示（1024 进制）；计算期间括号内显示原生加载圆圈，失败或扫描期间会话、暂存附件发生变化时显示「无法计算体积」，重新打开菜单可重试。实际清理仍会重新扫描确认。
-3. 确认后系统将在空闲状态下完成扫描与清理，并在完成后显示本次释放的资源项数。
+1. Click **"More"** at the bottom of the left navigation sidebar.
+2. Select **"Clean Up Orphaned Attachments and Cache (size)"**.
+3. After confirmation, the system completes the scan and cleanup while idle, and displays the number of reclaimed resource items upon completion.
 
-## **4 - 环境要求**
+## **4 - Requirements**
 
-- **DeepSeek Harness**：`0.2.2-rc.2`（CLI 默认 Web 配置或 DSH Desktop）
-- **操作系统**：Linux、Windows
-- **Node.js**：`>= 24.9.0`
+- **DeepSeek Harness**: `0.2.2-rc.2` (CLI default Web profile or DSH Desktop)
+- **Operating System**: Linux, Windows
+- **Node.js**: `>= 24.9.0`
 
-## **5 - 安装与配置**
+## **5 - Installation and Configuration**
 
-### **5.1 - 安装插件**
+### **5.1 - Installing the Plugin**
 
-1. 在本仓库目录下构建编译产物：
+1. Build the compiled artifacts in this repository directory:
 
     ```bash
     pnpm install
     pnpm build
     ```
 
-2. 若 DSH 配置限制了依赖项构建，请在配置文件的 `pnpm-workspace.yaml` 中允许 `koffi`：
+2. If your DSH configuration restricts dependency builds, allow `koffi` in the configuration's `pnpm-workspace.yaml`:
 
     ```yaml
     allowBuilds:
       koffi: true
     ```
 
-3. DSH Desktop 使用内置 CLI，并将以下命令中的 `--profile web` 改为 `--profile desktop`。
+3. For DSH Desktop, use the bundled CLI and replace `--profile web` with `--profile desktop` in the commands below.
 
-    **Linux（Bash）：**
+    **Linux (Bash):**
 
     ```bash
     dsh plugin --profile web add "file:$PWD"
     ```
 
-    **Windows（PowerShell）：**
+    **Windows (PowerShell):**
 
     ```powershell
     $pnpmDir = Split-Path (Get-Command pnpm.exe -CommandType Application -ErrorAction Stop).Source
@@ -95,32 +95,32 @@
     dsh plugin --profile web add "file:$($PWD.Path)"
     ```
 
-    **Windows（Git Bash）：**
+    **Windows (Git Bash):**
 
     ```bash
     pnpm_dir="$(dirname "$(type -P pnpm.exe)")"
     PATH="$pnpm_dir:$PATH" dsh plugin --profile web add "file:$(cygpath -m "$PWD")"
     ```
 
-4. 重启 DSH 服务即可体验。
+4. Restart the DSH service to start using the plugin.
 
-### **5.2 - 卸载插件**
+### **5.2 - Uninstalling the Plugin**
 
-<span style="margin-left:2em;">​</span>如需移除插件，运行以下命令并重启 DSH：
+<span style="margin-left:2em;">​</span>To remove the plugin, run the following command and restart DSH:
 
 ```bash
 dsh plugin --profile web remove dsh-session-deletion
 ```
 
-完成待恢复删除并停止 DSH 后，按需删除实际 `DSH_HOME` 下的 `session-deletion` 目录；默认位置为 `~/.dsh/session-deletion`。
+After any pending recovery deletions have finished and DSH is stopped, you can optionally delete the `session-deletion` directory under your actual `DSH_HOME`; the default location is `~/.dsh/session-deletion`.
 
-## **6 - 开发与测试**
+## **6 - Development and Testing**
 
-<span style="margin-left:2em;">​</span>源码与全部测试均使用 TypeScript，建仍通过 `@typescript/native` 别名使用 TypeScript 7，`typescript` 别名仅为 ESLint 提供 TypeScript 6 兼容 API，参照 [Microsoft 的并行使用说明](https://devblogs.microsoft.com/typescript/announcing-typescript-7-0/#running-side-by-side-with-typescript-60)。
+<span style="margin-left:2em;">​</span>All source code and tests are written in TypeScript. Builds still use TypeScript 7 via the `@typescript/native` alias, while the `typescript` alias provides the TypeScript 6 compatibility API solely for ESLint, following [Microsoft's side-by-side instructions](https://devblogs.microsoft.com/typescript/announcing-typescript-7-0/#running-side-by-side-with-typescript-60).
 
 ```bash
-pnpm lint              # ESLint 正确性与异步检查
-pnpm check             # 源码与测试的严格 TypeScript 类型检查
-pnpm test              # 运行单元测试
-pnpm test:release      # 运行发布测试
+pnpm lint              # ESLint correctness and async checks
+pnpm check             # Strict TypeScript type checking for source and tests
+pnpm test              # Run unit tests
+pnpm test:release      # Run release tests
 ```
