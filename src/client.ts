@@ -42,8 +42,9 @@ window.__ModuleLoader__.load({ id: 'dsh-session-deletion', factory(require) {
   class ApiError extends Error { constructor(text: string, readonly messages?: ClientMessage[]) { super(text); } }
   const asError = (error: unknown): Error => error instanceof Error ? error : new Error(String(error));
   const translate = (message: ClientMessage) => t(message.key, message.params);
-  const errorText = (error: unknown): string => error instanceof ApiError && error.messages?.length
-    ? error.messages.map(translate).join(t('error.separator')) : error instanceof Error ? error.message : String(error);
+  const errorContent = (error: Error): ElementNode => error instanceof ApiError && error.messages?.length
+    ? error.messages.map(translate).join(t('error.separator'))
+    : h('pre', { style: { whiteSpace: 'pre-wrap', overflowWrap: 'anywhere', margin: 0 } }, h('code', null, error.message));
   const ui = require('@deepseek-ai/dsh-client-ui-primitives') as {
     MenuItemButton: import('react').ComponentType<{ children: ElementNode; disabled?: boolean; danger?: boolean; separatorBefore?: boolean; icon?: ElementNode; title?: string; onSelect(): void }>;
     Modal: import('react').ComponentType<{ open: boolean; onClose(): void; closeLabel: string; title: string; description?: ElementNode; footer?: ElementNode; children?: ElementNode; className?: string }>;
@@ -266,7 +267,7 @@ window.__ModuleLoader__.load({ id: 'dsh-session-deletion', factory(require) {
       footer: h(React.Fragment, null,
         h(ui.Button, { variant: 'outline', onClick: dismiss, disabled: busy }, t('common.cancel')),
         h(ui.Button, { variant: 'outline', onClick: () => { void collect(); }, disabled: busy }, t(busy ? 'gc.busy' : 'gc.confirm'))),
-      children: d.error ? h('div', { role: 'alert', style: { color: 'var(--dsw-alias-state-error-primary)', marginTop: 8, fontSize: 12, lineHeight: '18px' } }, errorText(d.error)) : undefined,
+      children: d.error ? h('div', { role: 'alert', style: { color: 'var(--dsw-alias-state-error-primary)', marginTop: 8, fontSize: 12, lineHeight: '18px' } }, errorContent(d.error)) : undefined,
     });
   }
 
@@ -309,7 +310,7 @@ window.__ModuleLoader__.load({ id: 'dsh-session-deletion', factory(require) {
         footer: h(React.Fragment, null,
           h(ui.Button, { variant: 'outline', onClick: dismiss, disabled: busy }, t('common.cancel')),
           h(ui.Button, { variant: 'outline', className: 'dsh-session-deletion-danger', onClick: () => { void confirm(); }, disabled: busy || !d.preview }, t(submitting ? 'delete.submitting' : 'delete.confirm'))),
-        children: d.error ? h('div', { role: 'alert', style: { color: 'var(--dsw-alias-state-error-primary)', marginTop: 8, fontSize: 12, lineHeight: '18px', overflowWrap: 'anywhere' } }, errorText(d.error)) : undefined,
+        children: d.error ? h('div', { role: 'alert', style: { color: 'var(--dsw-alias-state-error-primary)', marginTop: 8, fontSize: 12, lineHeight: '18px', overflowWrap: 'anywhere' } }, errorContent(d.error)) : undefined,
       }));
   }
   return { inject: ['slots', 'sessions', 'uiWorkspace', 'contextMenus', 'locale'], async apply(ctx: DeletionClientContext) {

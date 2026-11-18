@@ -272,7 +272,10 @@ void test('deletion copy and API errors follow locale changes, retain Chinese fa
     previewThrown = true;
     menu.resolve({ sessionId: id, displayTitle: 'Test' })[0].run();
     await new Promise(setImmediate);
-    assert.ok(render().includes('0'), 'non-Error failures remain visible without localization metadata');
+    const pre = element(render().find(node => isElement(node) && node.type === 'pre'));
+    const code = element(nodes(pre.props.children)[0]);
+    assert.equal(code.type, 'code');
+    assert.deepEqual(code.props.children, ['0'], 'unkeyed diagnostics preserve the original text inside pre/code');
     previewThrown = previewFailed = false;
     const buttons = () => render().filter((node): node is MockElement => isElement(node) && node.type === ui.Button);
     const modal = () => render().find((node): node is MockElement => isElement(node) && node.type === ui.Modal);
