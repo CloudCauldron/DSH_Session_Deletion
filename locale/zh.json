@@ -1,7 +1,8 @@
 {
   "meta": {
     "title": "DSH 会话删除",
-    "description": "DSH 会话的即时删除与残留附件的清理"
+    "description": "DSH 会话的即时删除与残留附件的清理",
+    "detail": "README_CN.md"
   },
   "messages": {
     "common.close": "关闭",
@@ -9,17 +10,17 @@
     "session.unnamed": "未命名会话",
     "delete.menu": "删除会话",
     "delete.title": "删除此会话？",
-    "delete.description": "该会话将被彻底移除，已保存的文件与附件不受影响；如需释放存储空间，可前往左侧「更多」→「清理残留附件与缓存」。",
-    "delete.descriptionWithChildren": "该会话将被彻底移除（包含与之关联的 {count} 个子代理），已保存的文件与附件不受影响；如需释放存储空间，可前往左侧「更多」→「清理残留附件与缓存」。",
+    "delete.description": "该会话将被彻底移除，已保存的文件与附件不受影响；如需释放存储空间，可前往左侧「更多」→「释放空间」。",
+    "delete.descriptionWithChildren": "该会话将被彻底移除（包含与之关联的 {count} 个子代理），已保存的文件与附件不受影响；如需释放存储空间，可前往左侧「更多」→「释放空间」。",
     "delete.checking": "正在检查会话状态…",
     "delete.confirm": "确认删除",
     "delete.submitting": "正在删除…",
     "delete.busy": "正在删除会话…",
     "delete.success": "会话已删除：{title}",
     "delete.successUnnamed": "会话已删除：未命名会话",
-    "gc.menu": "清理残留附件与缓存（{size}）",
+    "gc.menu": "释放空间（{size}）",
     "gc.calculating": "正在计算可清理体积",
-    "gc.sizeUnavailable": "无法计算体积",
+    "gc.sizeUnavailable": "大小未知",
     "gc.title": "清理残留附件与缓存？",
     "gc.description": "将移除无关联的本地附件及临时图片缓存以释放空间，操作期间请确保其他会话处于空闲状态。",
     "gc.confirm": "确认清理",

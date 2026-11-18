@@ -52,7 +52,7 @@ Content already inherited or copied by other sessions, server-side files, and fi
 By separating the two, routine session deletion only needs to lock the target session and its subagents without disturbing other active tasks; the overhead of global scanning and concurrency protection is incurred only when you explicitly need to free up disk space.
 
 1. Click **"More"** at the bottom of the left navigation sidebar.
-2. Select **"Clean Up Orphaned Attachments and Cache (size)"**.
+2. Select **"Free Up Space"**. The menu shows how much space can be reclaimed, or **"Size unknown"** if the estimate is unavailable.
 3. After confirmation, the system completes the scan and cleanup while idle, and displays the number of reclaimed resource items upon completion.
 
 ## **4 - Requirements**

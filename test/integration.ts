@@ -168,7 +168,7 @@ try{
  await familyRow.hover();await familyRow.locator('xpath=ancestor::*[.//button][1]').locator('button').first().click();
  await page.getByRole('menuitem',{name:'删除会话',exact:true}).click();
  const familyDialog=page.getByRole('dialog',{name:'删除此会话？',exact:true});
- await familyDialog.getByText('该会话将被彻底移除（包含与之关联的 2 个子代理），已保存的文件与附件不受影响；如需释放存储空间，可前往左侧「更多」→「清理残留附件与缓存」。',{exact:true}).waitFor();
+ await familyDialog.getByText('该会话将被彻底移除（包含与之关联的 2 个子代理），已保存的文件与附件不受影响；如需释放存储空间，可前往左侧「更多」→「释放空间」。',{exact:true}).waitFor();
  assert.equal(await familyDialog.getByRole('checkbox').count(),0);
  assert.equal(await familyDialog.locator('strong').innerText(),'测试含子代理的会话');
  assert.equal(await familyDialog.locator('code').innerText(),family.id);
@@ -223,7 +223,7 @@ try{
  await deletionItem.hover();
  await deletionItem.click({timeout:5000});
  const deletionDialog=page.getByRole('dialog',{name:'删除此会话？',exact:true});
- await deletionDialog.getByText('该会话将被彻底移除，已保存的文件与附件不受影响；如需释放存储空间，可前往左侧「更多」→「清理残留附件与缓存」。',{exact:true}).waitFor();
+ await deletionDialog.getByText('该会话将被彻底移除，已保存的文件与附件不受影响；如需释放存储空间，可前往左侧「更多」→「释放空间」。',{exact:true}).waitFor();
  assert.equal(await deletionDialog.getByRole('checkbox').count(),0);
  assert.equal(await deletionDialog.locator('strong').innerText(),'Offline deletion integration fixture');
  assert.equal(await deletionDialog.locator('code').innerText(),id);
@@ -281,7 +281,7 @@ try{
  assert.equal((await (await controls('adapters')).json()).ids.includes(id),false,'plugin restoration closures must release deleted agents');
  // GC is separately initiated from the native More menu; busy failure changes no attachments.
  const reclaimableBytes=Buffer.byteLength('fixture attachment')+Buffer.byteLength('target draft upload')+Buffer.byteLength('derived fixture image');
- const gcMenuName=`清理残留附件与缓存（${reclaimableBytes} B）`;
+ const gcMenuName=`释放空间（${reclaimableBytes} B）`;
  let releaseSize!: () => void;
  const sizeHold=new Promise<void>(resolve=>{releaseSize=resolve});
  await page.route('**/session-deletion/api/gc-size',async route=>{await sizeHold;await route.continue()},{times:1});
@@ -302,7 +302,7 @@ try{
  assert.equal(await page.getByRole('alert').filter({hasText:/共清理/}).count(),0);
  await page.route('**/session-deletion/api/gc-size',route=>route.fulfill({status:500,contentType:'application/json',body:JSON.stringify({error:'Cannot scan'})}),{times:1});
  await page.locator('nav').getByRole('button',{name:'更多',exact:true}).click();
- await page.getByRole('menuitem',{name:'清理残留附件与缓存（无法计算体积）',exact:true}).click();
+ await page.getByRole('menuitem',{name:'释放空间（大小未知）',exact:true}).click();
  await page.getByRole('button',{name:'确认清理',exact:true}).click();
  await page.getByRole('dialog',{name:'清理残留附件与缓存？',exact:true}).getByRole('alert').waitFor();
  assert.match(await page.getByRole('dialog',{name:'清理残留附件与缓存？',exact:true}).getByRole('alert').innerText(),/仍有|尚未结束/);
@@ -338,7 +338,7 @@ try{
  await page.waitForFunction(()=>!document.querySelector<HTMLElement>('#deletion-lock-probe')?.inert);
  // A second pass has nothing to reclaim and still uses the native Toast.
  await page.locator('nav').getByRole('button',{name:'更多',exact:true}).click();
- await page.getByRole('menuitem',{name:'清理残留附件与缓存（0 B）',exact:true}).click();
+ await page.getByRole('menuitem',{name:'释放空间（0 B）',exact:true}).click();
  await page.getByRole('button',{name:'确认清理',exact:true}).click();
  const emptyResult=page.getByRole('alert').filter({hasText:'共清理 0 项残留附件与缓存文件。'});
  await emptyResult.waitFor({timeout:30000});
@@ -463,8 +463,16 @@ try{
  assert.equal(await pluginCard.getByText('DSH 会话删除',{exact:true}).count(),0);
  // The same plugin renders its English menu, dialog and buttons through the native locale service.
  await settings.getByRole('button',{name:'Close',exact:true}).click();
+ await page.route('**/session-deletion/api/gc-size',route=>route.fulfill({json:{bytes:128.75*1024**2}}),{times:1});
  await page.locator('nav').getByRole('button',{name:'More',exact:true}).click();
- await page.getByRole('menuitem',{name:/^Clean Up Orphaned Attachments and Cache \(/}).click();
+ const englishMenuItem=page.getByRole('menuitem',{name:'Free Up Space (128.75 MiB)',exact:true});
+ await englishMenuItem.waitFor();
+ assert.ok(await englishMenuItem.evaluate(item=>{
+  const range=document.createRange();
+  range.selectNodeContents(item);
+  return range.getBoundingClientRect().right<=item.getBoundingClientRect().right;
+ }),'the English label and size must fit inside the native menu item');
+ await englishMenuItem.click();
  const englishGc=page.getByRole('dialog',{name:'Clean up orphaned attachments and cache?',exact:true});
  await englishGc.getByText('Unlinked local attachments and temporary image cache will be removed to free up space. Make sure all other sessions are idle during cleanup.',{exact:true}).waitFor();
  assert.equal(await englishGc.getByRole('button',{name:'Confirm Cleanup',exact:true}).count(),1);

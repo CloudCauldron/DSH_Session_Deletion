@@ -364,7 +364,7 @@ void test('GC menu shows a native spinner, formats binary units and reports fail
     assert.equal(spinner.props.state, 'ongoing');
     const unmount = mount();
     await new Promise(setImmediate);
-    assert.equal(text(render()), `清理残留附件与缓存（${expected}）`);
+    assert.equal(text(render()), `释放空间（${expected}）`);
     unmount();
   }
   const failures: Array<[boolean | 'network', unknown]> = [[true, 0], ['network', 0], [false, undefined], [false, null], [false, -1], [false, NaN], [false, Infinity], [false, '1024']];
@@ -372,7 +372,7 @@ void test('GC menu shows a native spinner, formats binary units and reports fail
     bytes = undefined; fail = failure; response = value; render();
     const unmount = mount();
     await new Promise(setImmediate);
-    assert.equal(text(render()), '清理残留附件与缓存（无法计算体积）');
+    assert.equal(text(render()), '释放空间（大小未知）');
     unmount();
   }
   // Closing an unfinished menu must not publish its eventual result.

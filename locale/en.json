@@ -1,7 +1,8 @@
 {
   "meta": {
     "title": "DSH Session Deletion",
-    "description": "Immediate session deletion and orphan attachment cleanup for DSH."
+    "description": "Immediate session deletion and orphan attachment cleanup for DSH.",
+    "detail": "README.md"
   },
   "messages": {
     "common.close": "Close",
@@ -9,17 +10,17 @@
     "session.unnamed": "Untitled Session",
     "delete.menu": "Delete Session",
     "delete.title": "Delete this session?",
-    "delete.description": "This session will be permanently removed, while saved files and attachments remain unaffected. To free up storage space, go to \"More\" → \"Clean Up Orphaned Attachments and Cache\" in the left sidebar.",
-    "delete.descriptionWithChildren": "This session and its {count} linked subagent(s) will be permanently removed, while saved files and attachments remain unaffected. To free up storage space, go to \"More\" → \"Clean Up Orphaned Attachments and Cache\" in the left sidebar.",
+    "delete.description": "This session will be permanently removed, while saved files and attachments remain unaffected. To free up storage space, go to \"More\" → \"Free Up Space\" in the left sidebar.",
+    "delete.descriptionWithChildren": "This session and its {count} linked subagent(s) will be permanently removed, while saved files and attachments remain unaffected. To free up storage space, go to \"More\" → \"Free Up Space\" in the left sidebar.",
     "delete.checking": "Checking session status…",
     "delete.confirm": "Confirm Delete",
     "delete.submitting": "Deleting…",
     "delete.busy": "Deleting session…",
     "delete.success": "Session deleted: {title}",
     "delete.successUnnamed": "Session deleted: Untitled Session",
-    "gc.menu": "Clean Up Orphaned Attachments and Cache ({size})",
+    "gc.menu": "Free Up Space ({size})",
     "gc.calculating": "Calculating reclaimable space",
-    "gc.sizeUnavailable": "Unable to calculate size",
+    "gc.sizeUnavailable": "Size unknown",
     "gc.title": "Clean up orphaned attachments and cache?",
     "gc.description": "Unlinked local attachments and temporary image cache will be removed to free up space. Make sure all other sessions are idle during cleanup.",
     "gc.confirm": "Confirm Cleanup",

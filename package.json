@@ -1,6 +1,6 @@
 {
   "name": "dsh-session-deletion",
-  "version": "0.7.0",
+  "version": "0.7.1",
   "private": true,
   "type": "module",
   "description": "Immediate session deletion and orphan attachment cleanup for DSH.",
@@ -56,6 +56,7 @@
     "locale/",
     "cordis.patch.yml",
     "README.md",
+    "README_CN.md",
     "LICENSE"
   ]
 }
