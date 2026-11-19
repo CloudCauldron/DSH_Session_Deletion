@@ -1,5 +1,9 @@
 # **DSH 会话删除**
 
+<p align="center">
+  <a href="README_CN.md">中文</a> | <a href="README.md">English</a>
+</p>
+
 <span style="margin-left:2em;">​</span>为 **[DeepSeek Harness (DSH)](https://github.com/deepseek-ai/deepseek-harness)** 提供会话永久删除与孤立附件垃圾回收能力的扩展插件。
 
 ## **1 - 项目简介**

@@ -1,5 +1,9 @@
 # **DSH Session Deletion**
 
+<p align="center">
+  <a href="README_CN.md">中文</a> | <a href="README.md">English</a>
+</p>
+
 <span style="margin-left:2em;">​</span>An extension plugin for **[DeepSeek Harness (DSH)](https://github.com/deepseek-ai/deepseek-harness)** that provides permanent session deletion and orphaned attachment garbage collection.
 
 ## **1 - Overview**
