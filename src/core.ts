@@ -6,7 +6,7 @@ import { Readable } from 'node:stream';
 import { createHash, randomBytes } from 'node:crypto';
 import { join, resolve, dirname, basename, relative, sep, parse, isAbsolute } from 'node:path';
 import { assertOwner, mkdir, secureDir, syncDir, rename, birth } from './platform/index.js';
-import { LocalizedError } from './locale.js';
+import { LocalizedError } from './locale/errors.js';
 
 export interface SessionHeader {
   type?: 'session'; version: number; id: string; createdAt: number; cwd?: string;

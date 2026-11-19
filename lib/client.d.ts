@@ -1,14 +1,8 @@
-/** Browser bundle in DSH's module-loader format; React comes from the host. */
-type ReactAPI = typeof import('react');
-type ElementNode = import('react').ReactNode;
-type ClientMessage = import('./locale.js').LocalizedMessage;
-interface DeletionClientContext {
-    fiber: {
-        uid: number | null;
-    };
-    locale: {
-        register(namespace: string, dictionaries: Record<string, Record<string, string>>): () => void;
-        bind(namespace: string): (key: string, params?: Record<string, unknown>) => string;
+import { type LocaleClientContext } from './locale/client.js';
+import type { LocalizedProps } from './locale/shared.js';
+export interface DeletionClientContext extends LocaleClientContext {
+    locale: LocaleClientContext['locale'] & {
+        bind(namespace: string): LocalizedProps['t'];
         getSnapshot(): {
             active: string;
             revision: number;
@@ -21,6 +15,7 @@ interface DeletionClientContext {
             name: string;
             id: string;
             order: number;
+            locale: string;
             inject?: () => object;
         }, component: unknown): unknown;
     };
@@ -50,7 +45,6 @@ interface DeletionClientContext {
             }[];
         }): () => void;
     };
-    effect(callback: () => () => void, label: string): unknown;
     sessions: {
         list: {
             getSnapshot(): {
@@ -67,50 +61,26 @@ interface DeletionClientContext {
         startSession(): void;
     };
 }
-interface Window {
-    __ModuleLoader__: {
-        load(module: {
-            id: string;
-            factory(require: (name: string) => unknown): unknown;
-        }): void;
-    };
+declare global {
+    interface Window {
+        __ModuleLoader__: {
+            load(module: {
+                id: string;
+                factory(require: (name: string) => unknown): unknown;
+            }): void;
+        };
+    }
 }
-interface PendingDeletion {
+export interface PendingDeletion {
     sessionId: string;
     queuedAt: string;
 }
-interface GcResult {
-    total: number;
-}
-interface GcDialog {
-    busy?: boolean;
-    error?: Error;
-}
-interface DeletionReceipt {
+export interface DeletionReceipt {
     revision: string;
     deletedIdHashes: string[];
 }
-interface DeletionStatus {
-    gcRunning?: boolean;
-    deletionRunning?: boolean;
-    pending: PendingDeletion[];
-    locked: string[];
-    archived: string[];
-    guardHealthy: boolean;
-    receipt: {
-        revision: string;
-        count: number;
-    };
-}
-interface DeletionPreview {
+export interface DeletionPreview {
     count: number;
     token: string;
     archived: boolean;
-}
-interface DeletionDialog {
-    id: string;
-    title: string;
-    preview?: DeletionPreview;
-    busy?: boolean;
-    error?: Error;
 }

@@ -100,13 +100,15 @@ async function stop(){
 }
 try{
  const url=await start();
- for(const path of ['status','receipt','gc-size','locales']){
+ for(const path of ['status','receipt','gc-size']){
   const response=await fetch(`http://127.0.0.1:${port}/session-deletion/api/${path}`);
   assert.ok([401,403].includes(response.status),path);
   const denied=await response.json();
   assert.equal(denied.error,'Not authorized');
   assert.deepEqual(denied.messages,[{key:'error.unauthorized'}]);
  }
+ const catalogs=await fetch(`http://127.0.0.1:${port}/api/session-deletion/locales`);
+ assert.ok([401,403].includes(catalogs.status),'the DSH catalog route requires an authenticated owner');
  browser=await chromium.launch({executablePath:process.env.CHROME_PATH||(process.platform==='win32'?join(process.env.PROGRAMFILES!,'Google/Chrome/Application/chrome.exe'):'/opt/google/chrome/chrome'),headless:true,args:['--no-sandbox']});
  // Native UI selectors below use Simplified Chinese, independent of the host locale.
  const context=await browser.newContext({locale:'zh-CN',viewport:{width:1440,height:1000}});

@@ -7,7 +7,7 @@ import { pathToFileURL } from 'node:url';
 import { setTimeout as delay } from 'node:timers/promises';
 import { atomicJSON, cleanAtomicTemps, exists, privateDir, readJSON, safePath, stateDir, sweep } from './core.js';
 import { birth, processes, tryLock as lock, usesLockFiles, homeVariable, resolvePath, type Lock } from './platform/index.js';
-import { LocalizedError } from './locale.js';
+import { LocalizedError } from './locale/errors.js';
 
 interface HostMarker { pid: number; birth: string; phase: 'waiting' | 'running' }
 export interface GuardOptions { home: string; hostPid?: number; hostBirth?: string; startupTimeoutMs?: number }

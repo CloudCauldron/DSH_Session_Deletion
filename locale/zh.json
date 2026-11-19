@@ -49,10 +49,13 @@
 
     "error.separator": "；",
     "error.unknown": "未知错误。",
+    "error.invalidLocaleDictionaries": "语言词典格式无效。",
+    "error.invalidLocaleDictionary": "语言词典格式无效。",
+    "error.localeHttp": "读取语言词典失败：HTTP {status}。",
+    "error.httpStatus": "HTTP {status}",
 
     "error.expectedJsonObject": "需要一个 JSON 对象。",
     "error.expectedPluginJson": "需要插件发出的 JSON 请求。",
-    "error.httpStatus": "HTTP 状态码：{status}",
     "error.invalidJson": "JSON 格式无效。",
     "error.methodNotAllowed": "不允许使用此请求方法。",
     "error.ownerRequired": "仅允许所有者执行此操作。",

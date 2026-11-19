@@ -1,6 +1,7 @@
 import { type UploadIndex, type LiveSnapshot, type SessionHeader, type GcResult, type ScheduleTask } from './core.js';
 import { type Gate } from './gate.js';
-import { LocalizedError, type LocalizedMessage } from './locale.js';
+import { LocalizedError } from './locale/errors.js';
+import { type LocalizedMessage } from './locale/shared.js';
 interface Session {
     id: string;
     header: SessionHeader;

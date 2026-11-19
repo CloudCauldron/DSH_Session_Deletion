@@ -12,7 +12,7 @@ void test('the HTTP route releases its native registration before remount', asyn
   const webServer = new WebServer(new Context(), { host: '127.0.0.1', port: 0 });
   let dispose!: () => void;
   const ctx: HostContext = {
-    webServer, sessionDeletionRuntime: {} as HostContext['sessionDeletionRuntime'], connection: { admit: () => ({ rejection: 401 }) },
+    webServer, sessionDeletionRuntime: {} as HostContext['sessionDeletionRuntime'], connection: { fetch: { register: () => async () => {} }, admit: () => ({ rejection: 401 }) },
     sessionDeletionGate: { home: resolve('.'), version: '0.2.2-rc.5', healthy: () => true },
     sessionPersistence: { name: 'session-persistence-jsonl', root: resolve('sessions') },
     effect(register: () => () => void) { dispose = register(); },

@@ -1,16 +1,15 @@
-/** Browser bundle in DSH's module-loader format; React comes from the host. */
+import { ApiError, asFailure, readFailure, registerClientLocale, renderFailure, type LocaleClientContext } from './locale/client.js';
+import type { Failure, LocalizedMessage, LocalizedProps } from './locale/shared.js';
+
 type ReactAPI = typeof import('react');
 type ElementNode = import('react').ReactNode;
-type ClientMessage = import('./locale.js').LocalizedMessage;
-interface DeletionClientContext {
-  fiber: { uid: number | null };
-  locale: {
-    register(namespace: string, dictionaries: Record<string, Record<string, string>>): () => void;
-    bind(namespace: string): (key: string, params?: Record<string, unknown>) => string;
+export interface DeletionClientContext extends LocaleClientContext {
+  locale: LocaleClientContext['locale'] & {
+    bind(namespace: string): LocalizedProps['t'];
     getSnapshot(): { active: string; revision: number };
     subscribe(listener: () => void): () => void;
   };
-  slots: { inject(name: string, callback: () => unknown): unknown; register(options: { name: string; id: string; order: number; inject?: () => object }, component: unknown): unknown };
+  slots: { inject(name: string, callback: () => unknown): unknown; register(options: { name: string; id: string; order: number; locale: string; inject?: () => object }, component: unknown): unknown };
   contextMenus: { register(options: {
     id: string; target: 'session'; order: number;
     observe(): { getSnapshot(): unknown; subscribe(callback: () => void): () => void }[];
@@ -18,49 +17,29 @@ interface DeletionClientContext {
       id: string; label: string; disabled: boolean; danger: boolean; separatorBefore: boolean; afterContent: boolean; icon: { key: string }; run(): void;
     }[];
   }): () => void };
-  effect(callback: () => () => void, label: string): unknown;
   sessions: { list: { getSnapshot(): { byId: Record<string, { id: string; running: boolean; retainedBy: Record<string, number> }> }; subscribe(callback: () => void): () => void } };
   uiWorkspace: { startSession(): void };
 }
-// eslint-disable-next-line @typescript-eslint/no-unused-vars -- Augments the host's global Window without turning this browser entry into a module.
-interface Window {
-  __ModuleLoader__: { load(module: { id: string; factory(require: (name: string) => unknown): unknown }): void };
+declare global {
+  interface Window {
+    __ModuleLoader__: { load(module: { id: string; factory(require: (name: string) => unknown): unknown }): void };
+  }
 }
-interface PendingDeletion { sessionId: string; queuedAt: string }
+export interface PendingDeletion { sessionId: string; queuedAt: string }
 interface GcResult { total: number }
-interface GcDialog { busy?: boolean; error?: Error }
-interface DeletionReceipt { revision: string; deletedIdHashes: string[] }
+interface GcDialog { busy?: boolean; error?: Failure }
+export interface DeletionReceipt { revision: string; deletedIdHashes: string[] }
 interface DeletionStatus { gcRunning?: boolean; deletionRunning?: boolean; pending: PendingDeletion[]; locked: string[]; archived: string[]; guardHealthy: boolean; receipt: { revision: string; count: number } }
-interface DeletionPreview { count: number; token: string; archived: boolean }
-interface DeletionDialog { id: string; title: string; preview?: DeletionPreview; busy?: boolean; error?: Error }
+export interface DeletionPreview { count: number; token: string; archived: boolean }
+interface DeletionDialog { id: string; title: string; preview?: DeletionPreview; busy?: boolean; error?: Failure }
 
 window.__ModuleLoader__.load({ id: 'dsh-session-deletion', factory(require) {
   const React = require('react') as ReactAPI;
   const h = React.createElement;
   const namespace = 'session-deletion';
-  let t: ReturnType<DeletionClientContext['locale']['bind']>;
-  class ApiError extends Error { constructor(text: string, readonly messages?: ClientMessage[], readonly diagnostic?: string) { super(text); } }
-  const asError = (error: unknown): Error => error instanceof Error ? error : new Error(String(error));
-  const translate = (message: ClientMessage) => t(message.key, message.params);
-  function errorContent(error: Error): ElementNode {
-    const explanations: ElementNode[] = [];
-    for (const item of error instanceof ApiError ? error.messages ?? [] : []) {
-      const template = t(item.key);
-      if (!template.trim() || template === item.key) continue;
-      const params = item.params;
-      const text = params ? template.split(/(\{\w+\})/g).map((part, j) => {
-        const name = part.slice(1, -1);
-        return part.startsWith('{') && Object.hasOwn(params, name)
-          ? h('code', { key: j, style: { overflowWrap: 'anywhere' } }, String(params[name])) : part;
-      }) : template;
-      explanations.push(h(React.Fragment, { key: explanations.length }, explanations.length ? t('error.separator') : null, text));
-    }
-    const raw = error instanceof ApiError ? error.diagnostic ?? (explanations.length ? undefined : error.message) : error.message;
+  function errorContent(error: Failure, t: LocalizedProps['t']): ElementNode {
     return h('span', { role: 'alert', style: { display: 'block', color: 'var(--dsw-alias-state-error-primary)',
-      marginTop: 8, fontSize: 12, overflowWrap: 'anywhere' } },
-      explanations.length ? explanations : t('error.unknown'),
-      raw ? h('code', { style: { display: 'block', marginTop: 4, fontFamily: 'var(--ds-font-family-code, monospace)', fontSize: 12,
-        color: 'var(--dsw-alias-label-secondary)', overflowWrap: 'anywhere', whiteSpace: 'pre-wrap' } }, raw) : null);
+      marginTop: 8, fontSize: 12, overflowWrap: 'anywhere' } }, renderFailure(React, t, error));
   }
   const ui = require('@deepseek-ai/dsh-client-ui-primitives') as {
     MenuItemButton: import('react').ComponentType<{ children: ElementNode; disabled?: boolean; danger?: boolean; separatorBefore?: boolean; icon?: ElementNode; title?: string; onSelect(): void }>;
@@ -77,7 +56,7 @@ window.__ModuleLoader__.load({ id: 'dsh-session-deletion', factory(require) {
   let gcDialog: GcDialog | undefined;
   let status: DeletionStatus = { pending: [], locked: [], archived: [], guardHealthy: false, receipt: { revision: '', count: 0 } };
   let receipt: DeletionReceipt | undefined;
-  let toast: { id: number; message: ClientMessage } | undefined;
+  let toast: { id: number; message: LocalizedMessage } | undefined;
   let toastId = 0;
   let context: DeletionClientContext | undefined;
   let submitting = false;
@@ -116,12 +95,8 @@ window.__ModuleLoader__.load({ id: 'dsh-session-deletion', factory(require) {
     const response = await fetch('/session-deletion/api/' + path, { credentials: 'same-origin', cache: 'no-store',
       method: data ? 'POST' : 'GET', headers: data ? { 'Content-Type': 'application/json', 'X-DSH-Session-Deletion': '1' } : {},
       ...(data ? { body: JSON.stringify(data) } : {}) });
-    const result = await response.json() as T & { error?: string; messages?: ClientMessage[]; diagnostic?: string };
-    if (!response.ok) {
-      const messages = result.messages ?? (result.error ? undefined : [{ key: 'error.httpStatus', params: { status: response.status } }]);
-      throw new ApiError(result.error ?? `HTTP ${response.status}`, messages, result.diagnostic);
-    }
-    return result;
+    if (!response.ok) throw new ApiError(await readFailure(response));
+    return await response.json() as T;
   }
   async function hash(value: string): Promise<string> {
     const bytes = await crypto.subtle.digest('SHA-256', new TextEncoder().encode(value));
@@ -205,7 +180,7 @@ window.__ModuleLoader__.load({ id: 'dsh-session-deletion', factory(require) {
       const preview = await api<DeletionPreview>('preview', { sessionId: id });
       if (own === generation) { dialog = { id, title, preview }; publish(); }
     } catch (e) {
-      if (own === generation) { dialog = { id, title, error: asError(e) }; publish(); }
+      if (own === generation) { dialog = { id, title, error: asFailure(e) }; publish(); }
     }
   }
   function close(): void { generation++; dialog = undefined; publish(); }
@@ -221,7 +196,7 @@ window.__ModuleLoader__.load({ id: 'dsh-session-deletion', factory(require) {
       await api('delete', { sessionId: current.id, token: current.preview!.token, confirmation: 'DELETE_SESSION' });
       submitting = false;
       completeDeletion(current.title); await refresh();
-    } catch (e) { submitting = false; dialog = { ...current, preview: undefined, busy: true, error: asError(e) }; publish(); }
+    } catch (e) { submitting = false; dialog = { ...current, preview: undefined, busy: true, error: asFailure(e) }; publish(); }
     finally { await refresh(); protectInputs(); }
   }
   function useDisabledClose(selector: string, open: boolean, busy: boolean): void {
@@ -232,18 +207,12 @@ window.__ModuleLoader__.load({ id: 'dsh-session-deletion', factory(require) {
       if (closeButton) closeButton.disabled = busy;
     }, [selector, open, busy]);
   }
-  function sessionMenuActions({ sessionId, displayTitle }: { sessionId: string; displayTitle: string }) {
-    const secure = !!globalThis.crypto?.subtle;
-    const disabled = status.locked.includes(sessionId) || !status.guardHealthy || !secure;
-    return [{ id: 'delete', label: t('delete.menu'), disabled: !!disabled || !!status.gcRunning, danger: true, separatorBefore: true,
-      afterContent: true, icon: { key: 'workspace.delete' }, run: () => { void open(sessionId, displayTitle); } }];
-  }
   function formatBytes(bytes: number): string {
     const units = ['B', 'KiB', 'MiB', 'GiB', 'TiB']; let unit = 0;
     while (bytes >= 1024 && unit < units.length - 1) { bytes /= 1024; unit++; }
     return `${Number(bytes.toFixed(2))} ${units[unit]}`;
   }
-  function GcMenuItem({ onDismiss }: { onDismiss(): void }): ElementNode {
+  function GcMenuItem({ onDismiss, t }: LocalizedProps & { onDismiss(): void }): ElementNode {
     const state = useSnapshot();
     const [bytes, setBytes] = React.useState<number | null>();
     React.useEffect(() => {
@@ -271,10 +240,10 @@ window.__ModuleLoader__.load({ id: 'dsh-session-deletion', factory(require) {
       gcDialog = undefined;
       toast = { id: ++toastId, message: { key: 'gc.success', params: { count: result.total } } };
     }
-    catch (error) { gcDialog = { error: asError(error) }; }
+    catch (error) { gcDialog = { error: asFailure(error) }; }
     finally { publish(); await refresh(); }
   }
-  function GcOverlay(): ElementNode {
+  function GcOverlay({ t }: LocalizedProps): ElementNode {
     const state = useSnapshot(); const d = state.gcDialog;
     const busy = !!d?.busy || !!state.status.gcRunning;
     useDisabledClose('.dsh-session-deletion-gc', !!d, busy);
@@ -283,7 +252,7 @@ window.__ModuleLoader__.load({ id: 'dsh-session-deletion', factory(require) {
     return h(ui.Modal, {
       open: true, onClose: dismiss, closeLabel: t('common.close'), className: 'dsh-session-deletion-modal dsh-session-deletion-gc',
       title: t('gc.title'),
-      description: h(React.Fragment, null, t('gc.description'), d.error ? errorContent(d.error) : null),
+      description: h(React.Fragment, null, t('gc.description'), d.error ? errorContent(d.error, t) : null),
       footer: h(React.Fragment, null,
         h(ui.Button, { variant: 'outline', onClick: dismiss, disabled: busy }, t('common.cancel')),
         h(ui.Button, { variant: 'outline', onClick: () => { void collect(); }, disabled: busy }, t(busy ? 'gc.busy' : 'gc.confirm'))),
@@ -299,7 +268,7 @@ window.__ModuleLoader__.load({ id: 'dsh-session-deletion', factory(require) {
     });
   }
 
-  function Overlay(): ElementNode {
+  function Overlay({ t }: LocalizedProps): ElementNode {
     const state = useSnapshot(); const d = state.dialog;
     const busy = !!d?.busy || submitting || !!state.status.gcRunning || !!state.status.deletionRunning
       || !!d && (state.status.locked.includes(d.id) || state.status.pending.some(item => item.sessionId === d.id));
@@ -310,7 +279,7 @@ window.__ModuleLoader__.load({ id: 'dsh-session-deletion', factory(require) {
       : recovering ? 'recovery.pending'
       : submitting || state.status.deletionRunning || state.status.locked.length ? 'delete.busy' : undefined;
     const notice = state.toast ? h(ui.Toast, {
-      key: state.toast.id, text: translate(state.toast.message), tone: 'success',
+      key: state.toast.id, text: t(state.toast.message.key, state.toast.message.params), tone: 'success',
       onDone: () => { if (toast === state.toast) { toast = undefined; publish(); } },
     }) : noticeKey ? h(StatusToast, { key: noticeKey, text: t(noticeKey), warning: recovering }) : null;
     if (!d) return h(React.Fragment, null, notice, null);
@@ -326,24 +295,27 @@ window.__ModuleLoader__.load({ id: 'dsh-session-deletion', factory(require) {
           h('code', { style: { display: 'block', marginTop: 4, fontFamily: 'var(--ds-font-family-code, monospace)', fontSize: 12, color: 'var(--dsw-alias-label-secondary)', overflowWrap: 'anywhere' } }, d.id),
           d.preview ? h('span', { style: { display: 'block', marginTop: 12 } }, removalText)
             : d.busy ? h('span', { style: { display: 'block', marginTop: 12 } }, t('delete.checking')) : null,
-          d.error ? errorContent(d.error) : null),
+          d.error ? errorContent(d.error, t) : null),
         footer: h(React.Fragment, null,
           h(ui.Button, { variant: 'outline', onClick: dismiss, disabled: busy }, t('common.cancel')),
           h(ui.Button, { variant: 'outline', className: 'dsh-session-deletion-danger', onClick: () => { void confirm(); }, disabled: busy || !d.preview }, t(submitting ? 'delete.submitting' : 'delete.confirm'))),
       }));
   }
   return { inject: ['slots', 'sessions', 'uiWorkspace', 'contextMenus', 'locale'], async apply(ctx: DeletionClientContext) {
-    const { dictionaries } = await api<{ dictionaries: Record<string, Record<string, string>> }>('locales');
+    await registerClientLocale(ctx, namespace);
     if (ctx.fiber.uid === null) return;
-    ctx.effect(() => ctx.locale.register(namespace, dictionaries), 'session-deletion locale dictionaries');
-    t = ctx.locale.bind(namespace);
-    ctx.effect(() => ctx.locale.subscribe(publish), 'session-deletion locale changes');
+    const t = ctx.locale.bind(namespace);
     context = ctx;
     ctx.effect(() => ctx.contextMenus.register({ id: 'session-deletion.action', target: 'session', order: 10000,
-      observe: () => [stateSource, ctx.sessions.list, ctx.locale], resolve: sessionMenuActions }), 'session-deletion menu');
-    ctx.slots.inject('sidebar.panellist.actions', () => ctx.slots.register({ name: 'sidebar.panellist.actions', id: 'session-deletion.gc', order: 10000 }, GcMenuItem));
-    ctx.slots.inject('shell.overlay', () => ctx.slots.register({ name: 'shell.overlay', id: 'session-deletion.gc-dialog', order: 560 }, GcOverlay));
-    ctx.slots.inject('shell.overlay', () => ctx.slots.register({ name: 'shell.overlay', id: 'session-deletion.dialog', order: 550 }, Overlay));
+      observe: () => [stateSource, ctx.sessions.list, ctx.locale],
+      resolve({ sessionId, displayTitle }) {
+        const disabled = status.locked.includes(sessionId) || !status.guardHealthy || !globalThis.crypto?.subtle || !!status.gcRunning;
+        return [{ id: 'delete', label: t('delete.menu'), disabled, danger: true, separatorBefore: true,
+          afterContent: true, icon: { key: 'workspace.delete' }, run: () => { void open(sessionId, displayTitle); } }];
+      } }), 'session-deletion menu');
+    ctx.slots.inject('sidebar.panellist.actions', () => ctx.slots.register({ name: 'sidebar.panellist.actions', id: 'session-deletion.gc', order: 10000, locale: namespace }, GcMenuItem));
+    ctx.slots.inject('shell.overlay', () => ctx.slots.register({ name: 'shell.overlay', id: 'session-deletion.gc-dialog', order: 560, locale: namespace }, GcOverlay));
+    ctx.slots.inject('shell.overlay', () => ctx.slots.register({ name: 'shell.overlay', id: 'session-deletion.dialog', order: 550, locale: namespace }, Overlay));
     ctx.effect(() => {
       const watchSelection = () => {
         const current = Object.values(ctx.sessions.list.getSnapshot().byId).find(row => (row.retainedBy.mainView || 0) > 0);

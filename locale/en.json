@@ -49,10 +49,13 @@
 
     "error.separator": "; ",
     "error.unknown": "Unknown error.",
+    "error.invalidLocaleDictionaries": "Invalid locale catalogs.",
+    "error.invalidLocaleDictionary": "Invalid locale catalog.",
+    "error.localeHttp": "Locale catalogs: HTTP {status}",
+    "error.httpStatus": "HTTP {status}",
 
     "error.expectedJsonObject": "Expected a JSON object",
     "error.expectedPluginJson": "Expected the plugin JSON request",
-    "error.httpStatus": "HTTP {status}",
     "error.invalidJson": "Invalid JSON",
     "error.methodNotAllowed": "Method not allowed",
     "error.ownerRequired": "Owner access required",

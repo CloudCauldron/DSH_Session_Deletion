@@ -4,7 +4,7 @@ import { createHash } from 'node:crypto';
 import { dirname, join, resolve, toNamespacedPath } from 'node:path';
 import koffi from 'koffi';
 import type { Lock, ProcessInfo } from './index.js';
-import { LocalizedError } from '../locale.js';
+import { LocalizedError } from '../locale/errors.js';
 
 export const homeVariable: string = 'USERPROFILE';
 

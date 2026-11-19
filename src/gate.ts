@@ -5,7 +5,7 @@ import { fileURLToPath, pathToFileURL } from 'node:url';
 import { createRequire } from 'node:module';
 import { SUPPORTED_DSH, STATE_NAME, privateDir, stateDir } from './core.js';
 import { birth } from './platform/index.js';
-import { LocalizedError } from './locale.js';
+import { LocalizedError } from './locale/errors.js';
 
 export interface Gate { home: string; version: string; healthy(): boolean }
 export interface GateContext { provide(name: string, value: Gate): unknown }

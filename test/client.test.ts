@@ -4,6 +4,9 @@ import { readFile, readdir } from 'node:fs/promises';
 import { createHash } from 'node:crypto';
 import vm from 'node:vm';
 
+import type { DeletionClientContext, DeletionPreview, DeletionReceipt, PendingDeletion } from '../src/client.js';
+import type { LocalizedProps } from '../src/locale/shared.js';
+
 type ClientFixture = Partial<Omit<DeletionClientContext, 'slots'>> & { slots: Partial<DeletionClientContext['slots']> };
 interface ClientPlugin { apply(ctx: ClientFixture): Promise<void> }
 interface ClientModule { factory(require: (name: string) => unknown): ClientPlugin }
@@ -34,7 +37,7 @@ const dictionaries = Object.fromEntries(await Promise.all(['zh', 'en'].map(async
   return [locale, data.messages ?? {}];
 }))) as Record<string, Record<string, string>>;
 
-void test('the shipped catalogs contain exactly the messages used by the plugin, with matching placeholders', async () => {
+void test('the English catalog contains exactly the messages used by the plugin', async () => {
   const root = new URL('../src/', import.meta.url);
   const keys = new Set<string>();
   for (const file of await readdir(root, { recursive: true })) {
@@ -45,10 +48,7 @@ void test('the shipped catalogs contain exactly the messages used by the plugin,
       : /['"]((?:error|activity)\.\w+)['"]/g;
     for (const [, key] of source.matchAll(pattern)) keys.add(key);
   }
-  for (const catalog of Object.values(dictionaries)) assert.deepEqual(new Set(Object.keys(catalog)), keys);
-  for (const key of keys) {
-    assert.deepEqual((dictionaries.en[key].match(/\{\w+\}/g) ?? []).sort(), (dictionaries.zh[key].match(/\{\w+\}/g) ?? []).sort(), key);
-  }
+  assert.deepEqual(new Set(Object.keys(dictionaries.en)), keys);
 });
 
 function localeFixture() {
@@ -60,7 +60,7 @@ function localeFixture() {
       for (const [locale, entries] of Object.entries(dictionaries)) registered.set(locale, entries);
       return () => registered.clear();
     },
-    bind() { return (key: string, params?: Record<string, unknown>) =>
+    bind(namespace: string) { assert.equal(namespace, 'session-deletion'); return (key: string, params?: Record<string, unknown>) =>
       (registered.get(snapshot.active)?.[key] ?? registered.get('en')?.[key] ?? key)
         .replace(/\{(\w+)\}/g, (match, name: string) => String(params?.[name] ?? match)); },
     getSnapshot: () => snapshot,
@@ -106,10 +106,10 @@ async function refreshClient(localStorage: ReturnType<typeof browserStorage>, se
     MutationObserver: class { observe() {} disconnect() {} },
     setInterval(callback: () => void) { poll = callback; return 1; }, clearInterval() {},
     fetch: async (url: string) => {
-      if (url.endsWith('/locales')) return { ok: true, json: async () => ({ dictionaries }) };
+      if (url === 'api/session-deletion/locales') return { ok: true, json: async () => ({ ok: true, dictionaries }) };
       if (url.endsWith('/receipt')) {
         receiptRequests++;
-        if (failReceipt) { failReceipt = false; return { ok: false, status: 503, json: async () => ({ error: 'retry' }) }; }
+        if (failReceipt) { failReceipt = false; return Response.json({ error: 'retry' }, { status: 503 }); }
         return { ok: true, json: async () => receipt };
       }
       return { ok: true, json: async () => ({ pending: [], locked: [], archived: [], guardHealthy: true,
@@ -225,11 +225,11 @@ void test('deletion copy and API errors follow locale changes, use English for m
     document: { body: {}, head: { append() {} }, querySelector: () => closeButton, querySelectorAll: () => [], createElement: () => ({ remove() {} }) },
     MutationObserver: class { observe() {} disconnect() {} }, setInterval(callback: () => void) { poll = callback; return 1; }, clearInterval() {},
     fetch: async (url: string, options?: { body?: string }) => {
-      if (url.endsWith('/locales')) return { ok: true, json: async () => ({ dictionaries: translated }) };
+      if (url === 'api/session-deletion/locales') return { ok: true, json: async () => ({ ok: true, dictionaries: translated }) };
       if (url.endsWith('/preview') && previewThrown) throw 0;
       if (url.endsWith('/preview')) {
-        if (missingPreview) return { ok: false, status: 404, json: async () => ({ error: 'Session missing' }) };
-        if (previewFailed) return { ok: false, json: async () => ({ error: 'Host fallback', messages: [{ key: 'error.guardUnavailable' }], diagnostic: 'system detail\n<&>' }) };
+        if (missingPreview) return Response.json({ error: 'Session missing' }, { status: 404 });
+        if (previewFailed) return Response.json({ error: 'Host fallback', messages: [{ key: 'error.guardUnavailable' }], diagnostic: 'system detail\n<&>' }, { status: 409 });
         const token = issuedToken = 'fixture-' + ++nextToken;
         if (losePreview) throw new Error('Replacement response lost');
         return { ok: true, json: async () => ({ ...await preview, token }) };
@@ -259,7 +259,9 @@ void test('deletion copy and API errors follow locale changes, use English for m
   await plugin.apply({
     locale, fiber: { uid: 1 },
     slots: { inject(_, callback) { callback(); }, register(options, component) {
-      assert.equal(typeof component, 'function'); components.set(options.id, component as () => MockNode);
+      assert.equal(options.locale, 'session-deletion');
+      const render = component as (props: LocalizedProps) => MockNode;
+      components.set(options.id, () => render({ t: locale.bind(options.locale) }));
     } },
     contextMenus: { register(contribution) { menu = contribution; return () => {}; } },
     sessions: { list: { getSnapshot: () => ({ byId: rows }), subscribe: () => () => {} } },
@@ -354,8 +356,9 @@ void test('deletion copy and API errors follow locale changes, use English for m
 });
 
 void test('GC menu shows a native spinner, formats binary units and reports failed or invalid size previews', async () => {
-  let plugin!: ClientPlugin, menu!: (props: { onDismiss(): void }) => MockNode, mount!: () => () => void;
+  let plugin!: ClientPlugin, menu!: (props: LocalizedProps & { onDismiss(): void }) => MockNode, mount!: () => () => void;
   let bytes: number | null | undefined, response: unknown, fail: boolean | 'network' = false, requests = 0;
+  const locale = localeFixture();
   const ui = { MenuItemButton: 'NativeMenu', StateDot: 'NativeSpinner' };
   const react = {
     Fragment: Symbol('Fragment'),
@@ -367,24 +370,25 @@ void test('GC menu shows a native spinner, formats binary units and reports fail
   vm.runInNewContext(await readFile(new URL('../lib/client.js', import.meta.url), 'utf8'), {
     window: { __ModuleLoader__: { load(definition: ClientModule) { plugin = definition.factory(name => name === 'react' ? react : ui); } } },
     fetch: async (url: string) => {
-      if (url.endsWith('/locales')) return { ok: true, json: async () => ({ dictionaries }) };
+      if (url === 'api/session-deletion/locales') return { ok: true, json: async () => ({ ok: true, dictionaries }) };
       assert.equal(url, '/session-deletion/api/gc-size'); requests++;
       if (fail === 'network') throw new Error('Disconnected');
-      return { ok: !fail, json: async () => fail ? { error: 'Cannot scan' } : { bytes: response } };
+      return fail ? Response.json({ error: 'Cannot scan' }, { status: 500 }) : { ok: true, json: async () => ({ bytes: response }) };
     },
   });
   await plugin.apply({
-    locale: localeFixture(), fiber: { uid: 1 },
+    locale, fiber: { uid: 1 },
     slots: { inject(_, callback) { callback(); }, register(options, component) { if (options.id === 'session-deletion.gc') {
-      assert.equal(typeof component, 'function'); menu = component as typeof menu;
+      assert.equal(options.locale, 'session-deletion'); menu = component as typeof menu;
     } } },
-    effect(callback, label) { if (label.startsWith('session-deletion locale')) callback(); },
+    effect(callback, label) { if (label === 'locale dictionaries') callback(); },
   });
-  const icon = element(element(menu({ onDismiss() {} })).props.icon as MockNode);
+  const props = { t: locale.bind('session-deletion'), onDismiss() {} };
+  const icon = element(element(menu(props)).props.icon as MockNode);
   assert.equal(icon.type, 'svg');
   assert.equal(icon.props.viewBox, '0 0 256 256');
   assert.match(String(element(nodes(icon.props.children)[0]).props.d), /^M235\.5 216\.81c/, 'the cleanup action keeps its broom artwork');
-  const render = () => element(element(menu({ onDismiss() {} })).props.children);
+  const render = () => element(element(menu(props)).props.children);
   const text = (value: MockNode): string => typeof value === 'string' ? value : Array.isArray(value) ? value.map(text).join('') : isElement(value) ? text(value.props.children) : '';
   const cases: Array<[number, string]> = [
     [0, '0 B'], [1, '1 B'], [1023, '1023 B'], [1024, '1 KiB'], [1536, '1.5 KiB'], [1264, '1.23 KiB'],

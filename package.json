@@ -1,6 +1,6 @@
 {
   "name": "dsh-session-deletion",
-  "version": "0.7.5",
+  "version": "0.7.6",
   "private": true,
   "type": "module",
   "description": "Immediate session deletion and orphan attachment cleanup for DSH.",
@@ -31,18 +31,20 @@
   },
   "scripts": {
     "lint": "eslint . --max-warnings 0",
-    "build": "tsc -p tsconfig.build.json",
+    "build": "tsc -p tsconfig.build.json && esbuild src/client.ts --bundle --format=iife --platform=browser --target=esnext --outfile=lib/client.js",
     "check": "tsc",
     "test": "pnpm build && node --test test/*.test.ts",
     "test:integration": "pnpm build && node test/integration.ts",
     "test:release": "pnpm check && pnpm lint && pnpm test && pnpm test:integration"
   },
   "devDependencies": {
+    "@deepseek-ai/dsh-client-connection": "0.2.2-rc.5",
     "@deepseek-ai/dsh-host-webserver": "0.2.2-rc.5",
     "@eslint/js": "10.0.1",
     "@types/node": "^26.6.6",
     "@types/react": "^19.3.0",
     "@typescript/native": "npm:typescript@7.0.2",
+    "esbuild": "0.28.2",
     "eslint": "10.14.0",
     "fflate": "0.8.2",
     "playwright-core": "^1.64.1",

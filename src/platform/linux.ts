@@ -3,7 +3,7 @@ import { constants } from 'node:fs';
 import { basename, dirname, join, resolve } from 'node:path';
 import koffi from 'koffi';
 import type { Lock, ProcessInfo } from './index.js';
-import { LocalizedError } from '../locale.js';
+import { LocalizedError } from '../locale/errors.js';
 
 export const homeVariable: string = 'HOME';
 

@@ -9,7 +9,8 @@ import { digest, enqueue, familyOf, listRequests, readJSON, readSchedule, stateD
 import { tryLock, waitingHosts, otherHosts } from './guard.js';
 import type { Lock } from './platform/index.js';
 import { hostRequire, type Gate } from './gate.js';
-import { LocalizedError, message, type LocalizedMessage } from './locale.js';
+import { LocalizedError } from './locale/errors.js';
+import { message, type LocalizedMessage } from './locale/shared.js';
 
 // Narrow contracts for the services used from the reviewed DSH release.
 interface Session { id: string; header: SessionHeader }

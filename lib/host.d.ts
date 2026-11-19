@@ -2,6 +2,7 @@ import type { IncomingMessage } from 'node:http';
 import type { WebServer } from '@deepseek-ai/dsh-host-webserver';
 import { type DeletionRuntime } from './runtime.js';
 import type { Gate } from './gate.js';
+import type { HostConnectionFetch } from '@deepseek-ai/dsh-client-connection';
 export interface HostContext {
     effect(register: () => () => void, label: string): unknown;
     sessionDeletionGate: Gate;
@@ -11,6 +12,7 @@ export interface HostContext {
         root: string;
     };
     connection: {
+        fetch: HostConnectionFetch;
         admit(request: IncomingMessage): {
             rejection: number;
         } | {

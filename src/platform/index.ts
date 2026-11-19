@@ -1,4 +1,4 @@
-import { LocalizedError } from '../locale.js';
+import { LocalizedError } from '../locale/errors.js';
 export interface Lock { close(): Promise<void> }
 export interface ProcessInfo { pid: number; cwd: string; env: string[] }
 
