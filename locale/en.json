@@ -33,6 +33,7 @@
     "recovery.pending": "Cleanup incomplete; it will resume automatically on next launch",
 
     "activity.globalAgentBusy": "An AI agent is still running or awaiting input; wait until all are idle before cleaning up attachments",
+    "activity.chatImport": "A DeepSeek chat import is saving sessions and attachments.",
     "activity.initializing": "Session service is still initializing",
     "activity.maintenance": "Background session maintenance has not finished yet",
     "activity.missingHandle": "Missing full lifecycle handle; please restart DSH",
@@ -108,7 +109,6 @@
     "error.invalidZstdFrame": "Invalid Zstandard frame",
     "error.readSessionLog": "Cannot read session log {path}",
     "error.sessionFormatUnsupported": "Unsupported session format: {path}",
-    "error.sessionHeaderMissing": "Missing session header",
     "error.sessionHeaderUnsupported": "Unsupported session header: {path}",
     "error.targetHeaderMissing": "Missing target header",
     "error.unclassifiedBackup": "Unclassified backup log requires review: {path}",

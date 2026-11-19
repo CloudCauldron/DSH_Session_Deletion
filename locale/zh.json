@@ -33,6 +33,7 @@
     "recovery.pending": "清理未完成，将在下次启动时自动恢复",
 
     "activity.globalAgentBusy": "仍有 AI 在工作或等待交互，请全部空闲后再清理附件",
+    "activity.chatImport": "DeepSeek 对话导入正在保存会话和附件。",
     "activity.initializing": "会话服务仍在初始化",
     "activity.maintenance": "会话后台维护尚未结束",
     "activity.missingHandle": "缺少完整生命周期句柄，请重启 DSH",
@@ -108,7 +109,6 @@
     "error.invalidZstdFrame": "Zstandard 帧无效。",
     "error.readSessionLog": "无法读取会话日志 {path}",
     "error.sessionFormatUnsupported": "不支持此会话格式：{path}。",
-    "error.sessionHeaderMissing": "缺少会话头。",
     "error.sessionHeaderUnsupported": "不支持此会话头：{path}。",
     "error.targetHeaderMissing": "缺少目标会话头。",
     "error.unclassifiedBackup": "无法判定备份日志的归属，请检查：{path}。",

@@ -51,8 +51,8 @@ export interface GcHooks {
   removeUploadMappings?(hashes: ReadonlySet<string>): Promise<void>;
 }
 
-export const SUPPORTED_DSH = '0.2.2-rc.2';
-export const STATE_NAME = 'session-deletion';
+export const SUPPORTED_DSH = '0.2.2-rc.5';
+export const STATE_NAME = '.dsh-session-deletion';
 export const digest = (value: string) => createHash('sha256').update(value).digest('hex');
 export const stateDir = (home: string) => join(home, STATE_NAME);
 export const requestPath = (home: string, id: string) => join(stateDir(home), 'pending', digest(id) + '.json');
@@ -256,7 +256,6 @@ export async function readLog(path: string, headerOnly = false) {
 
 export async function scanSessions(home: string, snapshots?: Map<string, LiveSnapshot>): Promise<SessionMap> {
   const root = join(home, 'sessions'); const sessions: SessionMap = new Map();
-  const liveByDirectory = new Map([...snapshots?.values() ?? []].map(s => [encodeSegment(s.header.id), s]));
   for (const project of await entries(root)) {
     if (!project.isDirectory()) {
       if (project.isSymbolicLink()) throw LocalizedError.english('error.symlinkUnderSessions');
@@ -268,45 +267,32 @@ export async function scanSessions(home: string, snapshots?: Map<string, LiveSna
         continue;
       }
       const dir = join(root, project.name, directory.name);
-      const logFiles = (await entries(dir)).filter(e => LOG.test(e.name));
-      if (!logFiles.length) continue;
       let selected: SessionHeader | undefined; const refs = newRefs();
-      for (const log of logFiles) {
-        const candidate = liveByDirectory.get(directory.name);
-        const live = candidate && log.name === `session.v${candidate.header.version}.jsonl.zstd` ? candidate : undefined;
-        let parsed: { header: SessionHeader; refs: References };
-        if (live) {
-          const liveRefs = newRefs(); references(live.header, liveRefs);
-          for (const event of live.events) references(event, liveRefs);
-          parsed = { header: live.header, refs: liveRefs };
-        } else parsed = await readLog(join(dir, log.name));
+      for (const file of await filesUnder(dir)) {
+        const leaf = basename(file);
+        if (!LOG.test(leaf)) {
+          if (/\.jsonl(?:\.zstd)?(?:\.|$)/.test(leaf)) throw LocalizedError.english('error.unclassifiedBackup', { path: file });
+          continue;
+        }
+        const parsed = await readLog(file);
         if (directory.name !== encodeSegment(parsed.header.id)) throw LocalizedError.english('error.directorySessionMismatch', { path: dir });
         if (selected && (selected.id !== parsed.header.id || selected.createdAt !== parsed.header.createdAt))
           throw LocalizedError.english('error.mixedSessionIds', { path: dir });
         if (!selected || parsed.header.version > selected.version) selected = parsed.header;
         for (const h of parsed.refs.hashes) refs.hashes.add(h);
       }
-      // Retained backup generations can contain additional attachments or spill references.
-      for (const file of await filesUnder(dir)) {
-        const leaf = basename(file);
-        if (LOG.test(leaf) || leaf === 'session.lock') continue;
-        if (/\.jsonl(?:\.zstd)?(?:\.|$)/.test(leaf)) {
-          // Unknown damaged/backup encodings must not be assumed to contain no references.
-          throw LocalizedError.english('error.unclassifiedBackup', { path: file });
-        }
-      }
-      if (!selected) throw LocalizedError.english('error.sessionHeaderMissing');
+      if (!selected) continue;
       if (sessions.has(selected.id)) throw LocalizedError.english('error.duplicateSession', { id: selected.id });
       sessions.set(selected.id, { header: selected, dir, refs });
     }
   }
-  // A newly created live session can already reference an attachment before
-  // its first buffered write materializes a directory. It is a reference
-  // owner too; never infer exclusivity only from the current disk listing.
-  for (const [id, live] of snapshots ?? []) if (!sessions.has(id)) {
-    const refs = newRefs(); references(live.header, refs);
+  // Staged and buffered references can exist with any disk generation, or before the first write.
+  for (const [id, live] of snapshots ?? []) {
+    const stored = sessions.get(id);
+    const refs = stored?.refs ?? newRefs();
+    references(live.header, refs);
     for (const event of live.events) references(event, refs);
-    sessions.set(id, { header: live.header, dir: '', refs });
+    if (!stored) sessions.set(id, { header: live.header, dir: '', refs });
   }
   return sessions;
 }

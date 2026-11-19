@@ -5,7 +5,7 @@ export interface LocalizedMessage {
 export declare const dictionaries: Record<string, Record<string, string>>;
 export declare function message(key: string, params?: LocalizedMessage['params']): LocalizedMessage;
 type DiagnosticOptions = ErrorOptions & {
-    locale?: 'zh' | 'en';
+    locale?: string;
     failures?: readonly unknown[];
 };
 export declare class LocalizedError extends Error {

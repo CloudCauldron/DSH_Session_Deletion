@@ -5,7 +5,7 @@ type ClientMessage = import('./locale.js').LocalizedMessage;
 interface DeletionClientContext {
   fiber: { uid: number | null };
   locale: {
-    register(namespace: string, locale: string, dictionary: Record<string, string>): () => void;
+    register(namespace: string, dictionaries: Record<string, Record<string, string>>): () => void;
     bind(namespace: string): (key: string, params?: Record<string, unknown>) => string;
     getSnapshot(): { active: string; revision: number };
     subscribe(listener: () => void): () => void;
@@ -335,11 +335,7 @@ window.__ModuleLoader__.load({ id: 'dsh-session-deletion', factory(require) {
   return { inject: ['slots', 'sessions', 'uiWorkspace', 'contextMenus', 'locale'], async apply(ctx: DeletionClientContext) {
     const { dictionaries } = await api<{ dictionaries: Record<string, Record<string, string>> }>('locales');
     if (ctx.fiber.uid === null) return;
-    ctx.effect(() => {
-      const disposers = Object.entries(dictionaries).map(([locale, dictionary]) =>
-        ctx.locale.register(namespace, locale, { ...dictionaries.zh, ...dictionary }));
-      return () => { for (const dispose of disposers.reverse()) dispose(); };
-    }, 'session-deletion locale dictionaries');
+    ctx.effect(() => ctx.locale.register(namespace, dictionaries), 'session-deletion locale dictionaries');
     t = ctx.locale.bind(namespace);
     ctx.effect(() => ctx.locale.subscribe(publish), 'session-deletion locale changes');
     context = ctx;

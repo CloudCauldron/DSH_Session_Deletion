@@ -11,7 +11,6 @@ export interface HostContext {
   sessionDeletionGate: Gate; sessionDeletionRuntime: DeletionRuntime;
   sessionPersistence: { name: string; root: string };
   connection: {
-    requestRejection(request: IncomingMessage): number | undefined;
     admit(request: IncomingMessage): { rejection: number } | { peer: { principal: { kind: string } } };
   };
   webServer: Pick<WebServer, 'register'>;
@@ -44,8 +43,6 @@ export async function apply(ctx: HostContext): Promise<void> {
   const previews = new Map<string, { token: string; expires: number; createdAt: number; ids: string[] }>();
   ctx.webServer.register({ kind: 'prefix', path: '/session-deletion/api', async handler(req, res) {
     try {
-      const rejection = ctx.connection.requestRejection(req);
-      if (rejection) throw new HttpError(rejection, 'error.unauthorized');
       const admission = ctx.connection.admit(req);
       if ('rejection' in admission) throw new HttpError(admission.rejection, 'error.unauthorized');
       if (admission.peer.principal.kind !== 'owner') throw new HttpError(403, 'error.ownerRequired');

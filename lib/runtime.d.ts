@@ -148,6 +148,11 @@ export interface RuntimeContext {
     sessionController: object;
     schedule: Schedule;
     terminals: Terminals;
+    deepseekChatImport: {
+        active?: {
+            settled: Promise<void>;
+        };
+    };
     jobs: Jobs;
     subagents: {
         manager?: unknown;
@@ -194,6 +199,9 @@ export declare class DeletionRefused extends LocalizedError {
 export declare class PublicationBarrier {
     private context;
     private active;
+    private revision;
+    recordPublication(): void;
+    get idleRevision(): number | undefined;
     private blocked;
     private waiters;
     assertSynchronousPublication(): void;
@@ -209,6 +217,7 @@ export declare class DeletionRuntime {
     private handles;
     private operations;
     private deleted;
+    private importer?;
     private receiptRevision;
     private cacheWrites;
     private restorers;
@@ -260,6 +269,8 @@ export declare class DeletionRuntime {
     remove(id: string, createdAt: number, expectedIds: readonly string[]): Promise<{
         deleted: number;
     }>;
+    private assertSoleHost;
+    private assertGcAvailable;
     garbageSize(): Promise<number>;
     gc(): Promise<GcResult>;
     private removeUploadMappings;

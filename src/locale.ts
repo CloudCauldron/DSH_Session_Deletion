@@ -1,30 +1,37 @@
 import { readFileSync, readdirSync } from 'node:fs';
 
 export interface LocalizedMessage { key: string; params?: Record<string, string | number> }
-interface LocaleFile { messages?: Record<string, string> }
-
 const directory = new URL('../locale/', import.meta.url);
-export const dictionaries: Record<string, Record<string, string>> = Object.fromEntries(
-  readdirSync(directory).filter(file => /^[a-z]{2,8}(?:-[a-z0-9]{1,8})*\.json$/i.test(file)).map(file => {
-    const locale = JSON.parse(readFileSync(new URL(file, directory), 'utf8')) as LocaleFile;
-    return [file.slice(0, -5).toLowerCase(), locale.messages ?? {}];
-  }),
-);
 
-// Host diagnostics keep a Chinese fallback; the browser translates the same keys
-// through DSH's locale service, including errors returned by the HTTP API.
+function readMessages(file: string): Record<string, string> {
+  const { messages } = JSON.parse(readFileSync(new URL(file, directory), 'utf8'));
+  if (!messages || typeof messages !== 'object' || Array.isArray(messages)
+    || !Object.values(messages).every(value => typeof value === 'string')) throw new Error(`Invalid locale dictionary: ${file}`);
+  return messages as Record<string, string>;
+}
+
+const english = readMessages('en.json');
+export const dictionaries: Record<string, Record<string, string>> = { en: english };
+for (const file of readdirSync(directory)) {
+  if (file === 'en.json' || !/^[a-z]{2,8}(?:-[a-z0-9]{1,8})*\.json$/i.test(file)) continue;
+  try { dictionaries[file.slice(0, -5).toLowerCase()] = readMessages(file); }
+  catch { /* An unavailable translation leaves DSH's English fallback in effect. */ }
+}
+
 export function message(key: string, params?: LocalizedMessage['params']): LocalizedMessage {
   return { key, ...params === undefined ? {} : { params } };
 }
 
-type DiagnosticOptions = ErrorOptions & { locale?: 'zh' | 'en'; failures?: readonly unknown[] };
+type DiagnosticOptions = ErrorOptions & { locale?: string; failures?: readonly unknown[] };
 
 export class LocalizedError extends Error {
   readonly messages: LocalizedMessage[];
   readonly diagnostic?: string;
 
   constructor(key: string | LocalizedMessage[], params?: LocalizedMessage['params'], options?: DiagnosticOptions) {
-    const dict = dictionaries[options?.locale ?? 'zh'];
+    const locale = options?.locale?.toLowerCase() ?? 'en';
+    const dict = dictionaries[locale] ?? dictionaries[locale.split('-')[0]];
+    const template = (key: string) => dict?.[key] ?? english[key] ?? key;
     const messages = typeof key === 'string' ? [message(key, params)] : [...key];
     const raw: string[] = [];
     for (const cause of options?.failures ?? []) {
@@ -33,9 +40,9 @@ export class LocalizedError extends Error {
         if (cause.diagnostic !== undefined) raw.push(cause.diagnostic);
       } else raw.push(cause instanceof Error ? cause.message : String(cause));
     }
-    const translated = messages.map(item => (dict[item.key] ?? item.key).replace(/\{(\w+)\}/g,
+    const translated = messages.map(item => template(item.key).replace(/\{(\w+)\}/g,
       (match, name: string) => String(item.params?.[name] ?? match)));
-    super([...translated, ...raw].join(dict['error.separator']), options);
+    super([...translated, ...raw].join(template('error.separator')), options);
     this.messages = messages;
     if (raw.length) this.diagnostic = raw.join('\n');
   }

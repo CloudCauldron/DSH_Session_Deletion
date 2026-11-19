@@ -1,6 +1,6 @@
 {
   "name": "dsh-session-deletion",
-  "version": "0.7.3",
+  "version": "0.7.4",
   "private": true,
   "type": "module",
   "description": "Immediate session deletion and orphan attachment cleanup for DSH.",
@@ -38,12 +38,13 @@
     "test:release": "pnpm check && pnpm lint && pnpm test && pnpm test:integration"
   },
   "devDependencies": {
-    "@deepseek-ai/dsh-host-webserver": "0.2.2-rc.2",
+    "@deepseek-ai/dsh-host-webserver": "0.2.2-rc.5",
     "@eslint/js": "10.0.1",
     "@types/node": "^26.6.6",
     "@types/react": "^19.3.0",
     "@typescript/native": "npm:typescript@7.0.2",
     "eslint": "10.14.0",
+    "fflate": "0.8.2",
     "playwright-core": "^1.64.1",
     "typescript": "npm:@typescript/typescript6@6.0.2",
     "typescript-eslint": "8.72.2"

@@ -87,6 +87,7 @@ export interface RuntimeContext {
   sessionController: object;
   schedule: Schedule;
   terminals: Terminals;
+  deepseekChatImport: { active?: { settled: Promise<void> } };
   jobs: Jobs;
   subagents: { manager?: unknown };
   on(name: 'agent/created' | 'agent/disposed', listener: (event: { agent: Agent }) => unknown): () => void;
@@ -109,6 +110,9 @@ export class DeletionRefused extends LocalizedError { readonly status = 409; }
 export class PublicationBarrier {
   private context = new AsyncLocalStorage<{ open: boolean }>();
   private active = 0;
+  private revision = 0;
+  recordPublication(): void { this.revision++; }
+  get idleRevision(): number | undefined { return this.active || this.blocked ? undefined : this.revision; }
   private blocked = false;
   private waiters: (() => void)[] = [];
   assertSynchronousPublication(): void {
@@ -121,7 +125,7 @@ export class PublicationBarrier {
       while (this.blocked) await new Promise<void>(resolve => this.waiters.push(resolve));
     }
     const lease = { open: true };
-    this.active++;
+    this.active++; this.recordPublication();
     try { return await this.context.run(lease, work); }
     finally { lease.open = false; this.active--; }
   }
@@ -148,6 +152,7 @@ export class DeletionRuntime {
   private handles = new Map<string, Handle>();
   private operations = new Map<string, Set<Operation>>();
   private deleted = new Set<string>();
+  private importer?: RuntimeContext['deepseekChatImport'];
   private receiptRevision = '';
   private cacheWrites = new Map<string, Set<Promise<unknown>>>();
   private restorers: (() => void)[] = [];
@@ -295,6 +300,19 @@ export class DeletionRuntime {
         return runtime.barrier.read(() => Reflect.apply(original, this, args));
       });
     }
+    // The importer stores images before it creates any Session. Its claim spans
+    // both passes, including cancellation and the final workspace attachment.
+    this.ctx.inject(['deepseekChatImport'], ctx => {
+      const importer = this.unwrap(ctx.deepseekChatImport);
+      this.importer = importer;
+      if (importer.active) this.barrier.recordPublication();
+      this.patch(importer, 'claim', original => function () {
+        if (runtime.gcRunning) return undefined; // Native import-busy response.
+        const claim = Reflect.apply(original, this, []);
+        if (claim) runtime.barrier.recordPublication();
+        return claim;
+      });
+    });
     const uploads = this.unwrap(this.ctx.fileUploads);
     if (!(uploads.stagedFiles instanceof WeakMap)) throw LocalizedError.english('error.stagedUploadOwnership');
     for (const method of ['upload', 'uploadStream', 'uploadImageStream']) this.patch(uploads, method, original => async function (owner, ...args) {
@@ -566,8 +584,19 @@ export class DeletionRuntime {
       else this.maintenance = undefined;
     }
   }
-  async garbageSize(): Promise<number> {
+  private async assertSoleHost(): Promise<void> {
+    const excluded = await waitingHosts(stateDir(this.home)); excluded.add(process.pid);
+    if ((await otherHosts(this.home, excluded)).length) throw new DeletionRefused('error.otherHost');
+  }
+  private assertGcAvailable(): void {
     if (this.maintenance) throw new DeletionRefused('error.cleanupBusy');
+    if (!this.ctx.sessionDeletionGate.healthy()) throw new DeletionRefused('error.guardUnavailable');
+    if (this.importer?.active) throw new DeletionRefused('activity.chatImport');
+  }
+  async garbageSize(): Promise<number> {
+    this.assertGcAvailable();
+    const publication = this.barrier.idleRevision;
+    if (publication === undefined) throw new DeletionRefused('error.sizeChanged');
     let changed = false;
     const subscriptions = (['session/created', 'session/disposed', 'session/event'] as const).map(name => this.ctx.on(name, () => { changed = true; }));
     // Session events cover log/lifecycle changes; staged uploads can change without an event.
@@ -576,19 +605,18 @@ export class DeletionRuntime {
     ])]);
     try {
       const before = current();
+      await this.assertSoleHost();
       const bytes = await garbageSize(this.home, () => this.snapshots());
-      if (changed || this.maintenance || before !== current()) throw new DeletionRefused('error.sizeChanged');
+      if (changed || publication !== this.barrier.idleRevision || this.maintenance || before !== current()) throw new DeletionRefused('error.sizeChanged');
       return bytes;
     } finally { for (const dispose of subscriptions) dispose(); }
   }
   async gc(): Promise<GcResult> {
-    if (this.maintenance) throw new DeletionRefused('error.cleanupBusy');
-    if (!(this.ctx.sessionDeletionGate as Gate).healthy()) throw new DeletionRefused('error.guardUnavailable');
+    this.assertGcAvailable();
     this.maintenance = 'gc';
     try {
       return await this.barrier.exclusive(async () => {
-        const excluded = await waitingHosts(stateDir(this.home)); excluded.add(process.pid);
-        if ((await otherHosts(this.home, excluded)).length) throw new DeletionRefused('error.otherHost');
+        await this.assertSoleHost();
         if ((await listRequests(this.home)).length) throw new DeletionRefused('error.pendingDeletion');
         const activity = await this.quiescence([], true);
         if (activity.busy) throw new DeletionRefused(activity.reasons);
@@ -614,6 +642,8 @@ export class DeletionRuntime {
   private async removeOne(id: string, createdAt: number, expectedIds: readonly string[]): Promise<{ deleted: number }> {
     const deadline = performance.now() + this.stopTimeoutMs;
     if (!(this.ctx.sessionDeletionGate as Gate).healthy()) throw new DeletionRefused('error.guardUnavailable');
+    // A preview can see an imported log before its workspace attachment settles.
+    if (this.importer?.active) await this.until(this.importer.active.settled, deadline);
     if ((await this.until(listRequests(this.home), deadline)).length) throw new DeletionRefused('error.pendingCleanup');
     const headers = await this.until(this.headers(), deadline); const root = headers.get(id);
     if (!root || root.createdAt !== createdAt) throw new DeletionRefused('error.sessionChanged');
@@ -622,8 +652,7 @@ export class DeletionRuntime {
     if (JSON.stringify(ids) !== JSON.stringify(expectedIds)) throw new DeletionRefused('error.familyChanged');
     this.assertAllowed(ids);
     await this.checkScheduleDelivery(ids, deadline);
-    const excluded = await this.until(waitingHosts(stateDir(this.home)), deadline); excluded.add(process.pid);
-    if ((await this.until(otherHosts(this.home, excluded), deadline)).length) throw new DeletionRefused('error.otherHost');
+    await this.until(this.assertSoleHost(), deadline);
     if (performance.now() >= deadline) throw new DeletionRefused('error.stopTimeout');
     let enqueueAttempted = false; let committed = false;
     const writerLocks: Lock[] = [];

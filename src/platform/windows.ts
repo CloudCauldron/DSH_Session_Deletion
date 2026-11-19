@@ -122,7 +122,7 @@ export async function mkdir(path: string): Promise<string | undefined> {
 /** Read the target's own cwd/environment, rather than infer DSH_HOME from ours.
  * PEB/RTL_USER_PROCESS_PARAMETERS are Windows ABI structures; failed inspection
  * defers cleanup. Both native 64-bit and WOW64 Node processes are recognized. */
-function parameters(handle: number | bigint, matches: (args: readonly string[]) => boolean): Omit<ProcessInfo, 'pid'> | undefined {
+function parameters(handle: number | bigint, matches: (args: readonly string[], cwd: string) => boolean): Omit<ProcessInfo, 'pid'> | undefined {
   const pointerSize = koffi.sizeof('uintptr_t');
   const basic = Buffer.alloc(6 * pointerSize), wow64 = Buffer.alloc(8);
   if (query(handle, 0, basic, basic.length, null) < 0 || (pointerSize === 8 && query(handle, 26, wow64, wow64.length, null) < 0))
@@ -138,10 +138,11 @@ function parameters(handle: number | bigint, matches: (args: readonly string[]) 
   const address = pointer(read(peb, narrow ? 0x14 : 0x28), narrow ? 0x10 : 0x20);
   const params = read(address, narrow ? 0x4c : 0x88);
   const string = (offset: number) => read(pointer(params, offset + (narrow ? 4 : 8)), params.readUInt16LE(offset)).toString('utf16le');
+  const cwd = string(narrow ? 0x24 : 0x38);
   const count = [0];
   const argv = parseArgs(string(narrow ? 0x40 : 0x70), count);
   check(argv, 'CommandLineToArgvW');
-  try { if (!matches(koffi.decode(argv, 'char16_t *', count[0]))) return; }
+  try { if (!matches(koffi.decode(argv, 'char16_t *', count[0]), cwd)) return; }
   finally { check(!free(argv), 'LocalFree'); }
   let environment = '', cursor = pointer(params, narrow ? 0x48 : 0x80);
   while (!environment.includes('\0\0')) {
@@ -154,9 +155,9 @@ function parameters(handle: number | bigint, matches: (args: readonly string[]) 
     const split = row.indexOf('=');
     return row.slice(0, split).toUpperCase() + row.slice(split);
   });
-  return { cwd: string(narrow ? 0x24 : 0x38), env };
+  return { cwd, env };
 }
-export async function processes(excluded: Set<number>, executables: readonly string[], matches: (args: readonly string[]) => boolean): Promise<ProcessInfo[]> {
+export async function processes(excluded: Set<number>, executables: readonly string[], matches: (args: readonly string[], cwd: string) => boolean): Promise<ProcessInfo[]> {
   const found: ProcessInfo[] = [];
   const list = snapshot(2 /* TH32CS_SNAPPROCESS */, 0);
   if (list === -1 || list === -1n) check(false, 'CreateToolhelp32Snapshot');
@@ -174,7 +175,9 @@ export async function processes(excluded: Set<number>, executables: readonly str
         const info = parameters(handle, matches);
         if (info) found.push({ pid: row.pid, ...info });
       } catch (e) {
-        if (wait(handle, 0) !== 0) throw LocalizedError.english('error.sameUserInspection', undefined, { cause: e });
+        // A terminating process can lose its PEB just before its handle signals.
+        const grace = (e as { win32Code?: number }).win32Code === 299 /* ERROR_PARTIAL_COPY */ ? 100 : 0;
+        if (wait(handle, grace) !== 0) throw LocalizedError.english('error.sameUserInspection', undefined, { cause: e });
       } finally { check(close(handle), 'CloseHandle'); }
     }
     if (lastError() !== 18 /* ERROR_NO_MORE_FILES */) check(false, 'Process32NextW');

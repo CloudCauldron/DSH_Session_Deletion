@@ -32,11 +32,11 @@ void test('uploads wait for GC and prompt bindings remain synchronous', async ()
   maintenance = runtime.barrier.exclusive(() => new Promise<void>(resolve => { finish = resolve; }));
   const upload = uploads.uploadStream({ sessionId: f.ids.main });
   await delay(20); assert.equal(uploadsCalled, 0);
-  assert.throws(() => uploads.bindPrompt({ id: f.ids.main }, [], 'request'), /正在清理/);
+  assert.throws(() => uploads.bindPrompt({ id: f.ids.main }, [], 'request'), /Session cleanup is in progress/);
   finish(); await maintenance; await upload; assert.equal(uploadsCalled, 1);
   runtime.locked.add(f.ids.main);
-  await assert.rejects(uploads.uploadImageStream({ sessionId: f.ids.main }), /此会话/);
-  assert.throws(() => uploads.bindPrompt({ id: f.ids.main }, [], 'request'), /此会话/);
+  await assert.rejects(uploads.uploadImageStream({ sessionId: f.ids.main }), /This session is being deleted/);
+  assert.throws(() => uploads.bindPrompt({ id: f.ids.main }, [], 'request'), /This session is being deleted/);
   uploads.retirePrompt({ id: f.ids.main }, 'request');
   assert.equal(retired, 1, 'retirement only removes references and must remain available during disposal');
  } finally { finish?.(); await maintenance; dispose?.(); await f.cleanup(); }
@@ -57,7 +57,7 @@ void test('GC snapshots retain staged upload references', async () => {
  assert.equal(disposed, true);
 });
 
-for (const change of ['staged', 'session/event', 'transient-session', 'maintenance', 'read-failure']) void test(`size preview rejects ${change} changes and releases its subscriptions`, async () => {
+for (const change of ['staged', 'session/event', 'transient-session', 'publication', 'maintenance', 'read-failure']) void test(`size preview rejects ${change} changes and releases its subscriptions`, async () => {
  const f = await fixture(); const readdir = fs.readdir;
  try {
   const hash = 'c'.repeat(64), attachment = { attachmentId: 'sha256:' + hash };
@@ -66,10 +66,11 @@ for (const change of ['staged', 'session/event', 'transient-session', 'maintenan
   const stagedFiles = new WeakMap<object, Map<string, { attachment: unknown }>>(), events: unknown[] = [], listeners = new Map<string, Set<(...args: never[]) => unknown>>();
   const emit = (name: string) => { for (const listener of listeners.get(name) || []) listener(); };
   const runtime = makeRuntime({
-   sessionDeletionGate: { home: f.home }, sessions: { list: () => [session] }, fileUploads: { stagedFiles },
+   sessionDeletionGate: { home: f.home, healthy: () => true }, sessions: { list: () => [session] }, fileUploads: { stagedFiles },
    sessionQuery: { observeSession: async () => ({ header: session.header, events, [Symbol.dispose]() {} }) },
    on(name, listener) { const group = listeners.get(name) || new Set<(...args: never[]) => unknown>(); listeners.set(name, group); group.add(listener); return () => group.delete(listener); },
   });
+  await fs.mkdir(join(stateDir(f.home), 'hosts'), { recursive: true });
   let injected = false;
   fs.readdir = (async (...args: Parameters<typeof readdir>) => {
    const path = args[0];
@@ -80,16 +81,17 @@ for (const change of ['staged', 'session/event', 'transient-session', 'maintenan
     if (change === 'transient-session') {
      emit('session/created'); await f.session('transient', {}, [attachment]); emit('session/event'); emit('session/disposed');
     }
+    if (change === 'publication') await runtime.barrier.read(() => {});
     if (change === 'maintenance') runtime.maintenance = 'gc';
     if (change === 'read-failure') throw new Error('Injected preview read failure');
    }
    return readdir(...args);
   }) as typeof readdir;
   syncBuiltinESMExports();
-  await assert.rejects(runtime.garbageSize(), change === 'read-failure' ? /Injected preview read failure/ : /已变化/);
+  await assert.rejects(runtime.garbageSize(), change === 'read-failure' ? /Injected preview read failure/ : /Sessions or attachments have changed/);
   assert.equal([...listeners.values()].reduce((count, group) => count + group.size, 0), 0, 'both success and failure must release the temporary observers');
   runtime.maintenance = undefined;
-  assert.equal(await runtime.garbageSize(), ['maintenance', 'read-failure'].includes(change) ? 2061 : 13);
+  assert.equal(await runtime.garbageSize(), ['publication', 'maintenance', 'read-failure'].includes(change) ? 2061 : 13);
   assert.equal([...listeners.values()].reduce((count, group) => count + group.size, 0), 0);
  } finally { fs.readdir = readdir; syncBuiltinESMExports(); await f.cleanup(); }
 });
@@ -109,7 +111,7 @@ void test('publication timeout releases queued work and never starts cleanup',as
  const reader=gate.read(()=>new Promise<void>(r=>release=r));
  const exclusive=gate.exclusive(async()=>{deleted=true},20);
  const queued=gate.read(()=>42);
- await assert.rejects(exclusive,/未结束/);assert.equal(deleted,false);assert.equal(await queued,42);
+ await assert.rejects(exclusive,/attachment operations are still in progress/);assert.equal(deleted,false);assert.equal(await queued,42);
  release();await reader;
 });
 
@@ -139,8 +141,8 @@ void test('synchronous publications reject during deletion but an existing lease
  const gate = new PublicationBarrier();
  let finish!: () => void;
  const reader = gate.read(async () => { await new Promise<void>(resolve => { finish = resolve; }); gate.assertSynchronousPublication(); });
- const exclusive = gate.exclusive(async () => { assert.throws(() => gate.assertSynchronousPublication(), /正在清理/); });
- assert.throws(() => gate.assertSynchronousPublication(), /正在清理/);
+ const exclusive = gate.exclusive(async () => { assert.throws(() => gate.assertSynchronousPublication(), /Session cleanup is in progress/); });
+ assert.throws(() => gate.assertSynchronousPublication(), /Session cleanup is in progress/);
  finish(); await reader; await exclusive;
  gate.assertSynchronousPublication();
 });
@@ -154,7 +156,7 @@ void test('a child created after HTTP validation requires renewed confirmation b
    workspaceRegistry: { archiveSession: async () => { archived = true; } },
   });
   runtime.headers = async () => new Map(Object.entries(f.headers));
-  await assert.rejects(runtime.remove(f.ids.main, 1234, [f.ids.main]), /子代理集合已变化/);
+  await assert.rejects(runtime.remove(f.ids.main, 1234, [f.ids.main]), /The subagent group has changed/);
   assert.equal(archived, false);
   assert.deepEqual(await listRequests(f.home), []);
  } finally { await f.cleanup(); }

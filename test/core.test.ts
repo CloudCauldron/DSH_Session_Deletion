@@ -287,6 +287,20 @@ void test('GC removes all unreferenced objects and aliases, including never-refe
   } finally { await f.cleanup(); }
 });
 
+void test('a live snapshot adds references to those in the persisted session', async () => {
+  const f = await fixture();
+  try {
+    const hash = digest('staged alongside a disk log');
+    const object = attachment(f, hash);
+    await f.write(object, 'staged');
+    const snapshots = async () => new Map([[f.ids.main, { header: f.headers[f.ids.main], events: ['sha256:' + hash] }]]);
+    assert.equal(await garbageSize(f.home, snapshots), Buffer.byteLength('derived image'));
+    await collectGarbage(f.home, { hooks: { snapshots } });
+    assert.ok(await exists(object));
+    assert.ok(await exists(attachment(f, f.exclusive)));
+  } finally { await f.cleanup(); }
+});
+
 void test('GC protects staged uploads in a live session without a materialized log', async () => {
   const f = await fixture();
   try {
@@ -312,11 +326,12 @@ for (const separator of ['/', '\\']) void test(`GC protects literal attachment p
   } finally { await f.cleanup(); }
 });
 
-for (const mode of ['corrupt', 'torn', 'symlink', 'referenced-symlink', 'opaque']) void test(`GC ${mode} preflight failure deletes nothing`, async () => {
+for (const mode of ['corrupt', 'torn', 'backup-only', 'symlink', 'referenced-symlink', 'opaque']) void test(`GC ${mode} preflight failure deletes nothing`, async () => {
   const f = await fixture();
   try {
     const log = join(f.home, 'sessions/project', f.ids.other, 'session.v4.jsonl.zstd');
     if (mode === 'corrupt') await fs.writeFile(log, 'corrupt');
+    if (mode === 'backup-only') await fs.rename(log, log + '.bak');
     if (mode === 'torn') await fs.appendFile(log, zstdCompressSync('{"tail":true}\n').subarray(0, 7));
     if (mode === 'symlink') await fs.symlink(f.base, join(f.home, 'attachments/v1/objects', 'ff'), 'junction');
     if (mode === 'referenced-symlink') await fs.symlink(join(f.home, 'attachments/v1/objects'), join(attachment(f, f.exclusive, 'files'), 'bad-link'), 'junction');

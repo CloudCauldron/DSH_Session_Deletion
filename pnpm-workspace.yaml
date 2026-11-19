@@ -1,4 +1,4 @@
 allowBuilds:
   koffi: true
 minimumReleaseAgeExclude:
-  - '@deepseek-ai/dsh-host-webserver@0.2.2-rc.2'
+  - '@deepseek-ai/dsh-host-webserver@0.2.2-rc.5'

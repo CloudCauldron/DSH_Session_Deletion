@@ -2,6 +2,7 @@
 import * as fs from 'node:fs/promises';
 import { randomUUID } from 'node:crypto';
 import { join } from 'node:path';
+import { stateDir } from '../lib/core.js';
 import type { HostContext } from '../lib/host.js';
 import type { RuntimeContext } from '../lib/runtime.js';
 import type { DeletionRuntime } from '../src/runtime.ts';
@@ -23,6 +24,8 @@ interface NativeSubagents {
  sendMessage(parent: Agent, child: string, content: Array<{ type: 'text'; text: string }>, options: { signal: AbortSignal }): Promise<unknown>;
 }
 type FixtureContext = Pick<HostContext, 'webServer' | 'connection'> & Pick<RuntimeContext, 'workspaceRegistry' | 'sessions' | 'effect' | 'sessionProjectionCache'> & {
+ attachments: { saveImage(input: unknown): Promise<{ attachmentId: string }> };
+ workspaceRegistry: RuntimeContext['workspaceRegistry'] & { create(path: string): Promise<{ id: string }> };
  agents: { get(id: string): Agent | undefined };
  sessionPersistence: { tracker: { openHandles: Iterable<{ id: string; access: string }> } };
  sessionController: { resolveAgent(id: string): Promise<{ agent: Agent; error?: unknown }>; prompt(request: { sessionId: string }): Promise<unknown> };
@@ -52,7 +55,7 @@ type FixtureContext = Pick<HostContext, 'webServer' | 'connection'> & Pick<Runti
  on(name: 'workspace/session-activity', callback: (request: { sessionId: string }, next: () => Promise<Array<{ kind: string }>>) => Promise<Array<{ kind: string }>>): () => void;
  on(name: 'agent/pre-step', callback: (event: { agent: Agent; signal: AbortSignal }, next: () => Promise<unknown>) => Promise<unknown>): () => void;
 };
-export const inject=['webServer','connection','agents','sessionController','sessionProjectionCache','workspaceRegistry','sessions','sessionPersistence','fileUploads','sessionDeletionRuntime','subagents','jobs','schedule','terminals'];
+export const inject=['attachments','webServer','connection','agents','sessionController','sessionProjectionCache','workspaceRegistry','sessions','sessionPersistence','fileUploads','sessionDeletionRuntime','subagents','jobs','schedule','terminals'];
 export function apply(ctx: FixtureContext){
  const heldSteps=new Set<string>(),activeSteps=new Set<string>(),externalStopped=new Set<string>(),jobStopped=new Set<string>();
  let releaseExternal: (()=>void)|undefined;
@@ -93,6 +96,8 @@ export function apply(ctx: FixtureContext){
   return sessionId===visualActivityId?[...activity,{kind:'job',items:[{id:'visual-reference',label:'样式核对用后台任务'}]}]:activity;
  });
  const holds=new Map<string, () => void>();let releaseDelete: (() => void) | undefined;let holdId: string | undefined;
+ let importedImage: string | undefined;
+ const releaseImage=defer();
  let holdGc=false,releaseGc: (() => void) | undefined;
  const runtime=ctx.sessionDeletionRuntime, snapshots=runtime.snapshots;
  runtime.snapshots=async function(){if(holdGc)await new Promise<void>(resolve=>{releaseGc=resolve});return snapshots.call(this)};
@@ -105,7 +110,19 @@ export function apply(ctx: FixtureContext){
   const admission=ctx.connection.admit(req);if('rejection'in admission||admission.peer.principal.kind!=='owner'){res.writeHead(403);res.end();return}
   try{let s='';for await(const chunk of req)s+=chunk;const data=JSON.parse(s||'{}') as { id?: string; otherId: string; text: string; ms: number; cwd:string };
    const path=new URL(req.url || '/','http://localhost').pathname;
-   if(path==='/deletion-test/schedule-race'){
+   if(path==='/deletion-test/import-workspace'){
+    const workspace=await ctx.workspaceRegistry.create(data.cwd);
+    const attachments=ctx.attachments,saveImage=attachments.saveImage;
+    attachments.saveImage=async function(input){
+     const ref=await saveImage.call(this,input);
+     importedImage=ref.attachmentId;await releaseImage.promise;return ref;
+    };
+    ctx.effect(()=>()=>{releaseImage.resolve();attachments.saveImage=saveImage});
+    res.writeHead(200,{'Content-Type':'application/json'});res.end(JSON.stringify({id:workspace.id}));return;
+   }else if(path==='/deletion-test/import-image'){
+    res.writeHead(200,{'Content-Type':'application/json'});res.end(JSON.stringify({id:importedImage}));return;
+   }else if(path==='/deletion-test/release-image'){releaseImage.resolve()}
+   else if(path==='/deletion-test/schedule-race'){
     const resolved=await ctx.sessionController.resolveAgent(data.id!);if(resolved.error)throw resolved.error;
     const service=runtime.schedule! as NonNullable<DeletionRuntime['schedule']>&{resolveTarget(target:{kind:string;sessionId?:string},signal?:AbortSignal):Promise<unknown>};
     const task=await ctx.schedule.create({title:'Retarget race',prompt:'Offline',timing:{kind:'after',after_seconds:3600},target:{kind:'session',sessionId:data.otherId}});
@@ -180,10 +197,10 @@ export function apply(ctx: FixtureContext){
     const ids=[...ctx.sessionDeletionRuntime.agentRestorers.keys()].map(agent=>agent.id);
     res.writeHead(200,{'Content-Type':'application/json'});res.end(JSON.stringify({ids}));return;
    }else if(path==='/deletion-test/block-status'){
-    const path=join(ctx.sessionDeletionRuntime.home,'session-deletion/status.json');
+    const path=join(stateDir(ctx.sessionDeletionRuntime.home),'status.json');
     await fs.rm(path,{force:true});await fs.mkdir(path);
    }else if(path==='/deletion-test/unblock-status'){
-    await fs.rmdir(join(ctx.sessionDeletionRuntime.home,'session-deletion/status.json'));
+    await fs.rmdir(join(stateDir(ctx.sessionDeletionRuntime.home),'status.json'));
    }else if(path==='/deletion-test/direct-input'){
     ctx.agents.get(data.id!)!.inject({id:randomUUID(),role:'user',source:{kind:'user',rpcId:randomUUID(),clientTimeZone:'Asia/Taipei'},content:[{type:'text',text:'parallel queued input'}]});
    }else if(path==='/deletion-test/clear-input'){ctx.agents.get(data.id!)!.cancel({kind:'user'})

@@ -7,7 +7,7 @@ interface DeletionClientContext {
         uid: number | null;
     };
     locale: {
-        register(namespace: string, locale: string, dictionary: Record<string, string>): () => void;
+        register(namespace: string, dictionaries: Record<string, Record<string, string>>): () => void;
         bind(namespace: string): (key: string, params?: Record<string, unknown>) => string;
         getSnapshot(): {
             active: string;

@@ -26,10 +26,12 @@ export async function waitingHosts(state: string): Promise<Set<number>> {
 
 export async function otherHosts(home: string, excluded: Set<number>): Promise<number[]> {
   const actual = await fs.realpath(home);
-  const hosts = await processes(excluded, ['node', 'nodejs', 'dsh'], args => args.some(arg => {
-    const path = arg.replaceAll('\\', '/').toLowerCase();
-    return path.includes('@deepseek-ai/dsh/') || path.includes('deepseek-harness') || /\/dsh(?:\.exe)?$/.test(path);
-  }));
+  const hosts = await processes(excluded, ['node', 'nodejs', 'dsh', 'electron', 'dsh-desktop', 'deepseek-harness', 'deepseek harness'], (args, cwd) =>
+    args.some((arg, index) => {
+      const path = resolve(cwd, arg).replaceAll('\\', '/').toLowerCase();
+      return path.endsWith('/@deepseek-ai/dsh/lib/bin.js') || /\/@deepseek-ai\/dsh-desktop-host\/lib\/(?:index|cli)\.js$/.test(path)
+        || path.includes('/deepseek-harness/apps/cli/') || (index <= 1 && /\/dsh(?:\.exe)?$/.test(path));
+    }));
   const found: number[] = [];
   for (const host of hosts) {
     const env = (name: string) => host.env.find(row => row.startsWith(name + '='))?.slice(name.length + 1);
@@ -80,12 +82,12 @@ async function offline(options: GuardOptions): Promise<void> {
 
 export async function runGuard(options: GuardOptions, announce: (line: string) => void = console.log): Promise<void> {
   options.home = resolve(options.home);
-  await safePath(options.home, { directory: true });
   const state = stateDir(options.home);
-  await privateDir(join(state, 'hosts'));
-  const lifecycle = join(await fs.realpath(state), 'lifecycle.lock');
   let marker: string | undefined; let lock: Lock | undefined; let ready = false;
   try {
+    await safePath(options.home, { directory: true });
+    await privateDir(join(state, 'hosts'));
+    const lifecycle = join(await fs.realpath(state), 'lifecycle.lock');
     if (options.hostPid) {
       if (!options.hostBirth || await birth(options.hostPid) !== options.hostBirth) throw LocalizedError.english('error.hostExitedBeforeGuard');
       marker = join(state, 'hosts', `${options.hostPid}-${options.hostBirth}.json`);

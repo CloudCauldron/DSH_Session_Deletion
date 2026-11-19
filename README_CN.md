@@ -4,7 +4,7 @@
 
 ## **1 - 项目简介**
 
-<span style="margin-left:2em;">​</span>DeepSeek Harness `0.2.2-rc.2` 原生仅提供会话归档功能。随着日常使用与多智能体协作的增多，历史会话、子代理记录以及关联的文件和图片附件会长期滞留在本地磁盘中。`dsh-session-deletion` 弥补了这一空缺，为 DSH 带来了两项关键的维护能力：
+<span style="margin-left:2em;">​</span>DeepSeek Harness `0.2.2-rc.5` 原生仅提供会话归档功能。随着日常使用与多智能体协作的增多，历史会话、子代理记录以及关联的文件和图片附件会长期滞留在本地磁盘中。`dsh-session-deletion` 弥补了这一空缺，为 DSH 带来了两项关键的维护能力：
 
 - **会话删除**：移除目标会话及其子代理的日志与投影缓存，清理工作区中的会话关联及相关配置。
 - **残留附件与缓存清理 (GC)**：在系统空闲时智能扫描所有存活会话，精准识别并清理无引用的孤立附件与本地图片缓存，释放磁盘空间。
@@ -57,13 +57,15 @@
 
 ## **4 - 环境要求**
 
-- **DeepSeek Harness**：`0.2.2-rc.2`（CLI 默认 Web 配置或 DSH Desktop）
+- **DeepSeek Harness**：`0.2.2-rc.5`（CLI 默认 Web 配置或 DSH Desktop）
 - **操作系统**：Linux、Windows
 - **Node.js**：`>= 24.9.0`
 
 ## **5 - 安装与配置**
 
 ### **5.1 - 安装插件**
+
+升级前请先让旧版本完成待恢复的删除任务，再停止 DSH 并切换版本。
 
 1. 在本仓库目录下构建编译产物：
 
@@ -112,15 +114,16 @@
 dsh plugin --profile web remove dsh-session-deletion
 ```
 
-完成待恢复删除并停止 DSH 后，按需删除实际 `DSH_HOME` 下的 `session-deletion` 目录；默认位置为 `~/.dsh/session-deletion`。
+完成待恢复删除并停止 DSH 后，按需删除实际 `DSH_HOME` 下的 `.dsh-session-deletion` 目录；默认位置为 `~/.dsh/.dsh-session-deletion`。
 
 ## **6 - 开发与测试**
 
-<span style="margin-left:2em;">​</span>源码与全部测试均使用 TypeScript，建仍通过 `@typescript/native` 别名使用 TypeScript 7，`typescript` 别名仅为 ESLint 提供 TypeScript 6 兼容 API，参照 [Microsoft 的并行使用说明](https://devblogs.microsoft.com/typescript/announcing-typescript-7-0/#running-side-by-side-with-typescript-60)。
+<span style="margin-left:2em;">​</span>源码与全部测试均使用 TypeScript，构建通过 `@typescript/native` 别名使用 TypeScript 7，`typescript` 别名仅为 ESLint 提供 TypeScript 6 兼容 API，参照 [Microsoft 的并行使用说明](https://devblogs.microsoft.com/typescript/announcing-typescript-7-0/#running-side-by-side-with-typescript-60)。
 
 ```bash
 pnpm lint              # ESLint 正确性与异步检查
 pnpm check             # 源码与测试的严格 TypeScript 类型检查
 pnpm test              # 运行单元测试
-pnpm test:release      # 运行发布测试
+pnpm test:integration  # 使用 Chrome 在独立的 DSH Web 配置中测试
+pnpm test:release      # 依次运行全部四项检查
 ```

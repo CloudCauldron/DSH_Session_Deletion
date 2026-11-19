@@ -130,12 +130,18 @@ void test('startup lock timeout neither deletes data nor overwrites the active o
   } finally {await lock?.close();await f.cleanup();}
 });
 
-void test('an empty recovery queue still refuses another DSH host using the same home', async () => {
+for (const desktop of [false, true]) void test(`an empty recovery queue refuses another ${desktop ? 'Desktop' : 'CLI'} host using the same home`, async () => {
   const f = await fixture();
   // A disposable Node process with DSH-shaped argv models a host whose guard
   // has exited. It never imports DSH or accesses the fixture's session files.
-  const host = spawn(process.execPath, ['-e', 'setInterval(()=>{},1000)', '/tmp/@deepseek-ai/dsh/lib/bin.js'], {
-    env: { ...process.env, DSH_HOME: f.home }, stdio: 'ignore',
+  const entry = desktop ? 'app.asar/dsh/node_modules/@deepseek-ai/dsh-desktop-host/lib/index.js' : '@deepseek-ai/dsh/lib/bin.js';
+  let executable = process.execPath;
+  if (desktop && process.platform === 'win32') {
+    executable = join(f.base, 'DeepSeek Harness.exe');
+    await fs.copyFile(process.execPath, executable);
+  }
+  const host = spawn(executable, ['-e', 'setInterval(()=>{},1000)', entry], {
+    argv0: desktop ? 'DeepSeek Harness' : executable, cwd: f.base, env: { ...process.env, DSH_HOME: f.home }, stdio: 'ignore',
   });
   const done = finished(host);
   try {

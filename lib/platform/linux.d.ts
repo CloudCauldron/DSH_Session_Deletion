@@ -7,5 +7,5 @@ export declare function secureDir(path: string, firstCreated?: string): Promise<
 export declare function syncDir(path: string): Promise<void>;
 export declare function rename(from: string, to: string): Promise<void>;
 export declare function birth(pid: number): Promise<string | undefined>;
-export declare function processes(excluded: Set<number>, executables: readonly string[], matches: (args: readonly string[]) => boolean): Promise<ProcessInfo[]>;
+export declare function processes(excluded: Set<number>, executables: readonly string[], matches: (args: readonly string[], cwd: string) => boolean): Promise<ProcessInfo[]>;
 export declare function tryLock(path: string, create?: boolean, _machineWide?: boolean): Promise<Lock | undefined>;

@@ -10,7 +10,6 @@ export interface HostContext {
         root: string;
     };
     connection: {
-        requestRejection(request: IncomingMessage): number | undefined;
         admit(request: IncomingMessage): {
             rejection: number;
         } | {

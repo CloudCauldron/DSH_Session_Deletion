@@ -148,10 +148,10 @@ void test('the shared deadline invalidates deletion while late native cleanup re
   try {
     s.runtime.stopTimeoutMs = 200;
     s.root.status = 'idle'; s.root.whenIdle = () => cleanup.promise; // maintenance is publicly idle
-    await assert.rejects(s.remove(), /30 秒/);
+    await assert.rejects(s.remove(), /did not stop within 30 seconds/);
     assert(s.runtime.isLocked(s.root.id)); assert.equal(s.runtime.deletionRunning, true);
     assert(s.agents.has(s.root.id)); assert.deepEqual(await listRequests(s.f.home), []);
-    await assert.rejects(s.remove(), /另一项清理/);
+    await assert.rejects(s.remove(), /Another cleanup is already in progress/);
     cleanup.resolve(); await s.drained();
     assert.equal(s.runtime.isLocked(s.root.id), false); assert(s.agents.has(s.root.id));
     assert.deepEqual(await listRequests(s.f.home), []);
@@ -178,7 +178,7 @@ void test('manager replacement during stopping prevents commit without dropping 
   const s = await stoppingFixture();
   try {
     s.root.cancel = () => { s.subagents.manager = { ...s.manager, resident: new Map() }; };
-    await assert.rejects(s.remove(), /确认/);
+    await assert.rejects(s.remove(), /confirm/);
     assert(s.agents.has(s.root.id)); assert.deepEqual(s.disposed, []);
     assert.deepEqual(await listRequests(s.f.home), []);
   } finally { await s.f.cleanup(); }
@@ -194,7 +194,7 @@ for (const proof of [true, false, undefined]) void test(`job resource-release ac
     s.runtime.ctx.jobs.kill = id => { killed.push(id); s.settleJob(job, proof); };
     if (proof === true) assert.deepEqual(await s.remove(), { deleted: 3 });
     else {
-      await assert.rejects(s.remove(), /无法确认/);
+      await assert.rejects(s.remove(), /Unable to confirm/);
       assert(s.agents.has(s.root.id)); assert.deepEqual(await listRequests(s.f.home), []);
     }
     assert.deepEqual(killed, [job.id]); assert.equal(other.status, 'running'); assert.equal(s.listeners(), 0);
@@ -209,7 +209,7 @@ void test('cleanup failures wait for sibling disposal and never become a success
       s.addAgent(id, { dispose });
       s.manager.resident.set(id, { childId: id, kind: 'local', root: s.root, handle: s.runtime.handles.get(id)! });
     }
-    await assert.rejects(s.remove(), /30 秒/);
+    await assert.rejects(s.remove(), /did not stop within 30 seconds/);
     assert(s.runtime.isLocked(s.root.id)); assert(s.agents.has(s.root.id));
     sibling.resolve(); await s.drained();
     assert.deepEqual(await listRequests(s.f.home), []); assert.equal(s.disposed.includes(s.root.id), false);
@@ -222,7 +222,7 @@ void test('PTY cleanup must remove every owned record and report no retained own
   try {
     s.terminals.set(s.root, ['pty-one', 'pty-two']);
     s.runtime.terminals!.kill = async () => true; // backend falsely reports success without releasing
-    await assert.rejects(s.remove(), /交互终端/);
+    await assert.rejects(s.remove(), /Interactive terminal is still open/);
     assert(s.agents.has(s.root.id)); assert.deepEqual(await listRequests(s.f.home), []);
     s.runtime.terminals!.kill = async (agent, id) => { s.terminals.set(agent, s.terminals.get(agent)!.filter(value => value !== id)); return true; };
     assert.deepEqual(await s.remove(), { deleted: 3 });
@@ -282,7 +282,7 @@ void test('a final read crossing the deadline cannot enqueue after it eventually
     s.runtime.stopTimeoutMs = 200;
     const headers = s.runtime.headers.bind(s.runtime); let reads = 0;
     s.runtime.headers = async () => { if (++reads > 1) await read.promise; return headers(); };
-    await assert.rejects(s.remove(), /30 秒/);
+    await assert.rejects(s.remove(), /did not stop within 30 seconds/);
     assert.deepEqual(s.cancelled, [s.root.id]); assert(s.agents.has(s.root.id));
     assert.deepEqual(await listRequests(s.f.home), []);
     read.resolve(); await delay(10);
@@ -296,7 +296,7 @@ void test('slow read-only preflight expires before sending any stop signal', asy
     s.runtime.stopTimeoutMs = 30;
     const headers = s.runtime.headers.bind(s.runtime);
     s.runtime.headers = async () => { await read.promise; return headers(); };
-    await assert.rejects(s.remove(), /30 秒/);
+    await assert.rejects(s.remove(), /did not stop within 30 seconds/);
     assert.deepEqual(s.cancelled, []); assert.deepEqual(s.disposed, []);
     read.resolve(); await delay(10);
     assert.deepEqual(await listRequests(s.f.home), []);
@@ -316,7 +316,7 @@ void test('a preparation timeout never waits for a second pending-directory insp
       return lstat(...args);
     }) as typeof lstat;
     syncBuiltinESMExports();
-    rejection = assert.rejects(s.remove(), /30 秒/).then(() => { rejected = true; });
+    rejection = assert.rejects(s.remove(), /did not stop within 30 seconds/).then(() => { rejected = true; });
     await Promise.race([entered.promise, rejection.then(() => { throw Error('The test never reached the locked preparation stage'); })]);
     await delay(250);
     assert.equal(rejected, true, 'a finalizer read must not extend an already-expired, uncommitted attempt');
@@ -345,7 +345,7 @@ for (const state of ['pending', 'late-pending', 'completed', 'other'] as const) 
     }
     else await write();
     if (pending) {
-      await assert.rejects(s.remove(), /消息提交|会话操作/);
+      await assert.rejects(s.remove(), /Message submissions or session operations/);
       assert(s.agents.has(s.root.id)); assert.deepEqual(s.disposed, []); assert.deepEqual(await listRequests(s.f.home), []);
       assert.deepEqual(s.cancelled, state === 'pending' ? [] : [s.root.id]);
     } else assert.deepEqual(await s.remove(), { deleted: 3 });

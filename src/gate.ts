@@ -1,16 +1,16 @@
 import { spawn } from 'node:child_process';
-import { readFile, realpath } from 'node:fs/promises';
+import { realpath } from 'node:fs/promises';
 import { resolve, dirname, join } from 'node:path';
 import { fileURLToPath, pathToFileURL } from 'node:url';
 import { createRequire } from 'node:module';
-import { SUPPORTED_DSH, privateDir, stateDir } from './core.js';
+import { SUPPORTED_DSH, STATE_NAME, privateDir, stateDir } from './core.js';
 import { birth } from './platform/index.js';
 import { LocalizedError } from './locale.js';
 
 export interface Gate { home: string; version: string; healthy(): boolean }
 export interface GateContext { provide(name: string, value: Gate): unknown }
 export const name = 'session-deletion-gate';
-const symbol = Symbol.for('dsh-session-deletion.guard');
+const symbol = Symbol.for(STATE_NAME + '.guard');
 const singletons = globalThis as typeof globalThis & { [symbol]?: Promise<Gate> };
 
 export async function hostRequire() {
@@ -18,11 +18,8 @@ export async function hostRequire() {
 }
 
 async function start(): Promise<Gate> {
-  const entry = process.argv[1];
   const require = await hostRequire();
-  let version: string;
-  try { version = require('@deepseek-ai/dsh/package.json').version; }
-  catch { version = JSON.parse(await readFile(join(dirname(entry), '..', 'package.json'), 'utf8')).version; }
+  const { version } = require('@deepseek-ai/dsh/package.json') as { version: string };
   if (version !== SUPPORTED_DSH) throw LocalizedError.english('error.incompatibleDsh', { supported: SUPPORTED_DSH, found: version });
   const { resolveDshHome } = await import(pathToFileURL(require.resolve('@deepseek-ai/dsh-home-paths')).href);
   const home = resolveDshHome();

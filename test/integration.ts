@@ -7,9 +7,10 @@ import { request as httpRequest } from 'node:http';
 import { randomUUID, createHash } from 'node:crypto';
 import { zstdCompressSync } from 'node:zlib';
 import { setTimeout as delay } from 'node:timers/promises';
+import { zipSync, strToU8 } from 'fflate';
 import { chromium, type Browser, type Locator } from 'playwright-core';
 import type { SessionHeader } from '../lib/core.js';
-import { exists, encodeSegment } from '../lib/core.js';
+import { exists, encodeSegment, stateDir, SUPPORTED_DSH } from '../lib/core.js';
 import { tryLock } from '../lib/guard.js';
 
 const repo=resolve('.');
@@ -19,12 +20,11 @@ const temporary=join(base,'tmp');await fs.mkdir(temporary,{mode:0o700});
 process.env.TMP=process.env.TEMP=process.env.TMPDIR=temporary;
 const home=join(base,'home');
 await fs.mkdir(join(home,'profiles/web'),{recursive:true,mode:0o700});
-if(!(await exists(join(home,'profiles/web/package.json')))){
-  await fs.writeFile(join(home,'profiles/web/package.json'),JSON.stringify({name:'dsh-profile-web',private:true,dependencies:{'@deepseek-ai/dsh-terminal':'0.2.2-rc.2'},dsh:{profile:{bundles:['@deepseek-ai/dsh-base','@deepseek-ai/dsh-web-app']}}}));
-  await fs.writeFile(join(home,'profiles/web/pnpm-workspace.yaml'),'packages:\n  - .\nnodeLinker: hoisted\nautoInstallPeers: false\nallowBuilds:\n  koffi: true\n');
-  await fs.writeFile(join(home,'profiles/web/cordis.yml'),'[]\n');
-  await fs.writeFile(join(home,'profiles/web/cordis.patch.yml'),'[]\n');
-}
+
+await fs.writeFile(join(home,'profiles/web/package.json'),JSON.stringify({name:'dsh-profile-web',private:true,dependencies:{'@deepseek-ai/dsh-terminal':SUPPORTED_DSH},dsh:{profile:{bundles:['@deepseek-ai/dsh-base','@deepseek-ai/dsh-web-app','@deepseek-ai/dsh-deepseek-chat-import']}}}));
+await fs.writeFile(join(home,'profiles/web/pnpm-workspace.yaml'),'packages:\n  - .\nnodeLinker: hoisted\nautoInstallPeers: false\nallowBuilds:\n  koffi: true\n');
+await fs.writeFile(join(home,'profiles/web/cordis.yml'),'[]\n');
+await fs.writeFile(join(home,'profiles/web/cordis.patch.yml'),'[]\n');
 const env={...process.env,DSH_HOME:home,DSH_TELEMETRY_DISABLED:'1',pnpm_config_store_dir:join(base,'pnpm-store')};
 // Native Windows cannot spawn a .cmd shim directly; an explicit CLI entry also
 // lets either platform test an isolated DSH installation.
@@ -87,7 +87,7 @@ async function start(){
 async function stop(){
  if(!host)return;assert(exited);
  if(host.exitCode===null&&host.signalCode===null){host.kill('SIGINT');await Promise.race([exited,delay(15000,undefined,{ref:false}).then(()=>{throw new Error('Host did not exit')})]);}
- const path=join(home,'session-deletion/lifecycle.lock');
+ const path=join(stateDir(home),'lifecycle.lock');
  if(process.platform!=='win32'&&!(await exists(path)))return;
  const deadline=Date.now()+15000;
  for(;;){
@@ -120,7 +120,9 @@ try{
  await page.addLocatorHandler(page.getByRole('dialog',{name:'开始使用'}),async dialog=>{const close=dialog.locator('button').first();if(await close.isEnabled())await close.click()},{noWaitAfter:true});
  const status=async()=>{const r=await context.request.get(`http://127.0.0.1:${port}/session-deletion/api/status`);assert.equal(r.status(),200);return r.json()};
  const receipt=async()=>{const r=await context.request.get(`http://127.0.0.1:${port}/session-deletion/api/receipt`);assert.equal(r.status(),200);return r.json()};
- assert.equal((await status()).guardHealthy,true);
+ const initialStatus=await status();
+ assert.equal(initialStatus.guardHealthy,true);
+ assert.equal(initialStatus.version,SUPPORTED_DSH);
  const initialReceipt=await receipt();
  assert.deepEqual(initialReceipt,{ok:true,revision:'',deletedIdHashes:[]});
  assert.deepEqual((await status()).receipt,{revision:'',count:0});
@@ -300,7 +302,9 @@ try{
  await sizeLoading.waitFor();
  assert.equal(await sizeLoading.locator('svg[data-state="ongoing"]').count(),1,'size preview uses the native StateDot spinner');
  assert.notEqual(await sizeLoading.locator('svg g').evaluate(el=>getComputedStyle(el).animationName),'none','the native loading circle animates');
+ const sizeResponse=page.waitForResponse(r=>new URL(r.url()).pathname==='/session-deletion/api/gc-size');
  releaseSize();
+ const sizeResult=await sizeResponse;assert.equal(sizeResult.status(),200,await sizeResult.text());
  await page.getByRole('menuitem',{name:gcMenuName,exact:true}).click();
  await page.getByRole('dialog',{name:'清理残留附件与缓存？',exact:true}).waitFor();
  await page.getByText('将移除无关联的本地附件及临时图片缓存以释放空间，操作期间请确保其他会话处于空闲状态。',{exact:true}).waitFor();
@@ -323,6 +327,11 @@ try{
  await page.getByRole('button',{name:'确认清理',exact:true}).click();
  for(let i=0;i<100;i++){if((await (await controls('gc-held')).json()).held)break;await delay(50)}
  assert.equal((await (await controls('gc-held')).json()).held,true);
+ const importArchive=(workspace:string,data:Buffer)=>context.request.post(`http://127.0.0.1:${port}/api/deepseek-chat-import/archive?workspaceId=${workspace}`,{
+  headers:{'Content-Type':'application/octet-stream'},data,
+ });
+ const busyImport=await importArchive('unused',Buffer.alloc(0));
+ assert.equal((await busyImport.json()).outcome.error.reason,'busy');
  await page.getByRole('button',{name:'正在清理残留附件与缓存…',exact:true}).waitFor();
  await page.waitForFunction(()=>[...document.querySelectorAll('[role="alert"]')].some(el=>el.textContent==='正在清理残留附件与缓存…'));
  const busyDialog=page.getByRole('dialog',{name:'清理残留附件与缓存？',exact:true});
@@ -511,6 +520,73 @@ try{
  await pluginCard.getByText('DSH 会话删除',{exact:true}).waitFor();
  await pluginCard.getByText(zhDescription,{exact:true}).waitFor();
  assert.equal(await pluginCard.getByText(enDescription,{exact:true}).count(),0);
+ // The importer publishes each image before creating the cold Session that owns it.
+ const workspace=await controls('import-workspace',{cwd});assert.equal(workspace.status(),200,await workspace.text());
+ const stamp='2026-01-01T00:00:00Z', file='chat_sessions/export_files/img-pixel.png';
+ const png=Buffer.from('iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAIAAACQd1PeAAAADElEQVR4nGP4z8AAAAMBAQDJ/pLvAAAAAElFTkSuQmCC','base64');
+ const conversation={id:'export',title:'Import GC fixture',inserted_at:stamp,messages:[
+  {id:1,parent_id:null,role:'USER',status:'FINISHED',inserted_at:stamp,fragments:[
+   {type:'REQUEST',content:'Imported image'},
+   {type:'FILE',files:[{id:'img',file_name:'pixel.png',file_size:png.length,inserted_at:stamp,export_path:file,is_image:true,width:1,height:1}]}]},
+  {id:2,parent_id:1,role:'ASSISTANT',status:'FINISHED',inserted_at:stamp,fragments:[{type:'RESPONSE',content:'Offline answer'}]},
+ ]};
+ const archive=zipSync({'manifest.json':strToU8('{"export_format_version":3}'),
+  'chat_session_index.json':strToU8(JSON.stringify([{id:'export',title:conversation.title,pinned:false,inserted_at:stamp,updated_at:stamp,message_count:2}])),
+  'chat_sessions/export.json':strToU8(JSON.stringify(conversation)),[file]:png});
+ const workspaceId=(await workspace.json()).id;
+ const upload=()=>importArchive(workspaceId,Buffer.from(archive));
+ const importedSession=async(request:ReturnType<typeof upload>):Promise<string>=>{
+  const response=await request;
+  assert.equal(response.status(),200);
+  const {outcome}=JSON.parse((await response.text()).trim().split('\n').at(-1)!);
+  assert.equal(outcome.ok,true,JSON.stringify(outcome));assert.equal(outcome.value.sessionIds.length,1);
+  return outcome.value.sessionIds[0];
+ };
+ const gcApi=`http://127.0.0.1:${port}/session-deletion/api/`;
+ const post=(route:string,data:Record<string,unknown>)=>context.request.post(gcApi+route,{headers:{'X-DSH-Session-Deletion':'1'},data});
+ const collect=()=>post('gc',{confirmation:'COLLECT_ORPHAN_ATTACHMENTS'});
+ const reclaimable=()=>context.request.get(gcApi+'gc-size');
+ const importing=upload();
+ let importedHash:string|undefined;
+ try {
+  for(let i=0;i<100&&!importedHash;i++){
+   importedHash=(await (await controls('import-image')).json()).id?.slice(7);
+   if(!importedHash)await delay(50);
+  }
+  assert.ok(importedHash,'import must stage the image before writing its session');
+  for(const response of [await reclaimable(),await collect()]){
+   assert.equal(response.status(),409);assert.deepEqual((await response.json()).messages,[{key:'activity.chatImport'}]);
+  }
+ } finally {await controls('release-image')}
+ const firstOwner=await importedSession(importing),lastOwner=await importedSession(upload());
+ assert.notEqual(firstOwner,lastOwner);
+ const object=join(home,'attachments/v1/objects',importedHash.slice(0,2),importedHash);
+ const imageBytes=(await fs.stat(object)).size;
+ assert.ok(imageBytes>0);
+ const clean=await collect();assert.equal(clean.status(),200,await clean.text());
+ for(const sessionId of [firstOwner,lastOwner]){
+  const preview=await post('preview',{sessionId});assert.equal(preview.status(),200,await preview.text());
+  const deletion=await post('delete',{sessionId,token:(await preview.json()).token,confirmation:'DELETE_SESSION'});
+  assert.equal(deletion.status(),200,await deletion.text());assert.equal((await deletion.json()).deleted,1);
+  assert.ok(await exists(object),'session deletion leaves the image for explicit GC');
+  const orphan=sessionId===lastOwner;
+  const size=await reclaimable();assert.equal(size.status(),200,await size.text());
+  assert.equal((await size.json()).bytes,orphan?imageBytes:0);
+  const gc=await collect();assert.equal(gc.status(),200,await gc.text());
+  const {total,objects}=await gc.json();
+  assert.deepEqual({total,objects},orphan?{total:1,objects:1}:{total:0,objects:0});
+  assert.equal(await exists(object),!orphan);
+ }
+ // DSH supports French. The plugin has no French catalog, so its controls use English.
+ await settings.getByRole('button',{name:'通用设置',exact:true}).click();
+ await settings.getByRole('button',{name:'中文',exact:true}).click();
+ await page.getByRole('menuitem',{name:'Français',exact:true}).click();
+ await page.waitForFunction(()=>document.documentElement.lang==='fr');
+ await settings.getByRole('button',{name:'Fermer',exact:true}).click();
+ await page.locator('nav').getByRole('button',{name:'Plus',exact:true}).click();
+ await page.getByRole('menuitem',{name:/^Free Up Space/}).click();
+ await page.getByRole('dialog',{name:'Clean up orphaned attachments and cache?',exact:true})
+  .getByRole('button',{name:'Cancel',exact:true}).click();
  assert.deepEqual(errors,[]);
  console.log('INTEGRATION PASS: active native turns, cold-resumed and external subagents, jobs, schedules, preparation UI locks, private deletion, isolated publication, GC, recovery, and live zh/en metadata');
 }catch(e){

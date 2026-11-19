@@ -52,8 +52,9 @@ function localeFixture() {
   const listeners = new Set<() => void>();
   let snapshot = { active: 'zh', revision: 0 };
   return {
-    register(_namespace: string, locale: string, dictionary: Record<string, string>) {
-      registered.set(locale, dictionary); return () => { registered.delete(locale); };
+    register(_namespace: string, dictionaries: Record<string, Record<string, string>>) {
+      for (const [locale, entries] of Object.entries(dictionaries)) registered.set(locale, entries);
+      return () => registered.clear();
     },
     bind() { return (key: string, params?: Record<string, unknown>) =>
       (registered.get(snapshot.active)?.[key] ?? registered.get('en')?.[key] ?? key)
@@ -187,7 +188,7 @@ void test('receipt sync fetches only on revision changes, retries failures and k
   });
 });
 
-void test('deletion copy and API errors follow locale changes, retain Chinese fallback and allow running sessions', async () => {
+void test('deletion copy and API errors follow locale changes, use English for missing translations and allow running sessions', async () => {
   const id = 'session-copy-test';
   const rows = { [id]: { id, running: false, retainedBy: { mainView: 1 } } };
   const components = new Map<string, () => MockNode>();
@@ -202,7 +203,9 @@ void test('deletion copy and API errors follow locale changes, retain Chinese fa
   let pending: PendingDeletion[] = [];
   const closeButton = { disabled: false };
   const locale = localeFixture();
-  const translated = { ...dictionaries, en: { 'delete.checking': '[en] checking', 'delete.menu': '[en] delete', 'error.guardUnavailable': '[en] guard unavailable' } };
+  const zh = { ...dictionaries.zh };
+  delete zh['delete.confirm'];
+  const translated = { zh, fr: { 'session.unnamed': 'Sans titre' }, en: { ...dictionaries.en, 'delete.checking': '[en] checking', 'delete.menu': '[en] delete', 'error.guardUnavailable': '[en] guard unavailable' } };
   const preview = new Promise<DeletionPreview>(resolve => { resolvePreview = resolve; });
   const ui = { Modal: 'NativeModal', MenuItemButton: 'NativeMenu', Button: 'NativeButton', IconTrashOutlineRegular: 'NativeIcon' };
   const react = {
@@ -263,19 +266,22 @@ void test('deletion copy and API errors follow locale changes, retain Chinese fa
     menu.resolve({ sessionId: id, displayTitle: 'Test' })[0].run();
     const render = () => { const component = components.get('session-deletion.dialog'); assert(component); return nodes(component()); };
     assert.ok(render().includes('正在检查会话状态…'));
-    locale.setLocale('en');
+    locale.setLocale('fr');
     assert.ok(render().includes('[en] checking'));
     assert.equal(menu.resolve({ sessionId: id, displayTitle: 'Test' })[0].label, '[en] delete');
     assert.ok(menu.observe().includes(locale));
     resolvePreview({ count: 1, token: 'fixture', archived: false });
     await new Promise(setImmediate);
     rows[id].running = true;
+    locale.setLocale('zh');
     const current = render();
     assert.equal(current.includes('会话正在运行，暂时无法删除'), false);
-    const confirm = current.find((node): node is MockElement => isElement(node) && node.type === ui.Button && nodes(node.props.children).includes('确认删除'));
+    const confirm = current.find((node): node is MockElement => isElement(node) && node.type === ui.Button && nodes(node.props.children).includes(dictionaries.en['delete.confirm']));
     assert(confirm);
     assert.equal(confirm.props.disabled, false);
     assert.equal(menu.resolve({ sessionId: id, displayTitle: 'Test' })[0].disabled, false);
+    assert.equal(element(current.find(node => isElement(node) && node.type === ui.Modal)).props.title, dictionaries.zh['delete.title']);
+    locale.setLocale('en');
     rows[id].running = false; previewFailed = true;
     menu.resolve({ sessionId: id, displayTitle: 'Test' })[0].run();
     await new Promise(setImmediate);
@@ -370,6 +376,10 @@ void test('GC menu shows a native spinner, formats binary units and reports fail
     } } },
     effect(callback, label) { if (label.startsWith('session-deletion locale')) callback(); },
   });
+  const icon = element(element(menu({ onDismiss() {} })).props.icon as MockNode);
+  assert.equal(icon.type, 'svg');
+  assert.equal(icon.props.viewBox, '0 0 256 256');
+  assert.match(String(element(nodes(icon.props.children)[0]).props.d), /^M235\.5 216\.81c/, 'the cleanup action keeps its broom artwork');
   const render = () => element(element(menu({ onDismiss() {} })).props.children);
   const text = (value: MockNode): string => typeof value === 'string' ? value : Array.isArray(value) ? value.map(text).join('') : isElement(value) ? text(value.props.children) : '';
   const cases: Array<[number, string]> = [

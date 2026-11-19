@@ -4,7 +4,7 @@
 
 ## **1 - Overview**
 
-<span style="margin-left:2em;">​</span>Out of the box, DeepSeek Harness `0.2.2-rc.2` only supports session archiving. As daily usage and multi-agent collaboration grow, historical sessions, subagent records, and associated file and image attachments remain on the local disk indefinitely. `dsh-session-deletion` fills this gap by bringing two key maintenance capabilities to DSH:
+<span style="margin-left:2em;">​</span>Out of the box, DeepSeek Harness `0.2.2-rc.5` only supports session archiving. As daily usage and multi-agent collaboration grow, historical sessions, subagent records, and associated file and image attachments remain on the local disk indefinitely. `dsh-session-deletion` fills this gap by bringing two key maintenance capabilities to DSH:
 
 - **Session Deletion**: Removes the logs and projection caches of the target session and its subagents, and cleans up session associations and related configurations in the workspace.
 - **Orphaned Attachment and Cache Cleanup (GC)**: Intelligently scans all live sessions when the system is idle to accurately identify and clean up unreferenced orphaned attachments and local image caches, freeing up disk space.
@@ -57,13 +57,15 @@ By separating the two, routine session deletion only needs to lock the target se
 
 ## **4 - Requirements**
 
-- **DeepSeek Harness**: `0.2.2-rc.2` (CLI default Web profile or DSH Desktop)
+- **DeepSeek Harness**: `0.2.2-rc.5` (CLI default Web profile or DSH Desktop)
 - **Operating System**: Linux, Windows
 - **Node.js**: `>= 24.9.0`
 
 ## **5 - Installation and Configuration**
 
 ### **5.1 - Installing the Plugin**
+
+When upgrading, let the previous version finish pending deletions and stop DSH before switching versions.
 
 1. Build the compiled artifacts in this repository directory:
 
@@ -112,7 +114,7 @@ By separating the two, routine session deletion only needs to lock the target se
 dsh plugin --profile web remove dsh-session-deletion
 ```
 
-After any pending recovery deletions have finished and DSH is stopped, you can optionally delete the `session-deletion` directory under your actual `DSH_HOME`; the default location is `~/.dsh/session-deletion`.
+After any pending recovery deletions have finished and DSH is stopped, you can optionally delete the `.dsh-session-deletion` directory under your actual `DSH_HOME`; the default location is `~/.dsh/.dsh-session-deletion`.
 
 ## **6 - Development and Testing**
 
@@ -122,5 +124,6 @@ After any pending recovery deletions have finished and DSH is stopped, you can o
 pnpm lint              # ESLint correctness and async checks
 pnpm check             # Strict TypeScript type checking for source and tests
 pnpm test              # Run unit tests
-pnpm test:release      # Run release tests
+pnpm test:integration  # Exercise an isolated DSH Web profile in Chrome
+pnpm test:release      # Run all four checks
 ```
