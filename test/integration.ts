@@ -449,7 +449,7 @@ try{
  assert.equal(await page.evaluate(id=>localStorage.getItem('dsh.conversation.'+id),id),null);
  assert.equal(await page.getByText('Offline deletion integration fixture',{exact:true}).count(),0);
  // The native inventory lists one external entry and resolves its shipped locale metadata.
- const zhDescription='DSH 会话的即时删除与残留附件的清理';
+ const zhDescription='DSH 会话的即时删除与残留附件的清理。';
  const enDescription='Immediate session deletion and orphan attachment cleanup for DSH.';
  await page.getByRole('button',{name:'账号菜单',exact:true}).click();
  await page.getByRole('menuitem',{name:'设置',exact:true}).click();
