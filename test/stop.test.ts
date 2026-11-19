@@ -6,7 +6,7 @@ import { join } from 'node:path';
 import { setTimeout as delay } from 'node:timers/promises';
 import { fixture } from './fixtures.ts';
 import { makeRuntime } from './runtime-fixture.ts';
-import { exists, listRequests, stateDir, requestPath } from '../lib/core.js';
+import { familyOf, exists, listRequests, stateDir, requestPath } from '../lib/core.js';
 import type { RuntimeContext } from '../lib/runtime.js';
 import type { DeletionRuntime } from '../src/runtime.ts';
 
@@ -50,8 +50,9 @@ async function stoppingFixture() {
     sessionDeletionGate: { home: f.home, healthy: () => true }, subagents,
     agents: { get: id => agents.get(id) },
     sessions: { get: id => agents.get(id)?.session, list: () => [...agents.values()].map(agent => agent.session) },
-    sessionPersistence: { list: async () => Object.values(f.headers).map(header => ({ header })), stat: async () => ({ sizeBytes: 1 }) },
-    sessionProjectionCache: { table: new Map() }, sessionQuery: {},
+    sessionPersistence: { stat: async () => ({ sizeBytes: 1 }) },
+    sessionProjectionCache: { table: new Map() },
+    sessionQuery: { listSessions: async () => Object.values(f.headers).map(header => ({ header, persisted: true })) },
     workspaceRegistry: { archivedSessionIds: [], archiveSession: async () => { assert.fail('deletion must not archive'); } },
     jobs: {
       start() {}, list: () => [...jobs.values()], kill() {},
@@ -87,7 +88,7 @@ async function stoppingFixture() {
     return agent;
   };
   const root = addAgent(f.ids.main);
-  const ids = runtime.family(new Map(Object.entries(f.headers)), f.ids.main);
+  const ids = familyOf(new Map(Object.entries(f.headers)), f.ids.main);
   const remove = () => runtime.remove(f.ids.main, f.headers[f.ids.main].createdAt, ids);
   const settleJob = (job: Job, proof: boolean | undefined) => {
     job.status = 'killed';

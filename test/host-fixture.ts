@@ -25,13 +25,13 @@ interface NativeSubagents {
 }
 type FixtureContext = Pick<HostContext, 'webServer' | 'connection'> & Pick<RuntimeContext, 'workspaceRegistry' | 'sessions' | 'effect' | 'sessionProjectionCache'> & {
  attachments: { saveImage(input: unknown): Promise<{ attachmentId: string }> };
- workspaceRegistry: RuntimeContext['workspaceRegistry'] & { create(path: string): Promise<{ id: string }> };
+ workspaceRegistry: RuntimeContext['workspaceRegistry'] & { create(path: string): Promise<{ id: string; attachSession(id: string): Promise<void>; detachSession(id: string): Promise<void> }> };
  agents: { get(id: string): Agent | undefined };
- sessionPersistence: { tracker: { openHandles: Iterable<{ id: string; access: string }> } };
+ sessionPersistence: { flush(): Promise<void>; tracker: { openHandles: Iterable<{ id: string; access: string }> } };
  sessionController: { resolveAgent(id: string): Promise<{ agent: Agent; error?: unknown }>; prompt(request: { sessionId: string }): Promise<unknown> };
  fileUploads: { upload(agent: Agent, data: { data: string; name: string }, signal: AbortSignal): Promise<unknown> };
  sessionDeletionRuntime: Pick<DeletionRuntime, keyof DeletionRuntime> & {
-  snapshots: DeletionRuntime['snapshots']; agentRestorers: DeletionRuntime['agentRestorers'];
+  agentRestorers: DeletionRuntime['agentRestorers'];
   stopTimeoutMs: DeletionRuntime['stopTimeoutMs'];
   schedule: DeletionRuntime['schedule']; editSchedule: DeletionRuntime['editSchedule'];
  };
@@ -99,14 +99,14 @@ export function apply(ctx: FixtureContext){
  let importedImage: string | undefined;
  const releaseImage=defer();
  let holdGc=false,releaseGc: (() => void) | undefined;
- const runtime=ctx.sessionDeletionRuntime, snapshots=runtime.snapshots;
- runtime.snapshots=async function(){if(holdGc)await new Promise<void>(resolve=>{releaseGc=resolve});return snapshots.call(this)};
+ const runtime=ctx.sessionDeletionRuntime, persistence=ctx.sessionPersistence, flush=persistence.flush;
+ persistence.flush=async function(){if(holdGc && runtime.gcRunning)await new Promise<void>(resolve=>{releaseGc=resolve});return flush.call(this)};
  const table=ctx.sessionProjectionCache.table;const original=table.delete;
  table.delete=async function(id){if(id===holdId)await new Promise<void>(resolve=>{releaseDelete=resolve});return original.call(this,id)};
  let scheduleRace:{id:string;ready:ReturnType<typeof defer>;retarget:Promise<unknown>;releaseResolve:ReturnType<typeof defer>;releaseDelete:ReturnType<typeof defer>}|undefined;
  let pendingSchedule:{id:string;sessionId:string;release:ReturnType<typeof defer>;finished:Promise<void>;failed:boolean}|undefined;
- ctx.effect(()=>()=>{table.delete=original;for(const release of holds.values())release();releaseDelete?.();releaseGc?.();runtime.snapshots=snapshots});
- ctx.webServer.register({kind:'prefix',path:'/deletion-test',async handler(req,res){
+ ctx.effect(()=>()=>{table.delete=original;for(const release of holds.values())release();releaseDelete?.();releaseGc?.();persistence.flush=flush});
+ ctx.effect(()=>ctx.webServer.register({kind:'prefix',path:'/deletion-test',async handler(req,res){
   const admission=ctx.connection.admit(req);if('rejection'in admission||admission.peer.principal.kind!=='owner'){res.writeHead(403);res.end();return}
   try{let s='';for await(const chunk of req)s+=chunk;const data=JSON.parse(s||'{}') as { id?: string; otherId: string; text: string; ms: number; cwd:string };
    const path=new URL(req.url || '/','http://localhost').pathname;
@@ -119,6 +119,9 @@ export function apply(ctx: FixtureContext){
     };
     ctx.effect(()=>()=>{releaseImage.resolve();attachments.saveImage=saveImage});
     res.writeHead(200,{'Content-Type':'application/json'});res.end(JSON.stringify({id:workspace.id}));return;
+   }else if(path==='/deletion-test/attach'||path==='/deletion-test/detach'){
+    const workspace=await ctx.workspaceRegistry.create(data.cwd);
+    if(path.endsWith('/attach'))await workspace.attachSession(data.id!);else await workspace.detachSession(data.id!);
    }else if(path==='/deletion-test/import-image'){
     res.writeHead(200,{'Content-Type':'application/json'});res.end(JSON.stringify({id:importedImage}));return;
    }else if(path==='/deletion-test/release-image'){releaseImage.resolve()}
@@ -223,5 +226,5 @@ export function apply(ctx: FixtureContext){
    else throw Error('Unknown test route');
    res.writeHead(200,{'Content-Type':'application/json'});res.end('{"ok":true}');
   }catch(e){const status=typeof e==='object'&&e!==null&&'status' in e&&typeof e.status==='number'?e.status:500;res.writeHead(status,{'Content-Type':'application/json'});res.end(JSON.stringify({error:e instanceof Error?e.message:String(e)}))}
- }});
+ }}), 'session-deletion test controls');
 }

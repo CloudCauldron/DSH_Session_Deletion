@@ -12,8 +12,11 @@ function readMessages(file: string): Record<string, string> {
 
 const english = readMessages('en.json');
 export const dictionaries: Record<string, Record<string, string>> = { en: english };
-for (const file of readdirSync(directory)) {
-  if (file === 'en.json' || !/^[a-z]{2,8}(?:-[a-z0-9]{1,8})*\.json$/i.test(file)) continue;
+let files: string[] = [];
+try { files = readdirSync(directory); }
+catch { /* en.json can be readable even when the directory cannot be listed. */ }
+for (const file of files) {
+  if (file.toLowerCase() === 'en.json' || !/^[a-z]{2,8}(?:-[a-z0-9]{1,8})*\.json$/i.test(file)) continue;
   try { dictionaries[file.slice(0, -5).toLowerCase()] = readMessages(file); }
   catch { /* An unavailable translation leaves DSH's English fallback in effect. */ }
 }
@@ -45,10 +48,5 @@ export class LocalizedError extends Error {
     super([...translated, ...raw].join(template('error.separator')), options);
     this.messages = messages;
     if (raw.length) this.diagnostic = raw.join('\n');
-  }
-
-  /** Keep the original English CLI diagnostic while exposing its keys to the browser. */
-  static english(key: string, params?: LocalizedMessage['params'], options?: DiagnosticOptions): LocalizedError {
-    return new LocalizedError(key, params, { ...options, locale: 'en' });
   }
 }

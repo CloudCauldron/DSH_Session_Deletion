@@ -20,12 +20,12 @@ export async function hostRequire() {
 async function start(): Promise<Gate> {
   const require = await hostRequire();
   const { version } = require('@deepseek-ai/dsh/package.json') as { version: string };
-  if (version !== SUPPORTED_DSH) throw LocalizedError.english('error.incompatibleDsh', { supported: SUPPORTED_DSH, found: version });
+  if (version !== SUPPORTED_DSH) throw new LocalizedError('error.incompatibleDsh', { supported: SUPPORTED_DSH, found: version });
   const { resolveDshHome } = await import(pathToFileURL(require.resolve('@deepseek-ai/dsh-home-paths')).href);
   const home = resolveDshHome();
   await privateDir(stateDir(home));
   const started = await birth(process.pid);
-  if (!started) throw LocalizedError.english('error.hostIdentity');
+  if (!started) throw new LocalizedError('error.hostIdentity');
   const project = resolve(dirname(fileURLToPath(import.meta.url)), '..');
   let healthy = true;
   const child = spawn(process.execPath, [join(project, 'lib', 'guard.js'), home, String(process.pid), started], {
@@ -34,13 +34,13 @@ async function start(): Promise<Gate> {
   });
   child.on('exit', () => { healthy = false; });
   await new Promise<void>((accept, reject) => {
-    const timer = setTimeout(() => reject(LocalizedError.english('error.guardStartTimeout')), 65000);
+    const timer = setTimeout(() => reject(new LocalizedError('error.guardStartTimeout')), 65000);
     let text = '';
     let partial = '';
     child.on('error', e => { clearTimeout(timer); reject(e); });
     child.on('exit', code => {
       clearTimeout(timer);
-      reject(LocalizedError.english('error.guardExit', { code: String(code) }, { failures: text ? [text.slice(0, 1000)] : [] }));
+      reject(new LocalizedError('error.guardExit', { code: String(code) }, { failures: text ? [text.slice(0, 1000)] : [] }));
     });
     child.stdout.on('data', data => {
       text += String(data); partial += String(data);

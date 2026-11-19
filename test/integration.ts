@@ -40,22 +40,23 @@ const id='session-'+randomUUID();
 const exclusive='a'.repeat(64),shared='b'.repeat(64);
 const stagedShared=createHash('sha256').update('other draft upload').digest('hex');
 const stagedExclusive=createHash('sha256').update('target draft upload').digest('hex');
-const projectKey='--'+encodeSegment(cwd.replace(/[\\/:]+/g,'-').replace(/^-+/,'')||'root').slice(0,251)+'--';
-const sessionDir=join(home,'sessions',projectKey,id);await fs.mkdir(sessionDir,{recursive:true,mode:0o700});
+const projectKey=(path:string)=>'--'+encodeSegment(path.replace(/[\\/:]+/g,'-').replace(/^-+/,'')||'root').slice(0,251)+'--';
+const sessionDir=join(home,'sessions',projectKey(cwd),id);await fs.mkdir(sessionDir,{recursive:true,mode:0o700});
 const log=join(sessionDir,'session.v4.jsonl.zstd');
 const header: SessionHeader={type:'session',version:4,id,createdAt:Date.now(),cwd,isSeeded:false,delegationDepth:0};
 const message={type:'user/message',seq:1,time:Date.now(),surfaceOp:'append',data:{id:randomUUID(),role:'user',source:{kind:'user',rpcId:randomUUID(),clientTimeZone:'Asia/Taipei'},content:[{type:'text',text:'Offline deletion integration fixture'},{type:'text',text:`sha256:${exclusive} sha256:${shared} sha256:${stagedShared}`} ]}};
 const events=[{type:'turn/start',seq:0,time:Date.now(),data:{turn:1}},message,
  {type:'session/title',seq:2,time:Date.now(),data:{title:'Offline deletion integration fixture',messageSeqs:[],source:{kind:'user'}}}];
 await fs.writeFile(log,Buffer.concat([zstdCompressSync(JSON.stringify(header)+'\n'),zstdCompressSync(events.map(e=>JSON.stringify(e)+'\n').join(''))]));
-if(process.platform!=='win32')await fs.writeFile(join(sessionDir,'session.lock'),'');
 async function extraSession(name: string,age: number,attachment?: string,meta: Partial<SessionHeader>={}){
- const extra='session-'+randomUUID();const dir=join(home,'sessions',projectKey,extra);await fs.mkdir(dir,{recursive:true,mode:0o700});
+ const extra='session-'+randomUUID();const dir=join(home,'sessions',projectKey(meta.cwd??cwd),extra);await fs.mkdir(dir,{recursive:true,mode:0o700});
  const extraHeader={...header,id:extra,createdAt:header.createdAt-age,...meta};
  const extraEvents=events.map(e=>({...e,time:e.time-age,data:e.type==='user/message'?{...e.data,id:randomUUID(),content:[{type:'text',text:name+(attachment?' sha256:'+attachment:'')}]}:e.type==='session/title'?{...e.data,title:name}:e.data}));
- const path=join(dir,'session.v4.jsonl.zstd');await fs.writeFile(path,Buffer.concat([zstdCompressSync(JSON.stringify(extraHeader)+'\n'),zstdCompressSync(extraEvents.map(e=>JSON.stringify(e)+'\n').join(''))]));if(process.platform!=='win32')await fs.writeFile(join(dir,'session.lock'),'');return {id:extra,path};
+ const path=join(dir,'session.v4.jsonl.zstd');await fs.writeFile(path,Buffer.concat([zstdCompressSync(JSON.stringify(extraHeader)+'\n'),zstdCompressSync(extraEvents.map(e=>JSON.stringify(e)+'\n').join(''))]));return {id:extra,path};
 }
 const preserved=await extraSession('Preserved fixture',20000,shared);const cold=await extraSession('Archived deletion fixture',10000);
+const oldWorkspace=join(base,'former-project');await fs.mkdir(oldWorkspace);
+const filtered=await extraSession('Filtered workspace membership',90000,undefined,{cwd:oldWorkspace});
 const draftOwner=await extraSession('Draft owner fixture',30000);
 const interrupted=await extraSession('Interrupted deletion fixture',50000);
 const nativeActive=await extraSession('Native active deletion fixture',60000);
@@ -99,14 +100,13 @@ async function stop(){
 }
 try{
  const url=await start();
- const unauthorized=await fetch(`http://127.0.0.1:${port}/session-deletion/api/status`);
- assert.ok([401,403].includes(unauthorized.status),`Unauthenticated status ${unauthorized.status}: ${(await unauthorized.text()).slice(0,400)}`);
- const unauthorizedReceipt=await fetch(`http://127.0.0.1:${port}/session-deletion/api/receipt`);
- assert.ok([401,403].includes(unauthorizedReceipt.status));
- const unauthorizedSize=await fetch(`http://127.0.0.1:${port}/session-deletion/api/gc-size`);
- assert.ok([401,403].includes(unauthorizedSize.status));
- const unauthorizedLocales=await fetch(`http://127.0.0.1:${port}/session-deletion/api/locales`);
- assert.ok([401,403].includes(unauthorizedLocales.status));
+ for(const path of ['status','receipt','gc-size','locales']){
+  const response=await fetch(`http://127.0.0.1:${port}/session-deletion/api/${path}`);
+  assert.ok([401,403].includes(response.status),path);
+  const denied=await response.json();
+  assert.equal(denied.error,'Not authorized');
+  assert.deepEqual(denied.messages,[{key:'error.unauthorized'}]);
+ }
  browser=await chromium.launch({executablePath:process.env.CHROME_PATH||(process.platform==='win32'?join(process.env.PROGRAMFILES!,'Google/Chrome/Application/chrome.exe'):'/opt/google/chrome/chrome'),headless:true,args:['--no-sandbox']});
  // Native UI selectors below use Simplified Chinese, independent of the host locale.
  const context=await browser.newContext({locale:'zh-CN',viewport:{width:1440,height:1000}});
@@ -372,6 +372,8 @@ try{
  assert.equal(await exists(join(home,'attachments/v1/objects',shared.slice(0,2),shared)),true);
  assert.deepEqual(JSON.parse(await fs.readFile(join(home,'llm-deepseek/files-v3.json'),'utf8')).records.map((r: { attachmentId: string })=>r.attachmentId),['sha256:'+shared]);
  const coldProbe=await (await controls('archive-probe',{id:cold.id})).json();assert.equal(coldProbe.archived,true);
+ // A cold session copied from Windows has no pre-existing POSIX writer lock.
+ if(process.platform==='linux')assert.equal(await exists(join(cold.path,'../session.lock')),false);
  const coldPreview=await (await context.request.post(`http://127.0.0.1:${port}/session-deletion/api/preview`,{headers:{'X-DSH-Session-Deletion':'1'},data:{sessionId:cold.id}})).json();assert.equal(coldPreview.archived,true);
  await controls('block-status');
  const coldDeleted=await context.request.post(`http://127.0.0.1:${port}/session-deletion/api/delete`,{headers:{'X-DSH-Session-Deletion':'1'},data:{sessionId:cold.id,token:coldPreview.token,confirmation:'DELETE_SESSION'}});
@@ -450,6 +452,7 @@ try{
  // Restart recovery uses a fresh page while retaining the same browser storage.
  await Promise.all([otherPage.close(),independentPage.close(),page.goto('about:blank')]);
  await stop();
+ await fs.rmdir(oldWorkspace);await fs.writeFile(oldWorkspace,'former workspace directory');
  const again=await start();await page.goto(again);await page.waitForTimeout(2000);
  assert.equal((await status()).pending.length,0);
  assert.equal(await exists(interrupted.path),false,'the pending deletion recovers on restart');
@@ -546,6 +549,17 @@ try{
  const post=(route:string,data:Record<string,unknown>)=>context.request.post(gcApi+route,{headers:{'X-DSH-Session-Deletion':'1'},data});
  const collect=()=>post('gc',{confirmation:'COLLECT_ORPHAN_ATTACHMENTS'});
  const reclaimable=()=>context.request.get(gcApi+'gc-size');
+ const workspacePath=join(home,'storages/workspace.json');
+ const hasFilteredMember=async()=>Object.values(JSON.parse(await fs.readFile(workspacePath,'utf8')).tables.workspaces as Record<string,{sessionIds:string[]}>)
+  .some(row=>row.sessionIds.includes(filtered.id));
+ assert.ok(await hasFilteredMember(),'the stored workspace retains the filtered candidate');
+ const removeSession=async(sessionId:string)=>{
+  const preview=await post('preview',{sessionId});assert.equal(preview.status(),200,await preview.text());
+  const deletion=await post('delete',{sessionId,token:(await preview.json()).token,confirmation:'DELETE_SESSION'});
+  assert.equal(deletion.status(),200,await deletion.text());assert.equal((await deletion.json()).deleted,1);
+ };
+ await removeSession(filtered.id);
+ assert.equal(await hasFilteredMember(),false);
  const importing=upload();
  let importedHash:string|undefined;
  try {
@@ -564,12 +578,29 @@ try{
  const imageBytes=(await fs.stat(object)).size;
  assert.ok(imageBytes>0);
  const clean=await collect();assert.equal(clean.status(),200,await clean.text());
+ const detached=await controls('detach',{cwd,id:firstOwner});assert.equal(detached.status(),200,await detached.text());
  for(const sessionId of [firstOwner,lastOwner]){
-  const preview=await post('preview',{sessionId});assert.equal(preview.status(),200,await preview.text());
-  const deletion=await post('delete',{sessionId,token:(await preview.json()).token,confirmation:'DELETE_SESSION'});
-  assert.equal(deletion.status(),200,await deletion.text());assert.equal((await deletion.json()).deleted,1);
+  await removeSession(sessionId);
+  if(sessionId===firstOwner){
+   const attach=await controls('attach',{cwd,id:sessionId});
+   assert.equal(attach.status(),500);assert.match((await attach.json()).error,/session persistence holds no such session/);
+  }
   assert.ok(await exists(object),'session deletion leaves the image for explicit GC');
   const orphan=sessionId===lastOwner;
+  if(orphan){
+   const indexPath=join(home,'llm-deepseek/files-v3.json'), saved=await fs.readFile(indexPath);
+   const {records}=JSON.parse(saved.toString()) as {records:Array<Record<string,unknown>>};
+   assert.ok(records.length,'the shared attachment still has a valid native upload mapping');
+   const record:Record<string,unknown>={...records[0],attachmentId:'sha256:'+importedHash};
+   const damaged:string=JSON.stringify({formatVersion:3,records:[record,record]});
+   await fs.writeFile(indexPath,damaged);
+   try {
+    for(const response of [await reclaimable(),await collect()]){
+     assert.equal(response.status(),500);assert.deepEqual((await response.json()).messages,[{key:'error.fileCacheSchema'}]);
+    }
+    assert.ok(await exists(object));assert.equal(await fs.readFile(indexPath,'utf8'),damaged);
+   } finally {await fs.writeFile(indexPath,saved)}
+  }
   const size=await reclaimable();assert.equal(size.status(),200,await size.text());
   assert.equal((await size.json()).bytes,orphan?imageBytes:0);
   const gc=await collect();assert.equal(gc.status(),200,await gc.text());

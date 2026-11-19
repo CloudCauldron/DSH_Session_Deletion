@@ -67,6 +67,7 @@
 
     "error.guardExit": "Session Deletion guard exited: {code}",
     "error.guardStartTimeout": "Session Deletion guard startup timed out",
+    "error.runtimeUnavailable": "Session Deletion is no longer active. Reopen the menu after the plugin is enabled.",
     "error.guardUnavailable": "Recovery monitor is unavailable. Please restart DSH.",
     "error.guardUsage": "Usage: {command}",
     "error.homeBusyAtStartup": "Another DSH host or cleanup owns this home; close it before starting DSH",
@@ -86,8 +87,6 @@
 
     "error.notDirectory": "Not a directory: {path}",
     "error.refuseSymlink": "Refusing symlink: {path}",
-    "error.symlinkSessionDir": "Symlink session directory",
-    "error.symlinkUnderSessions": "Symlink under sessions",
     "error.unexpectedEntry": "Unexpected filesystem entry: {path}",
     "error.unexpectedFile": "Unexpected file: {path}",
     "error.wrongFileOwner": "Not owned by this user: {path}",
@@ -122,7 +121,6 @@
     "error.invalidPlanPath": "Invalid deletion plan path",
     "error.pendingDeletion": "An incomplete session deletion is pending. Please restart DSH to recover.",
     "error.pendingQueueFile": "Unexpected pending queue file",
-    "error.previewChanged": "The session or subagents have changed. Please confirm again.",
     "error.previewExpired": "Confirmation expired. Please reopen the delete dialog.",
     "error.targetLifecycleMismatch": "Target lifecycle mismatch",
 
@@ -169,6 +167,6 @@
     "error.cacheAudit": "Post-GC cache audit failed",
     "error.deletedSessionAudit": "Post-deletion session audit failed",
     "error.privateMetadataAudit": "Post-deletion private metadata audit failed",
-    "error.uploadIndexAudit": "Post-GC upload index audit failed"
+    "error.uploadIndexAudit": "Upload mappings still exist after cleanup"
   }
 }

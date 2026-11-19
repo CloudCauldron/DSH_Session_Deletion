@@ -43,8 +43,10 @@ export async function fixture() {
     tables: { workspaces: { project: { title: 'Project', path: '/project', sessionIds: Object.values(ids), createdAt: 0, updatedAt: 1 } } } }));
   await write(join(home, 'storages/schedule.json'), JSON.stringify({ unit: { name: 'schedule', version: 1 },
     tables: { tasks: { a: { sessionId: ids.main }, b: { sessionId: ids.child }, c: { sessionId: ids.fork } } } }));
-  await write(join(home, 'llm-deepseek/files-v3.json'), JSON.stringify({ formatVersion: 3, records: [
-    { attachmentId: 'sha256:' + exclusive, fileId: 'remote-private' }, { attachmentId: 'sha256:' + shared, fileId: 'remote-shared' } ] }));
+  await write(join(home, 'llm-deepseek/files-v3.json'), JSON.stringify({ formatVersion: 3, records: [exclusive, shared].map(hash => ({
+    scope: 'c'.repeat(64), attachmentId: 'sha256:' + hash, variantId: 'sha256:' + hash, fileId: 'file-' + hash,
+    bytes: 5, createdAt: 1, expiresAt: 3600001,
+  })) }));
   const projectFile = join(base, 'project-file.txt'); await write(projectFile, 'user project must survive');
   return { base, home, temporary, ids, headers, exclusive, shared, spillRoot, spill, sharedSpill, write, session, projectFile,
     queue: async () => enqueue(home, headers[ids.main], await planSessionDeletion(home, new Map(Object.entries(headers)), ids.main)),

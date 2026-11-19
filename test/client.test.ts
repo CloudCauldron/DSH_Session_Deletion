@@ -34,16 +34,20 @@ const dictionaries = Object.fromEntries(await Promise.all(['zh', 'en'].map(async
   return [locale, data.messages ?? {}];
 }))) as Record<string, Record<string, string>>;
 
-void test('each error or activity key used by plugin sources has matching bilingual placeholders', async () => {
+void test('the shipped catalogs contain exactly the messages used by the plugin, with matching placeholders', async () => {
   const root = new URL('../src/', import.meta.url);
+  const keys = new Set<string>();
   for (const file of await readdir(root, { recursive: true })) {
     if (!file.endsWith('.ts')) continue;
     const source = await readFile(new URL(file.replaceAll('\\', '/'), root), 'utf8');
-    for (const [, key] of source.matchAll(/['"]((?:error|activity)\.\w+)['"]/g)) {
-      const en = dictionaries.en[key], zh = dictionaries.zh[key];
-      assert.ok(en && zh, file + ': ' + key);
-      assert.deepEqual((en.match(/\{\w+\}/g) ?? []).sort(), (zh.match(/\{\w+\}/g) ?? []).sort(), key);
-    }
+    const pattern = file === 'client.ts'
+      ? /['"]((?:error|activity|common|session|delete|gc|recovery)\.\w+)['"]/g
+      : /['"]((?:error|activity)\.\w+)['"]/g;
+    for (const [, key] of source.matchAll(pattern)) keys.add(key);
+  }
+  for (const catalog of Object.values(dictionaries)) assert.deepEqual(new Set(Object.keys(catalog)), keys);
+  for (const key of keys) {
+    assert.deepEqual((dictionaries.en[key].match(/\{\w+\}/g) ?? []).sort(), (dictionaries.zh[key].match(/\{\w+\}/g) ?? []).sort(), key);
   }
 });
 

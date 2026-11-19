@@ -1,5 +1,6 @@
 /** Detached Node.js supervisor for interrupted deletion recovery before startup or after exit. */
 import * as fs from 'node:fs/promises';
+import { readFileSync, realpathSync } from 'node:fs';
 import { join, resolve } from 'node:path';
 import { userInfo } from 'node:os';
 import { pathToFileURL } from 'node:url';
@@ -24,14 +25,45 @@ export async function waitingHosts(state: string): Promise<Set<number>> {
   return waiting;
 }
 
+function isDshEntry(entry: string): boolean {
+  const path = entry.replaceAll('\\', '/').toLowerCase();
+  if (path.endsWith('/@deepseek-ai/dsh/lib/bin.js') || /\/@deepseek-ai\/dsh-desktop-host\/lib\/(?:index|cli)\.js$/.test(path)
+    || /\/dsh(?:\.exe)?$/.test(path)) return true;
+  if (/\/apps\/cli\/(?:src\/bin\.ts|lib\/bin\.js)$/.test(path)) {
+    // Source checkouts can have any name. Read the CLI package's identity.
+    try { if (JSON.parse(readFileSync(join(entry, '../../package.json'), 'utf8')).name === '@deepseek-ai/dsh') return true; }
+    catch { return true; } // A moved or unreadable checkout could still own this home.
+  }
+  return false;
+}
+
+function isDshHost(args: readonly string[], cwd: string): boolean {
+  for (const [index, arg] of args.entries()) {
+    if (/^(?:-e|-p|--eval|--print)(?:=|$)/.test(arg)) return false;
+    if (arg.startsWith('-')) continue;
+    const entry = resolve(cwd, arg);
+    if (isDshEntry(entry)) return true;
+    if (index > 0) {
+      try {
+        const actual = realpathSync.native(entry);
+        if (actual !== entry && isDshEntry(actual)) return true;
+      } catch (error) {
+        // A loader or preload specifier need not be a path in the target cwd.
+        if (!['ENOENT', 'ENOTDIR', 'EINVAL', 'ENAMETOOLONG'].includes((error as NodeJS.ErrnoException).code ?? '')) throw error;
+      }
+    }
+    // Stop at the script. Only an option with a separate operand could put
+    // another positional before it. Node exposes boolean options' --no- forms.
+    const previous = args[index - 1];
+    if (previous && (!previous.startsWith('-') || previous === '--' || previous.includes('=') || previous === '--expose-internals'
+      || previous.startsWith('--no-') || process.allowedNodeEnvironmentFlags.has('--no-' + previous.slice(2)))) break;
+  }
+  return false;
+}
+
 export async function otherHosts(home: string, excluded: Set<number>): Promise<number[]> {
   const actual = await fs.realpath(home);
-  const hosts = await processes(excluded, ['node', 'nodejs', 'dsh', 'electron', 'dsh-desktop', 'deepseek-harness', 'deepseek harness'], (args, cwd) =>
-    args.some((arg, index) => {
-      const path = resolve(cwd, arg).replaceAll('\\', '/').toLowerCase();
-      return path.endsWith('/@deepseek-ai/dsh/lib/bin.js') || /\/@deepseek-ai\/dsh-desktop-host\/lib\/(?:index|cli)\.js$/.test(path)
-        || path.includes('/deepseek-harness/apps/cli/') || (index <= 1 && /\/dsh(?:\.exe)?$/.test(path));
-    }));
+  const hosts = await processes(excluded, ['node', 'nodejs', 'dsh', 'electron', 'dsh-desktop', 'deepseek-harness', 'deepseek harness'], isDshHost);
   const found: number[] = [];
   for (const host of hosts) {
     const env = (name: string) => host.env.find(row => row.startsWith(name + '='))?.slice(name.length + 1);
@@ -56,7 +88,7 @@ async function offline(options: GuardOptions): Promise<void> {
   const pending = join(state, 'pending');
   const excluded = await waitingHosts(state); excluded.add(process.pid);
   if (options.hostPid && await birth(options.hostPid) === options.hostBirth) excluded.add(options.hostPid);
-  if ((await otherHosts(options.home, excluded)).length) throw LocalizedError.english('error.otherProcessCleanup');
+  if ((await otherHosts(options.home, excluded)).length) throw new LocalizedError('error.otherProcessCleanup');
   const hasPending = await exists(pending) && (await fs.readdir(pending)).length > 0;
   const handles: Lock[] = [];
   try {
@@ -68,7 +100,7 @@ async function offline(options: GuardOptions): Promise<void> {
         const path = join(root, project.name, session.name, 'session.lock');
         if (usesLockFiles && !(await exists(path))) continue;
         const lock = await tryLock(path);
-        if (!lock) throw LocalizedError.english('error.activeWriterCleanup');
+        if (!lock) throw new LocalizedError('error.activeWriterCleanup');
         handles.push(lock);
       }
     }
@@ -89,13 +121,13 @@ export async function runGuard(options: GuardOptions, announce: (line: string) =
     await privateDir(join(state, 'hosts'));
     const lifecycle = join(await fs.realpath(state), 'lifecycle.lock');
     if (options.hostPid) {
-      if (!options.hostBirth || await birth(options.hostPid) !== options.hostBirth) throw LocalizedError.english('error.hostExitedBeforeGuard');
+      if (!options.hostBirth || await birth(options.hostPid) !== options.hostBirth) throw new LocalizedError('error.hostExitedBeforeGuard');
       marker = join(state, 'hosts', `${options.hostPid}-${options.hostBirth}.json`);
       await atomicJSON(marker, { pid: options.hostPid, birth: options.hostBirth, phase: 'waiting' });
     }
     const deadline = Date.now() + (options.startupTimeoutMs ?? 60000);
     while (!(lock = await tryLock(lifecycle, true, true))) {
-      if (Date.now() >= deadline) throw LocalizedError.english('error.homeBusyAtStartup');
+      if (Date.now() >= deadline) throw new LocalizedError('error.homeBusyAtStartup');
       if (options.hostPid && await birth(options.hostPid) !== options.hostBirth) return;
       await delay(200);
     }
@@ -128,7 +160,7 @@ export async function runGuard(options: GuardOptions, announce: (line: string) =
 if (process.argv[1] && import.meta.url === pathToFileURL(resolve(process.argv[1])).href) {
   const [home, hostPid, hostBirth] = process.argv.slice(2);
   try {
-    if (!home) throw LocalizedError.english('error.guardUsage', { command: 'node lib/guard.js <DSH_HOME> [host-pid host-start-time]' });
+    if (!home) throw new LocalizedError('error.guardUsage', { command: 'node lib/guard.js <DSH_HOME> [host-pid host-start-time]' });
     await runGuard({ home, hostPid: hostPid ? Number(hostPid) : undefined, hostBirth });
   } catch { process.exitCode = 1; }
 }

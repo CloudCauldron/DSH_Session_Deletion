@@ -1,4 +1,4 @@
-import { type LiveSnapshot, type SessionHeader, type GcResult, type ScheduleTask } from './core.js';
+import { type UploadIndex, type LiveSnapshot, type SessionHeader, type GcResult, type ScheduleTask } from './core.js';
 import { type Gate } from './gate.js';
 import { LocalizedError, type LocalizedMessage } from './locale.js';
 interface Session {
@@ -68,18 +68,6 @@ interface Jobs {
         }) => void): () => void;
     };
 }
-interface UploadRecord {
-    scope: string;
-    attachmentId: string;
-    variantId: string;
-    fileId: string;
-}
-export interface UploadIndex {
-    load(): Promise<{
-        records: UploadRecord[];
-    }>;
-    remove(scope: string, records: Array<Pick<UploadRecord, 'variantId' | 'fileId'>>): Promise<unknown>;
-}
 export interface RuntimeContext {
     sessionDeletionGate: Gate;
     attachments: {
@@ -109,9 +97,6 @@ export interface RuntimeContext {
         get(id: string): Session | undefined;
     };
     sessionPersistence: {
-        list(): Promise<Array<{
-            header: SessionHeader;
-        }>>;
         stat(id: string): Promise<{
             sizeBytes: number;
         } | undefined>;
@@ -123,6 +108,10 @@ export interface RuntimeContext {
         put(id: string, ...args: unknown[]): unknown;
     };
     sessionQuery: {
+        listSessions(): Promise<Array<{
+            header: SessionHeader;
+            persisted: boolean;
+        }>>;
         observeSession(id: string, options: {
             projectionMode: 'none';
         }): Promise<LiveSnapshot & Disposable>;
@@ -136,10 +125,9 @@ export interface RuntimeContext {
         archiveSession(id: string): Promise<unknown>;
         unarchiveSession(id: string): Promise<void>;
         unpinSession(id: string): Promise<unknown>;
-        list(): Array<{
-            sessionIds: string[];
+        get(id: string): {
             detachSession(id: string): Promise<unknown>;
-        }>;
+        } | undefined;
         headers?: DeletionCache;
         sessionPaths?: DeletionCache;
         missingSessionPaths?: DeletionCache;
@@ -175,7 +163,7 @@ export interface RuntimeContext {
         global: true;
     }): () => void;
     inject(names: string[], callback: (ctx: RuntimeContext) => void): unknown;
-    effect(callback: () => () => void, label?: string): unknown;
+    effect(callback: () => () => void | Promise<void>, label?: string): unknown;
     provide(name: string, value: unknown): unknown;
     emit(name: 'api-session/removed', id: string): unknown;
     waterfall(name: 'workspace/session-activity', request: {
@@ -232,6 +220,7 @@ export declare class DeletionRuntime {
     private editSchedule;
     private unarchiveForCleanup;
     private maintenance?;
+    private disposed;
     get gcRunning(): boolean;
     get deletionRunning(): boolean;
     constructor(ctx: RuntimeContext, unwrap: <T extends object>(value: T) => T, UploadIndex: new (path: string) => UploadIndex);
@@ -261,19 +250,18 @@ export declare class DeletionRuntime {
     private stop;
     private until;
     private checkScheduleDelivery;
-    family(headers: Map<string, SessionHeader>, id: string): string[];
     /** Final validation; native promises own stopping and lifecycle settlement. */
     private quiescence;
     get archivedIds(): string[];
-    private snapshots;
+    private gcSources;
+    private runMaintenance;
     remove(id: string, createdAt: number, expectedIds: readonly string[]): Promise<{
         deleted: number;
     }>;
     private assertSoleHost;
-    private assertGcAvailable;
+    private assertAvailable;
     garbageSize(): Promise<number>;
     gc(): Promise<GcResult>;
-    private removeUploadMappings;
     private removeOne;
 }
 export declare const name = "session-deletion-runtime";

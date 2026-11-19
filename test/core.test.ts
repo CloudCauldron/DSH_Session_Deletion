@@ -22,11 +22,13 @@ void test('compressed logs retain every frame across blocks, checksums and input
     const frame = zstdCompressSync(event, { params: { [constants.ZSTD_c_checksumFlag]: 1 } });
     const path = join(f.home, 'sessions/project', f.ids.other, 'session.v4.jsonl.zstd');
     await fs.writeFile(path, Buffer.concat([header, rle, metadata, frame]));
-    assert.deepEqual([...(await readLog(path)).refs.hashes], [f.exclusive]);
+    const refs = new Set<string>();
+    await readLog(path, refs);
+    assert.deepEqual([...refs], [f.exclusive]);
     await fs.truncate(path, (await fs.stat(path)).size - 1);
-    await assert.rejects(readLog(path));
+    await assert.rejects(readLog(path, refs));
     await fs.writeFile(path, zstdCompressSync('not JSON\n'));
-    await assert.rejects(readLog(path), {
+    await assert.rejects(readLog(path, refs), {
       messages: [{ key: 'error.readSessionLog', params: { path } }, { key: 'error.invalidJsonl', params: { path, record: 1 } }],
     });
   } finally { await f.cleanup(); }
@@ -238,10 +240,17 @@ void test('GC size preview is read-only, excludes live attachments and counts ha
     await fs.mkdir(aliases, { recursive: true });
     await fs.link(object, join(aliases, 'first.txt'));
     await fs.link(object, join(aliases, 'second.txt'));
+    const linked = attachment(f, digest('unfinished staging'));
+    const temp = join(f.home, 'attachments/v1/tmp', randomBytes(16).toString('hex'));
+    await f.write(linked, 'staged bytes');
+    await fs.mkdir(join(temp, '..'), { recursive: true });
+    await fs.link(linked, temp);
     const before = await fileSnapshot(f.home);
     assert.equal(await garbageSize(f.home), 2048 + Buffer.byteLength('derived image'));
     assert.deepEqual(await fileSnapshot(f.home), before);
     await collectGarbage(f.home);
+    assert.equal(await exists(linked), false);
+    assert.equal(await fs.readFile(temp, 'utf8'), 'staged bytes');
     assert.equal(await garbageSize(f.home), 0);
   } finally { await f.cleanup(); }
 });
@@ -290,12 +299,14 @@ void test('GC removes all unreferenced objects and aliases, including never-refe
 void test('a live snapshot adds references to those in the persisted session', async () => {
   const f = await fixture();
   try {
+    // Leave the log as the exclusive image's only reference.
+    await fs.rm(join(f.home, 'storages/session_projcache/sessions', f.ids.main + '.json'));
     const hash = digest('staged alongside a disk log');
     const object = attachment(f, hash);
     await f.write(object, 'staged');
-    const snapshots = async () => new Map([[f.ids.main, { header: f.headers[f.ids.main], events: ['sha256:' + hash] }]]);
-    assert.equal(await garbageSize(f.home, snapshots), Buffer.byteLength('derived image'));
-    await collectGarbage(f.home, { hooks: { snapshots } });
+    const snapshots = [{ header: f.headers[f.ids.main], events: ['sha256:' + hash] }];
+    assert.equal(await garbageSize(f.home, { snapshots }), Buffer.byteLength('derived image'));
+    await collectGarbage(f.home, { snapshots });
     assert.ok(await exists(object));
     assert.ok(await exists(attachment(f, f.exclusive)));
   } finally { await f.cleanup(); }
@@ -305,11 +316,11 @@ void test('GC protects staged uploads in a live session without a materialized l
   const f = await fixture();
   try {
     await f.queue(); await sweep(f.home);
-    const hooks = { snapshots: async () => new Map([['unsaved', {
+    const hooks = { snapshots: [{
       header: { id: 'unsaved', version: 4, createdAt: 999 }, events: [{ attachmentId: 'sha256:' + f.exclusive }],
-    }]]) };
-    assert.equal(await garbageSize(f.home, hooks.snapshots), Buffer.byteLength('derived image'));
-    await collectGarbage(f.home, { hooks });
+    }] };
+    assert.equal(await garbageSize(f.home, hooks), Buffer.byteLength('derived image'));
+    await collectGarbage(f.home, hooks);
     assert.equal(await exists(attachment(f, f.exclusive)), true);
   } finally { await f.cleanup(); }
 });
@@ -320,11 +331,26 @@ for (const separator of ['/', '\\']) void test(`GC protects literal attachment p
     await f.queue(); await sweep(f.home);
     await f.session(f.ids.other, {}, [join(attachment(f, f.exclusive, 'files'), 'name.txt').replaceAll('\\', '/').replaceAll('/', separator)]);
     const stored = digest('stored elsewhere'); await f.write(attachment(f, stored), 'keep');
-    await f.write(join(f.home, 'storages/other.json'), JSON.stringify({ image: 'sha256:' + stored }));
+    await f.write(join(f.home, 'storages/other.json'), JSON.stringify({ tables: { bookmarks: { ['sha256:' + stored]: { note: 'keep' } } } }));
     await collectGarbage(f.home);
     assert.equal(await exists(attachment(f, f.exclusive)), true); assert.equal(await exists(attachment(f, stored)), true);
   } finally { await f.cleanup(); }
 });
+
+for (const backup of ['session-other/session.v4.jsonl~', 'SESSION.V4.JSONL.BAK']) {
+  void test(`GC stops before reclaiming an image referenced only by ${backup}`, async () => {
+    const f = await fixture();
+    try {
+      const hash = digest('backup-only image'), image = attachment(f, hash);
+      await f.write(image, 'image bytes');
+      await f.write(join(f.home, 'sessions/project', backup), JSON.stringify(f.headers[f.ids.other]) + '\n'
+        + JSON.stringify({ attachmentId: 'sha256:' + hash }) + '\n');
+      await assert.rejects(garbageSize(f.home), /Unclassified backup log/);
+      await assert.rejects(collectGarbage(f.home), /Unclassified backup log/);
+      assert.equal(await fs.readFile(image, 'utf8'), 'image bytes');
+    } finally { await f.cleanup(); }
+  });
+}
 
 for (const mode of ['corrupt', 'torn', 'backup-only', 'symlink', 'referenced-symlink', 'opaque']) void test(`GC ${mode} preflight failure deletes nothing`, async () => {
   const f = await fixture();

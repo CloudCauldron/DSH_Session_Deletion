@@ -2,7 +2,7 @@ import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import fs from 'node:fs/promises';
 import { syncBuiltinESMExports } from 'node:module';
-import { join, toNamespacedPath } from 'node:path';
+import { basename, dirname, join, toNamespacedPath } from 'node:path';
 import { spawn } from 'node:child_process';
 import { once } from 'node:events';
 import { setTimeout as delay } from 'node:timers/promises';
@@ -140,8 +140,10 @@ for (const desktop of [false, true]) void test(`an empty recovery queue refuses 
     executable = join(f.base, 'DeepSeek Harness.exe');
     await fs.copyFile(process.execPath, executable);
   }
-  const host = spawn(executable, ['-e', 'setInterval(()=>{},1000)', entry], {
-    argv0: desktop ? 'DeepSeek Harness' : executable, cwd: f.base, env: { ...process.env, DSH_HOME: f.home }, stdio: 'ignore',
+  const script = join(f.base, entry);
+  await f.write(script, 'setInterval(() => {}, 1000)');
+  const host = spawn(executable, ['--no-warnings', basename(script)], {
+    argv0: desktop ? 'DeepSeek Harness' : executable, cwd: dirname(script), env: { ...process.env, DSH_HOME: f.home }, stdio: 'ignore',
   });
   const done = finished(host);
   try {
@@ -200,9 +202,10 @@ void test('empty recovery refreshes blocked diagnostics and safely reclaims only
 
 void test('DSH processes using another home do not block cleanup', async () => {
   const f = await fixture();
-  const host = spawn(process.execPath, ['-e', 'setInterval(()=>{},1000)', '/tmp/@deepseek-ai/dsh/lib/bin.js'], {
-    env: { ...process.env, DSH_HOME: join(f.base, 'another-home') }, stdio: 'ignore',
-  });
+  const script = join(f.base, '@deepseek-ai/dsh/lib/bin.js'), otherHome = join(f.base, 'another-home');
+  await f.write(script, 'setInterval(() => {}, 1000)');
+  await fs.mkdir(otherHome);
+  const host = spawn(process.execPath, [script], { env: { ...process.env, DSH_HOME: otherHome }, stdio: 'ignore' });
   const done = finished(host);
   try {
     await once(host, 'spawn');
@@ -213,6 +216,52 @@ void test('DSH processes using another home do not block cleanup', async () => {
   } finally { host.kill(); await done; await f.cleanup(); }
 });
 
+
+void test('a filesystem alias to the installed CLI entry still identifies a competing host', async () => {
+  const f = await fixture();
+  const scope = join(f.base, 'node_modules/@deepseek-ai');
+  const entry = join(scope, 'dsh/lib/bin.js');
+  await f.write(entry, 'console.log("READY");setInterval(() => {}, 1000)');
+  const alias = join(f.base, 'scope-alias');
+  await fs.symlink(scope, alias, 'junction');
+  const child = spawn(process.execPath, [join(alias, 'dsh/lib/bin.js')], {
+    cwd: f.base, env: { ...process.env, DSH_HOME: f.home }, stdio: ['ignore', 'pipe', 'pipe'],
+  });
+  const done = finished(child);
+  try {
+    await ready(child);
+    assert.ok((await otherHosts(f.home, new Set([process.pid]))).includes(pid(child)));
+  } finally { child.kill(); await done; await f.cleanup(); }
+});
+
+for (const name of ['@deepseek-ai/dsh', 'other-cli']) void test(`source CLI detection reads the package identity: ${name}`, async () => {
+  const f = await fixture(), entry = 'apps/cli/src/bin.ts';
+  await f.write(join(f.base, entry), 'console.log("READY");setInterval(() => {}, 1000)');
+  await f.write(join(f.base, 'apps/cli/package.json'), JSON.stringify({ name }));
+  await f.write(join(f.base, 'preload.mjs'), '');
+  const child = spawn(process.execPath, ['--import', './preload.mjs', entry, 'web'], {
+    cwd: f.base, env: { ...process.env, DSH_HOME: f.home }, stdio: ['ignore', 'pipe', 'pipe'],
+  });
+  const done = finished(child);
+  try {
+    await ready(child);
+    assert.equal((await otherHosts(f.home, new Set([process.pid]))).includes(pid(child)), name === '@deepseek-ai/dsh');
+  } finally { child.kill(); await done; await f.cleanup(); }
+});
+
+void test('a Node tool receiving a DSH entry path as data is not a second host', async () => {
+  const f = await fixture();
+  const tool = join(f.base, 'tool.js');
+  await f.write(tool, 'setInterval(() => {}, 1000)');
+  const child = spawn(process.execPath, ['--no-warnings', tool, '@deepseek-ai/dsh/lib/bin.js'], {
+    cwd: f.base, env: { ...process.env, DSH_HOME: f.home }, stdio: 'ignore',
+  });
+  const done = finished(child);
+  try {
+    await once(child, 'spawn');
+    assert.deepEqual(await otherHosts(f.home, new Set([process.pid])), []);
+  } finally { child.kill(); await done; await f.cleanup(); }
+});
 
 void test('closing an old lock repeatedly cannot release its successor', async () => {
   const f = await fixture(); let successor, contender;
@@ -274,7 +323,9 @@ void test('host detection uses target process metadata: ' + mode, async () => {
       env.DSH_HOME = drive + 'home';
     }
     const flags = mode === 'long-argv' ? ['--no-warnings', '--trace-warnings', '--enable-source-maps'] : [];
-    host = spawn(process.execPath, [...flags, '-e', 'console.log("READY");setInterval(()=>{},1000)', join(f.base, '@deepseek-ai/dsh/lib/bin.js')], {
+    const script = join(f.base, '@deepseek-ai/dsh/lib/bin.js');
+    await f.write(script, 'console.log("READY");setInterval(() => {}, 1000)');
+    host = spawn(process.execPath, [...flags, script], {
       env, cwd: mode === 'drive-relative-ns' ? toNamespacedPath(f.base) : f.base, stdio: ['ignore', 'pipe', 'pipe'],
     });
     done = finished(host); await ready(host);

@@ -67,6 +67,7 @@
 
     "error.guardExit": "恢复监测进程已退出，退出码为 {code}。",
     "error.guardStartTimeout": "恢复监测进程启动超时。",
+    "error.runtimeUnavailable": "会话删除插件已停用。请在启用后重新打开菜单。",
     "error.guardUnavailable": "恢复监测不可用，请重启 DSH。",
     "error.guardUsage": "用法：{command}",
     "error.homeBusyAtStartup": "另一个 DSH 宿主或清理进程正在使用此数据目录，请先将其关闭再启动 DSH。",
@@ -86,8 +87,6 @@
 
     "error.notDirectory": "此路径不是目录：{path}。",
     "error.refuseSymlink": "拒绝访问符号链接：{path}。",
-    "error.symlinkSessionDir": "会话目录是符号链接。",
-    "error.symlinkUnderSessions": "会话根目录下存在符号链接。",
     "error.unexpectedEntry": "文件系统条目异常：{path}。",
     "error.unexpectedFile": "文件类型异常：{path}。",
     "error.wrongFileOwner": "当前用户不是此路径的所有者：{path}。",
@@ -122,7 +121,6 @@
     "error.invalidPlanPath": "删除计划中的路径无效。",
     "error.pendingDeletion": "有未完成的会话删除，请先重启 DSH 恢复。",
     "error.pendingQueueFile": "待处理队列中存在异常文件。",
-    "error.previewChanged": "会话或子代理集合已变化，请重新确认。",
     "error.previewExpired": "确认已过期，请重新打开删除对话框。",
     "error.targetLifecycleMismatch": "目标会话的生命周期与删除计划不一致。",
 
@@ -169,6 +167,6 @@
     "error.cacheAudit": "清理后的缓存检查失败。",
     "error.deletedSessionAudit": "删除后的会话检查失败。",
     "error.privateMetadataAudit": "删除后的私有元数据检查失败。",
-    "error.uploadIndexAudit": "清理后的上传索引检查失败。"
+    "error.uploadIndexAudit": "清理后仍有上传映射"
   }
 }

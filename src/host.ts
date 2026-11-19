@@ -2,12 +2,13 @@ import type { IncomingMessage, ServerResponse } from 'node:http';
 import type { WebServer } from '@deepseek-ai/dsh-host-webserver';
 import { join, resolve } from 'node:path';
 import { randomBytes, timingSafeEqual } from 'node:crypto';
-import { listRequests, readJSON, stateDir } from './core.js';
+import { familyOf, listRequests, readJSON, stateDir } from './core.js';
 import { DeletionRefused, type DeletionRuntime } from './runtime.js';
 import type { Gate } from './gate.js';
 import { dictionaries, LocalizedError, type LocalizedMessage } from './locale.js';
 
 export interface HostContext {
+  effect(register: () => () => void, label: string): unknown;
   sessionDeletionGate: Gate; sessionDeletionRuntime: DeletionRuntime;
   sessionPersistence: { name: string; root: string };
   connection: {
@@ -38,10 +39,10 @@ async function body(req: IncomingMessage): Promise<Record<string, unknown>> {
 export async function apply(ctx: HostContext): Promise<void> {
   const gate = ctx.sessionDeletionGate; const runtime = ctx.sessionDeletionRuntime;
   if (ctx.sessionPersistence.name !== 'session-persistence-jsonl' || resolve(ctx.sessionPersistence.root) !== join(gate.home, 'sessions')) {
-    throw LocalizedError.english('error.defaultSessionRoot');
+    throw new LocalizedError('error.defaultSessionRoot');
   }
   const previews = new Map<string, { token: string; expires: number; createdAt: number; ids: string[] }>();
-  ctx.webServer.register({ kind: 'prefix', path: '/session-deletion/api', async handler(req, res) {
+  ctx.effect(() => ctx.webServer.register({ kind: 'prefix', path: '/session-deletion/api', async handler(req, res) {
     try {
       const admission = ctx.connection.admit(req);
       if ('rejection' in admission) throw new HttpError(admission.rejection, 'error.unauthorized');
@@ -86,7 +87,7 @@ export async function apply(ctx: HostContext): Promise<void> {
         const headers = await runtime.headers(); const header = headers.get(id);
         if (!header) throw new HttpError(404, 'error.sessionMissing');
         if (header.origin === 'subagent' || (header.delegationDepth ?? 0) > 0) throw new HttpError(400, 'error.mainSessionRequired');
-        const ids = runtime.family(headers, id);
+        const ids = familyOf(headers, id);
         if (path === '/session-deletion/api/preview') {
           const token = randomBytes(24).toString('hex');
           if (previews.size >= 256) previews.delete(previews.keys().next().value!);
@@ -100,5 +101,5 @@ export async function apply(ctx: HostContext): Promise<void> {
       send(res, e instanceof HttpError || e instanceof DeletionRefused ? e.status : 500, { ok: false, error: e instanceof Error ? e.message : String(e),
         ...e instanceof LocalizedError ? { messages: e.messages, diagnostic: e.diagnostic } : {} });
     }
-  } });
+  } }), 'session-deletion HTTP routes');
 }

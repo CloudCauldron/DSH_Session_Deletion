@@ -12,9 +12,6 @@ export interface SessionHeader {
   type?: 'session'; version: number; id: string; createdAt: number; cwd?: string;
   parentSession?: string; origin?: 'subagent'; delegationDepth?: number; isSeeded?: boolean;
 }
-export interface References { hashes: Set<string> }
-export interface StoredSession { header: SessionHeader; dir: string; refs: References }
-export type SessionMap = Map<string, StoredSession>;
 export interface DeletionPlan {
   ids: string[]; directories: { path: string; id: string; createdAt: number }[];
 }
@@ -37,18 +34,23 @@ export interface ScheduleTask {
   pendingDelivery?: { targetSessionId: string };
 }
 interface ScheduleData { unit: { name: string }; tables: { tasks: Record<string, ScheduleTask> } }
-interface RemoteCache { formatVersion: number; records: { attachmentId: string }[] }
-interface Edit { path: string; data: unknown }
-export interface LiveSnapshot { header: SessionHeader; events: readonly unknown[] }
+interface UploadRecord { scope: string; attachmentId: string; variantId: string; fileId: string }
+interface RemoteCache { formatVersion: number; records: UploadRecord[] }
+export interface UploadIndex {
+  load(): Promise<{ records: UploadRecord[] }>;
+  remove(scope: string, records: Array<Pick<UploadRecord, 'variantId' | 'fileId'>>): Promise<unknown>;
+}
+interface Edit { path: string; data: unknown; detach?: [workspaceId: string, sessionId: string][] }
+export interface LiveSnapshot { header: SessionHeader; events: readonly unknown[]; staged?: readonly unknown[] }
 export interface SweepHooks {
   /** Live owners mutate their own tables, never overwrite them from a disk snapshot. */
   applyEdit?(edit: Edit, ids: ReadonlySet<string>): Promise<void>;
   receiptCommitted?(receipt: Receipt): void;
   onlySessionId?: string;
 }
-export interface GcHooks {
-  snapshots?(): Promise<Map<string, LiveSnapshot>>;
-  removeUploadMappings?(hashes: ReadonlySet<string>): Promise<void>;
+export interface GcSources {
+  snapshots?: readonly LiveSnapshot[];
+  UploadIndex?: new(path: string) => UploadIndex;
 }
 
 export const SUPPORTED_DSH = '0.2.2-rc.5';
@@ -60,19 +62,19 @@ export const requestPath = (home: string, id: string) => join(stateDir(home), 'p
 export function scheduledSession(task: ScheduleTask): string | undefined {
   if (task.target?.kind === 'new') return undefined;
   if (task.target) {
-    if (!['session', 'new_once'].includes(task.target.kind)) throw LocalizedError.english('error.scheduleDestination');
+    if (!['session', 'new_once'].includes(task.target.kind)) throw new LocalizedError('error.scheduleDestination');
     if (task.target.sessionId) return task.target.sessionId;
-    if (task.target.kind !== 'new_once') throw LocalizedError.english('error.scheduleDestination');
+    if (task.target.kind !== 'new_once') throw new LocalizedError('error.scheduleDestination');
   } else if (task.sessionId) return task.sessionId;
   return task.record ? 'session-schedule-' + digest(task.record.id) : undefined;
 }
 export async function readSchedule(home: string): Promise<ScheduleData | undefined> {
   const schedule = await readJSON<ScheduleData | undefined>(join(home, 'storages/schedule.json'));
-  if (schedule && (schedule.unit?.name !== 'schedule' || !schedule.tables?.tasks)) throw LocalizedError.english('error.scheduleSchema');
+  if (schedule && (schedule.unit?.name !== 'schedule' || !schedule.tables?.tasks)) throw new LocalizedError('error.scheduleSchema');
   return schedule;
 }
 export function encodeSegment(raw: string) {
-  if (typeof raw !== 'string' || !raw || raw.length > 1024) throw LocalizedError.english('error.invalidSessionId');
+  if (typeof raw !== 'string' || !raw || raw.length > 1024) throw new LocalizedError('error.invalidSessionId');
   let out = '';
   for (let i = 0; i < raw.length; i++) {
     const c = raw[i];
@@ -93,11 +95,11 @@ export async function safePath(path: string, { missing = false, directory = fals
     let st;
     try { st = await fs.lstat(current); }
     catch (e) { if (missing && (e as NodeJS.ErrnoException).code === 'ENOENT') return; throw e; }
-    if (st.isSymbolicLink()) throw LocalizedError.english('error.refuseSymlink', { path: current });
-    if (i < parts.length - 1 && !st.isDirectory()) throw LocalizedError.english('error.notDirectory', { path: current });
+    if (st.isSymbolicLink()) throw new LocalizedError('error.refuseSymlink', { path: current });
+    if (i < parts.length - 1 && !st.isDirectory()) throw new LocalizedError('error.notDirectory', { path: current });
     if (i === parts.length - 1) {
       assertOwner(current, st.uid);
-      if (directory && !st.isDirectory()) throw LocalizedError.english('error.notDirectory', { path: current });
+      if (directory && !st.isDirectory()) throw new LocalizedError('error.notDirectory', { path: current });
     }
   }
 }
@@ -112,7 +114,7 @@ export async function atomicJSON(path: string, data: unknown) {
   await safePath(path, { missing: true });
   await privateDir(dirname(path));
   const started = await birth(process.pid);
-  if (!started) throw LocalizedError.english('error.writerIdentity');
+  if (!started) throw new LocalizedError('error.writerIdentity');
   const temp = join(dirname(path), `.session-deletion-write-${process.pid}-${started}-${randomBytes(12).toString('hex')}`);
   let h;
   try {
@@ -141,10 +143,10 @@ async function filesUnder(path: string): Promise<string[]> {
   const files: string[] = [];
   for (const e of await entries(path)) {
     const p = join(path, e.name);
-    if (e.isSymbolicLink()) throw LocalizedError.english('error.refuseSymlink', { path: p });
+    if (e.isSymbolicLink()) throw new LocalizedError('error.refuseSymlink', { path: p });
     if (e.isDirectory()) files.push(...await filesUnder(p));
     else if (e.isFile()) { await safePath(p); files.push(p); }
-    else throw LocalizedError.english('error.unexpectedEntry', { path: p });
+    else throw new LocalizedError('error.unexpectedEntry', { path: p });
   }
   return files;
 }
@@ -157,7 +159,7 @@ export async function removeOwned(path: string) {
   await safePath(path);
   const st = await fs.lstat(path);
   if (st.isDirectory()) await filesUnder(path);
-  else if (!st.isFile()) throw LocalizedError.english('error.unexpectedFile', { path });
+  else if (!st.isFile()) throw new LocalizedError('error.unexpectedFile', { path });
   await fs.rm(path, { recursive: st.isDirectory(), force: false });
   await syncDir(dirname(path));
 }
@@ -173,14 +175,14 @@ export async function cleanAtomicTemps(directory: string) {
   }
 }
 const HASH = /(?:sha256:|[\\/](?:objects|file-objects|files)[\\/][a-f0-9]{2}[\\/])([a-f0-9]{64})(?![a-f0-9])/g;
-function references(value: unknown, refs: References) {
+function references(value: unknown, refs: Set<string>) {
   if (typeof value === 'string') {
-    for (const match of value.matchAll(HASH)) refs.hashes.add(match[1]);
+    for (const match of value.matchAll(HASH)) refs.add(match[1]);
   } else if (Array.isArray(value)) { for (const v of value) references(v, refs); }
-  else if (value && typeof value === 'object') { for (const v of Object.values(value)) references(v, refs); }
+  else if (value && typeof value === 'object') {
+    for (const [key, entry] of Object.entries(value)) { references(key, refs); references(entry, refs); }
+  }
 }
-const newRefs = (): References => ({ hashes: new Set() });
-
 // Node 24 stops at the first Zstandard frame within a write. Keep frames in
 // separate chunks and prove that the final frame is complete before accepting EOF.
 async function* zstdChunks(input: AsyncIterable<Buffer>) {
@@ -200,7 +202,7 @@ async function* zstdChunks(input: AsyncIterable<Buffer>) {
           const magic = header.readUInt32LE();
           if (magic === 0xfd2fb528) { state = 'descriptor'; need = 1; }
           else if ((magic & 0xfffffff0) === 0x184d2a50) { state = 'skippable'; need = 4; }
-          else throw LocalizedError.english('error.invalidZstdFrame');
+          else throw new LocalizedError('error.invalidZstdFrame');
         } else if (state === 'descriptor') {
           const descriptor = header[0], single = descriptor & 32, size = descriptor >>> 6;
           skip = (single ? 0 : 1) + [0, 1, 2, 4][descriptor & 3] + (size ? 1 << size : single ? 1 : 0);
@@ -209,7 +211,7 @@ async function* zstdChunks(input: AsyncIterable<Buffer>) {
           skip = header.readUInt32LE(); state = 'magic'; need = 4;
         } else {
           const block = header.readUIntLE(0, 3), type = (block >>> 1) & 3;
-          if (type === 3) throw LocalizedError.english('error.invalidZstdBlock');
+          if (type === 3) throw new LocalizedError('error.invalidZstdBlock');
           skip = type === 1 ? 1 : block >>> 3;
           if (block & 1) { skip += checksum; state = 'magic'; need = 4; }
         }
@@ -218,10 +220,10 @@ async function* zstdChunks(input: AsyncIterable<Buffer>) {
     }
     if (start < chunk.length) yield chunk.subarray(start);
   }
-  if (used || skip || state !== 'magic') throw LocalizedError.english('error.incompleteZstdFrame');
+  if (used || skip || state !== 'magic') throw new LocalizedError('error.incompleteZstdFrame');
 }
 
-export async function readLog(path: string, headerOnly = false) {
+export async function readLog(path: string, refs?: Set<string>) {
   await safePath(path);
   const input = createReadStream(path, { fd: openSync(path, constants.O_RDONLY | constants.O_NOFOLLOW), autoClose: true });
   const compressed = path.endsWith('.zstd');
@@ -230,89 +232,64 @@ export async function readLog(path: string, headerOnly = false) {
   // Forward the source error; async iteration must never silently accept a truncated compressed stream.
   if (decoded !== source) source.on('error', e => decoded.destroy(e));
   const lines = createInterface({ input: decoded, crlfDelay: Infinity });
-  const refs = newRefs(); let header: SessionHeader | undefined; let count = 0;
+  let header: SessionHeader | undefined; let count = 0;
   try {
     for await (const line of lines) {
       if (!line.trim()) continue;
       let record;
-      try { record = JSON.parse(line); } catch { throw LocalizedError.english('error.invalidJsonl', { path, record: count + 1 }); }
+      try { record = JSON.parse(line); } catch { throw new LocalizedError('error.invalidJsonl', { path, record: count + 1 }); }
       if (count++ === 0) {
         if (record.type !== 'session' || typeof record.id !== 'string' || !Number.isFinite(record.createdAt))
-          throw LocalizedError.english('error.sessionHeaderUnsupported', { path });
+          throw new LocalizedError('error.sessionHeaderUnsupported', { path });
         if (!Number.isInteger(record.version) || record.version < 0 || record.version > 4)
-          throw LocalizedError.english('error.sessionFormatUnsupported', { path });
+          throw new LocalizedError('error.sessionFormatUnsupported', { path });
         header = record;
-        if (headerOnly) break;
+        if (!refs) break;
       }
-      references(record, refs);
+      if (refs) references(record, refs);
     }
-    if (!headerOnly && decoded.errored) throw decoded.errored;
-    if (!header) throw LocalizedError.english('error.emptySessionLog', { path });
-    return { header, refs };
+    if (refs && decoded.errored) throw decoded.errored;
+    if (!header) throw new LocalizedError('error.emptySessionLog', { path });
+    return header;
   } catch (error) {
-    throw LocalizedError.english('error.readSessionLog', { path }, { cause: error, failures: [error] });
+    throw new LocalizedError('error.readSessionLog', { path }, { cause: error, failures: [error] });
   } finally { lines.close(); decoded.destroy(); source.destroy(); input.destroy(); }
 }
 
-export async function scanSessions(home: string, snapshots?: Map<string, LiveSnapshot>): Promise<SessionMap> {
-  const root = join(home, 'sessions'); const sessions: SessionMap = new Map();
-  for (const project of await entries(root)) {
-    if (!project.isDirectory()) {
-      if (project.isSymbolicLink()) throw LocalizedError.english('error.symlinkUnderSessions');
-      continue;
-    }
-    for (const directory of await entries(join(root, project.name))) {
-      if (!directory.isDirectory()) {
-        if (directory.isSymbolicLink()) throw LocalizedError.english('error.symlinkSessionDir');
-        continue;
-      }
-      const dir = join(root, project.name, directory.name);
-      let selected: SessionHeader | undefined; const refs = newRefs();
-      for (const file of await filesUnder(dir)) {
-        const leaf = basename(file);
-        if (!LOG.test(leaf)) {
-          if (/\.jsonl(?:\.zstd)?(?:\.|$)/.test(leaf)) throw LocalizedError.english('error.unclassifiedBackup', { path: file });
-          continue;
-        }
-        const parsed = await readLog(file);
-        if (directory.name !== encodeSegment(parsed.header.id)) throw LocalizedError.english('error.directorySessionMismatch', { path: dir });
-        if (selected && (selected.id !== parsed.header.id || selected.createdAt !== parsed.header.createdAt))
-          throw LocalizedError.english('error.mixedSessionIds', { path: dir });
-        if (!selected || parsed.header.version > selected.version) selected = parsed.header;
-        for (const h of parsed.refs.hashes) refs.hashes.add(h);
-      }
-      if (!selected) continue;
-      if (sessions.has(selected.id)) throw LocalizedError.english('error.duplicateSession', { id: selected.id });
-      sessions.set(selected.id, { header: selected, dir, refs });
-    }
-  }
-  // Staged and buffered references can exist with any disk generation, or before the first write.
-  for (const [id, live] of snapshots ?? []) {
-    const stored = sessions.get(id);
-    const refs = stored?.refs ?? newRefs();
-    references(live.header, refs);
-    for (const event of live.events) references(event, refs);
-    if (!stored) sessions.set(id, { header: live.header, dir: '', refs });
+export async function scanSessions(home: string, refs = new Set<string>()) {
+  const root = join(home, 'sessions');
+  const sessions = new Map<string, { dir: string; createdAt: number }>();
+  for (const file of await filesUnder(root)) {
+    const leaf = basename(file);
+    if (!/\.jsonl/i.test(leaf)) continue;
+    if (!LOG.test(leaf) || relative(root, file).split(sep).length !== 3)
+      throw new LocalizedError('error.unclassifiedBackup', { path: file });
+    const header = await readLog(file, refs);
+    const dir = dirname(file);
+    if (basename(dir) !== encodeSegment(header.id)) throw new LocalizedError('error.directorySessionMismatch', { path: dir });
+    const previous = sessions.get(header.id);
+    if (previous && previous.dir !== dir) throw new LocalizedError('error.duplicateSession', { id: header.id });
+    if (previous && previous.createdAt !== header.createdAt) throw new LocalizedError('error.mixedSessionIds', { path: dir });
+    sessions.set(header.id, { dir, createdAt: header.createdAt });
   }
   return sessions;
 }
-export function familyOf(sessions: SessionMap, rootId: string) {
+export function familyOf(headers: ReadonlyMap<string, SessionHeader>, rootId: string) {
   const ids = new Set([rootId]); let changed = true;
   while (changed) {
     changed = false;
-    for (const [id, item] of sessions) {
-      const h = item.header;
+    for (const [id, h] of headers) {
       if (!ids.has(id) && h.parentSession !== undefined && ids.has(h.parentSession) && (h.origin === 'subagent' || (h.delegationDepth ?? 0) > 0)) {
         ids.add(id); changed = true;
       }
     }
   }
-  return ids;
+  return [...ids].sort();
 }
 
 /** Locate only the confirmed family's directories. No other transcript or attachment is read. */
 export async function planSessionDeletion(home: string, headers: Map<string, SessionHeader>, rootId: string): Promise<DeletionPlan> {
-  const ids = [...familyOf(new Map([...headers].map(([id, header]) => [id, { header }])) as SessionMap, rootId)].sort();
+  const ids = familyOf(headers, rootId);
   const names = new Map(ids.map(id => [encodeSegment(id), id]));
   const directories: DeletionPlan['directories'] = [];
   for (const project of await entries(join(home, 'sessions'))) {
@@ -321,7 +298,7 @@ export async function planSessionDeletion(home: string, headers: Map<string, Ses
       const id = names.get(child.name); if (!id) continue;
       const path = join('sessions', project.name, child.name);
       await safePath(join(home, path), { directory: true });
-      const header = headers.get(id); if (!header) throw LocalizedError.english('error.targetHeaderMissing');
+      const header = headers.get(id); if (!header) throw new LocalizedError('error.targetHeaderMissing');
       directories.push({ path, id, createdAt: header.createdAt });
     }
   }
@@ -332,23 +309,23 @@ export async function planSessionDeletion(home: string, headers: Map<string, Ses
 function validatePlan(home: string, id: string, plan: DeletionPlan): void {
   const ids = new Set(plan.ids);
   if (!ids.has(id) || ids.size !== plan.ids.length || plan.directories.length !== ids.size
-    || new Set(plan.directories.map(row => row.id)).size !== ids.size) throw LocalizedError.english('error.invalidPlanIds');
+    || new Set(plan.directories.map(row => row.id)).size !== ids.size) throw new LocalizedError('error.invalidPlanIds');
   for (const row of plan.directories) {
     const path = resolve(home, row.path);
     const parts = relative(join(home, 'sessions'), path).split(sep);
     if (!ids.has(row.id) || !Number.isFinite(row.createdAt) || parts.length !== 2
-      || !inside(join(home, 'sessions'), path) || basename(path) !== encodeSegment(row.id)) throw LocalizedError.english('error.invalidPlanPath');
+      || !inside(join(home, 'sessions'), path) || basename(path) !== encodeSegment(row.id)) throw new LocalizedError('error.invalidPlanPath');
   }
 }
 export async function listRequests(home: string): Promise<DeletionRequest[]> {
   const out: DeletionRequest[] = [];
   for (const e of await entries(join(stateDir(home), 'pending'))) {
     if (ATOMIC_TEMP.test(e.name) && e.isFile()) continue;
-    if (!/^[a-f0-9]{64}\.json$/.test(e.name)) throw LocalizedError.english('error.pendingQueueFile');
+    if (!/^[a-f0-9]{64}\.json$/.test(e.name)) throw new LocalizedError('error.pendingQueueFile');
     const r = await readJSON<DeletionRequest | undefined>(join(stateDir(home), 'pending', e.name));
     if (r === undefined) continue;
     if (r.schema !== 3 || digest(r.sessionId) + '.json' !== e.name || r.dshVersion !== SUPPORTED_DSH)
-      throw LocalizedError.english('error.invalidDeletionRequest');
+      throw new LocalizedError('error.invalidDeletionRequest');
     validatePlan(home, r.sessionId, r.plan);
     out.push(r);
   }
@@ -357,9 +334,9 @@ export async function listRequests(home: string): Promise<DeletionRequest[]> {
 export async function enqueue(home: string, header: SessionHeader, plan: DeletionPlan) {
   await safePath(home, { directory: true });
   validatePlan(home, header.id, plan);
-  if (plan.directories.find(row => row.id === header.id)?.createdAt !== header.createdAt) throw LocalizedError.english('error.targetLifecycleMismatch');
+  if (plan.directories.find(row => row.id === header.id)?.createdAt !== header.createdAt) throw new LocalizedError('error.targetLifecycleMismatch');
   const path = requestPath(home, header.id);
-  if (await exists(path)) throw LocalizedError.english('error.deletionAlreadyQueued');
+  if (await exists(path)) throw new LocalizedError('error.deletionAlreadyQueued');
   const request: DeletionRequest = { schema: 3, dshVersion: SUPPORTED_DSH, sessionId: header.id,
     createdAt: header.createdAt, queuedAt: new Date().toISOString(), plan };
   await atomicJSON(path, request);
@@ -377,19 +354,22 @@ async function privateInventory(home: string, ids: ReadonlySet<string>) {
   const workspacePath = join(home, 'storages/workspace.json');
   const workspace = await readJSON<WorkspaceData | undefined>(workspacePath);
   if (workspace) {
-    if (workspace.unit?.name !== 'workspace' || !workspace.global || !workspace.tables?.workspaces) throw LocalizedError.english('error.workspaceSchema');
+    if (workspace.unit?.name !== 'workspace' || !workspace.global || !workspace.tables?.workspaces) throw new LocalizedError('error.workspaceSchema');
     let changed = false;
     for (const key of ['archivedSessionIds', 'pinnedSessionIds'] as const) {
-      if (!Array.isArray(workspace.global[key])) throw LocalizedError.english('error.workspaceSessionsInvalid');
+      if (!Array.isArray(workspace.global[key])) throw new LocalizedError('error.workspaceSessionsInvalid');
       const kept = workspace.global[key].filter(id => !ids.has(id));
       changed ||= kept.length !== workspace.global[key].length; workspace.global[key] = kept;
     }
-    for (const row of Object.values(workspace.tables.workspaces)) {
-      if (!Array.isArray(row.sessionIds)) throw LocalizedError.english('error.workspaceSessionsInvalid');
-      const kept = row.sessionIds.filter(id => !ids.has(id));
-      changed ||= kept.length !== row.sessionIds.length; row.sessionIds = kept;
+    const detach: [string, string][] = [];
+    for (const [workspaceId, row] of Object.entries(workspace.tables.workspaces)) {
+      if (!Array.isArray(row.sessionIds)) throw new LocalizedError('error.workspaceSessionsInvalid');
+      row.sessionIds = row.sessionIds.filter(id => {
+        if (!ids.has(id)) return true;
+        detach.push([workspaceId, id]); return false;
+      });
     }
-    if (changed) rewrite.push({ path: workspacePath, data: workspace });
+    if (changed || detach.length) rewrite.push({ path: workspacePath, data: workspace, detach });
   }
   const schedulePath = join(home, 'storages/schedule.json');
   const schedule = await readSchedule(home);
@@ -405,8 +385,8 @@ async function validateTargetDirectories(home: string, plan: DeletionPlan) {
     const dir = join(home, row.path);
     await safePath(dir, { missing: true });
     for (const file of await filesUnder(dir)) if (LOG.test(basename(file))) {
-      const { header } = await readLog(file, true);
-      if (header.id !== row.id || header.createdAt !== row.createdAt) throw LocalizedError.english('error.identityChangedDuringRecovery');
+      const header = await readLog(file);
+      if (header.id !== row.id || header.createdAt !== row.createdAt) throw new LocalizedError('error.identityChangedDuringRecovery');
     }
   }
 }
@@ -414,7 +394,7 @@ async function validateTargetDirectories(home: string, plan: DeletionPlan) {
 export async function sweep(home: string, { failAfter, hooks }: { failAfter?: number; hooks?: SweepHooks } = {}) {
   await safePath(home, { directory: true });
   let operations = 0;
-  const checkpoint = () => { if (failAfter !== undefined && ++operations >= failAfter) throw LocalizedError.english('error.injectedInterruption'); };
+  const checkpoint = () => { if (failAfter !== undefined && ++operations >= failAfter) throw new LocalizedError('error.injectedInterruption'); };
   const completed: Result[] = [];
   for (const request of (await listRequests(home)).filter(r => !hooks?.onlySessionId || r.sessionId === hooks.onlySessionId)) {
     const plan = request.plan; const ids = new Set(plan.ids);
@@ -428,8 +408,8 @@ export async function sweep(home: string, { failAfter, hooks }: { failAfter?: nu
     for (const path of work.remove) { await removeOwned(path); checkpoint(); }
     for (const row of plan.directories) { await removeOwned(join(home, row.path)); checkpoint(); }
     const audit = await privateInventory(home, ids);
-    if (audit.remove.length || audit.rewrite.length) throw LocalizedError.english('error.privateMetadataAudit');
-    for (const row of plan.directories) if (await exists(join(home, row.path))) throw LocalizedError.english('error.deletedSessionAudit');
+    if (audit.remove.length || audit.rewrite.length) throw new LocalizedError('error.privateMetadataAudit');
+    for (const row of plan.directories) if (await exists(join(home, row.path))) throw new LocalizedError('error.deletedSessionAudit');
     // Do not prune the shared project directory: another conversation may be creating its first log.
     const receiptPath = join(stateDir(home), 'receipt.json');
     const receipt = await readJSON<Receipt>(receiptPath, { schema: 1, revision: '', deletedIdHashes: [] });
@@ -459,14 +439,14 @@ async function forEachConcurrent<T>(values: readonly T[], work: (value: T) => Pr
   if (failure) throw failure.reason;
 }
 
-async function scanGarbage(home: string, snapshots?: GcHooks['snapshots']) {
-  if ((await listRequests(home)).length) throw LocalizedError.english('error.gcPendingSessions');
-  const sessions = await scanSessions(home, await snapshots?.());
-  const refs = newRefs();
-  for (const session of sessions.values()) for (const hash of session.refs.hashes) refs.hashes.add(hash);
+async function scanGarbage(home: string, { snapshots, UploadIndex }: GcSources) {
+  if ((await listRequests(home)).length) throw new LocalizedError('error.gcPendingSessions');
+  const refs = new Set<string>();
+  for (const live of snapshots ?? []) references(live, refs);
+  await scanSessions(home, refs);
   await forEachConcurrent(await filesUnder(join(home, 'storages')), async path => {
     if (ATOMIC_TEMP.test(basename(path))) return;
-    if (!path.endsWith('.json') && !/\.json\.bak\./.test(path)) throw LocalizedError.english('error.gcUnclassifiedStorage', { path });
+    if (!path.endsWith('.json') && !/\.json\.bak\./.test(path)) throw new LocalizedError('error.gcUnclassifiedStorage', { path });
     references(await readJSON(path), refs);
   });
   const candidates: { path: string; kind: string; files: string[] }[] = [];
@@ -474,14 +454,14 @@ async function scanGarbage(home: string, snapshots?: GcHooks['snapshots']) {
   await forEachConcurrent(['objects', 'file-objects', 'files'], async kind => {
     const root = join(home, 'attachments/v1', kind);
     await forEachConcurrent(await entries(root), async prefix => {
-      if (!/^[a-f0-9]{2}$/.test(prefix.name) || !prefix.isDirectory()) throw LocalizedError.english('error.attachmentShard', { path: join(root, prefix.name) });
+      if (!/^[a-f0-9]{2}$/.test(prefix.name) || !prefix.isDirectory()) throw new LocalizedError('error.attachmentShard', { path: join(root, prefix.name) });
       for (const entry of await entries(join(root, prefix.name))) {
         const hash = entry.name; const path = join(root, prefix.name, hash);
-        if (!/^[a-f0-9]{64}$/.test(hash) || hash.slice(0, 2) !== prefix.name) throw LocalizedError.english('error.attachmentObject', { path });
+        if (!/^[a-f0-9]{64}$/.test(hash) || hash.slice(0, 2) !== prefix.name) throw new LocalizedError('error.attachmentObject', { path });
         await safePath(path);
-        if (kind === 'files' ? !entry.isDirectory() : !entry.isFile()) throw LocalizedError.english('error.attachmentObjectType', { path });
+        if (kind === 'files' ? !entry.isDirectory() : !entry.isFile()) throw new LocalizedError('error.attachmentObjectType', { path });
         const files = kind === 'files' ? await filesUnder(path) : [path];
-        if (!refs.hashes.has(hash)) { candidates.push({ path, kind, files }); garbage.add(hash); }
+        if (!refs.has(hash)) { candidates.push({ path, kind, files }); garbage.add(hash); }
       }
     });
   });
@@ -489,56 +469,63 @@ async function scanGarbage(home: string, snapshots?: GcHooks['snapshots']) {
   const cacheFiles = await filesUnder(cache);
   const uploadPath = join(home, 'llm-deepseek/files-v3.json');
   const upload = await readJSON<RemoteCache | undefined>(uploadPath);
-  let uploadMappings = 0;
-  if (upload) {
-    if (upload.formatVersion !== 3 || !Array.isArray(upload.records)) throw LocalizedError.english('error.fileCacheSchema');
-    upload.records = upload.records.filter(record => {
-      if (!/^sha256:[a-f0-9]{64}$/.test(record.attachmentId)) throw LocalizedError.english('error.uploadAttachmentId');
+  const index = UploadIndex && new UploadIndex(uploadPath);
+  const stale: UploadRecord[] = [];
+  if (upload !== undefined) {
+    if (upload?.formatVersion !== 3 || !Array.isArray(upload.records)) throw new LocalizedError('error.fileCacheSchema');
+    const records = index ? (await index.load()).records : upload.records;
+    // rc.5 returns an empty list for malformed records and duplicate variants.
+    if (records.length !== upload.records.length) throw new LocalizedError('error.fileCacheSchema');
+    upload.records = records.filter(record => {
+      if (!/^sha256:[a-f0-9]{64}$/.test(record.attachmentId)) throw new LocalizedError('error.uploadAttachmentId');
       const hash = record.attachmentId.slice(7);
-      if (refs.hashes.has(hash)) return true;
-      garbage.add(hash); uploadMappings++; return false;
+      if (refs.has(hash)) return true;
+      garbage.add(hash); stale.push(record); return false;
     });
   }
-  return { candidates, garbage, cache, cacheFiles, uploadPath, upload, uploadMappings };
+  return { candidates, garbage, cache, cacheFiles, uploadPath, upload, index, stale };
 }
 
 /** Read-only estimate using the same reference checks as the actual collection. */
-export async function garbageSize(home: string, snapshots?: GcHooks['snapshots']): Promise<number> {
-  const { candidates, cacheFiles } = await scanGarbage(home, snapshots);
-  const seen = new Set<string>(); let bytes = 0;
+export async function garbageSize(home: string, sources: GcSources = {}): Promise<number> {
+  const { candidates, cacheFiles } = await scanGarbage(home, sources);
+  const links = new Map<string, bigint>(); let bytes = 0;
   await forEachConcurrent([...candidates.flatMap(candidate => candidate.files), ...cacheFiles], async path => {
     const st = await fs.lstat(path, { bigint: true });
-    // DSH's file aliases are hard links; count their shared content only once.
+    // A surviving hard link (including a DSH temp file) keeps the content on disk.
     const key = `${st.dev}:${st.ino}`;
-    if (!seen.has(key)) { seen.add(key); bytes += Number(st.size); }
+    const count = (links.get(key) ?? 0n) + 1n;
+    links.set(key, count);
+    if (count === st.nlink) bytes += Number(st.size);
   });
   return bytes;
 }
 
 /** Explicit, globally quiescent mark/sweep. Interrupted GC is rescanned, never replayed from a stale manifest. */
-export async function collectGarbage(home: string, { hooks, failAfter }: { hooks?: GcHooks; failAfter?: number } = {}): Promise<GcResult> {
+export async function collectGarbage(home: string, { failAfter, ...sources }: GcSources & { failAfter?: number } = {}): Promise<GcResult> {
   // Complete preflight before the first destructive operation; never reuse a size preview.
-  const { candidates, garbage, cache, cacheFiles, uploadPath, upload, uploadMappings } = await scanGarbage(home, hooks?.snapshots);
+  const { candidates, garbage, cache, cacheFiles, uploadPath, upload, index, stale } = await scanGarbage(home, sources);
   let operations = 0;
-  const checkpoint = () => { if (failAfter !== undefined && ++operations >= failAfter) throw LocalizedError.english('error.injectedGcInterruption'); };
-  if (uploadMappings) {
-    if (hooks?.removeUploadMappings) await hooks.removeUploadMappings(garbage);
-    else await atomicJSON(uploadPath, upload);
+  const checkpoint = () => { if (failAfter !== undefined && ++operations >= failAfter) throw new LocalizedError('error.injectedGcInterruption'); };
+  if (stale.length) {
+    if (index) {
+      for (const [scope, records] of Map.groupBy(stale, record => record.scope)) await index.remove(scope, records);
+    } else await atomicJSON(uploadPath, upload);
+    const remaining = await readJSON<RemoteCache | undefined>(uploadPath);
+    if (remaining?.records.some(record => garbage.has(record.attachmentId.slice(7)))) throw new LocalizedError('error.uploadIndexAudit');
     checkpoint();
   }
   // Count one attachment identity once, regardless of its objects, aliases or
   // upload mappings. Derived cache files are separate reclaimed items.
-  const result: GcResult = { total: garbage.size + cacheFiles.length, objects: 0, fileLinks: 0, cacheFiles: cacheFiles.length, uploadMappings };
+  const result: GcResult = { total: garbage.size + cacheFiles.length, objects: 0, fileLinks: 0, cacheFiles: cacheFiles.length, uploadMappings: stale.length };
   for (const candidate of candidates) {
     await removeOwned(candidate.path);
     if (candidate.kind === 'files') result.fileLinks += candidate.files.length; else result.objects++;
     checkpoint();
   }
   if (await exists(cache)) { await removeOwned(cache); checkpoint(); }
-  for (const { path } of candidates) if (await exists(path)) throw LocalizedError.english('error.attachmentAudit');
-  if (await exists(cache)) throw LocalizedError.english('error.cacheAudit');
-  const remaining = await readJSON<RemoteCache | undefined>(uploadPath);
-  if (remaining?.records.some(record => garbage.has(record.attachmentId.slice(7)))) throw LocalizedError.english('error.uploadIndexAudit');
+  for (const { path } of candidates) if (await exists(path)) throw new LocalizedError('error.attachmentAudit');
+  if (await exists(cache)) throw new LocalizedError('error.cacheAudit');
   await atomicJSON(join(stateDir(home), 'gc.json'), { completedAt: new Date().toISOString(), ...result });
   return result;
 }

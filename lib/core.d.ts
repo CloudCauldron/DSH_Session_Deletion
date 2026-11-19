@@ -9,15 +9,6 @@ export interface SessionHeader {
     delegationDepth?: number;
     isSeeded?: boolean;
 }
-export interface References {
-    hashes: Set<string>;
-}
-export interface StoredSession {
-    header: SessionHeader;
-    dir: string;
-    refs: References;
-}
-export type SessionMap = Map<string, StoredSession>;
 export interface DeletionPlan {
     ids: string[];
     directories: {
@@ -72,13 +63,27 @@ interface ScheduleData {
         tasks: Record<string, ScheduleTask>;
     };
 }
+interface UploadRecord {
+    scope: string;
+    attachmentId: string;
+    variantId: string;
+    fileId: string;
+}
+export interface UploadIndex {
+    load(): Promise<{
+        records: UploadRecord[];
+    }>;
+    remove(scope: string, records: Array<Pick<UploadRecord, 'variantId' | 'fileId'>>): Promise<unknown>;
+}
 interface Edit {
     path: string;
     data: unknown;
+    detach?: [workspaceId: string, sessionId: string][];
 }
 export interface LiveSnapshot {
     header: SessionHeader;
     events: readonly unknown[];
+    staged?: readonly unknown[];
 }
 export interface SweepHooks {
     /** Live owners mutate their own tables, never overwrite them from a disk snapshot. */
@@ -86,9 +91,9 @@ export interface SweepHooks {
     receiptCommitted?(receipt: Receipt): void;
     onlySessionId?: string;
 }
-export interface GcHooks {
-    snapshots?(): Promise<Map<string, LiveSnapshot>>;
-    removeUploadMappings?(hashes: ReadonlySet<string>): Promise<void>;
+export interface GcSources {
+    snapshots?: readonly LiveSnapshot[];
+    UploadIndex?: new (path: string) => UploadIndex;
 }
 export declare const SUPPORTED_DSH = "0.2.2-rc.5";
 export declare const STATE_NAME = ".dsh-session-deletion";
@@ -109,12 +114,12 @@ export declare function atomicJSON(path: string, data: unknown): Promise<void>;
 export declare function readJSON<T>(path: string, fallback?: T): Promise<T>;
 export declare function removeOwned(path: string): Promise<void>;
 export declare function cleanAtomicTemps(directory: string): Promise<void>;
-export declare function readLog(path: string, headerOnly?: boolean): Promise<{
-    header: SessionHeader;
-    refs: References;
-}>;
-export declare function scanSessions(home: string, snapshots?: Map<string, LiveSnapshot>): Promise<SessionMap>;
-export declare function familyOf(sessions: SessionMap, rootId: string): Set<string>;
+export declare function readLog(path: string, refs?: Set<string>): Promise<SessionHeader>;
+export declare function scanSessions(home: string, refs?: Set<string>): Promise<Map<string, {
+    dir: string;
+    createdAt: number;
+}>>;
+export declare function familyOf(headers: ReadonlyMap<string, SessionHeader>, rootId: string): string[];
 /** Locate only the confirmed family's directories. No other transcript or attachment is read. */
 export declare function planSessionDeletion(home: string, headers: Map<string, SessionHeader>, rootId: string): Promise<DeletionPlan>;
 export declare function listRequests(home: string): Promise<DeletionRequest[]>;
@@ -125,10 +130,9 @@ export declare function sweep(home: string, { failAfter, hooks }?: {
     hooks?: SweepHooks;
 }): Promise<Result[]>;
 /** Read-only estimate using the same reference checks as the actual collection. */
-export declare function garbageSize(home: string, snapshots?: GcHooks['snapshots']): Promise<number>;
+export declare function garbageSize(home: string, sources?: GcSources): Promise<number>;
 /** Explicit, globally quiescent mark/sweep. Interrupted GC is rescanned, never replayed from a stale manifest. */
-export declare function collectGarbage(home: string, { hooks, failAfter }?: {
-    hooks?: GcHooks;
+export declare function collectGarbage(home: string, { failAfter, ...sources }?: GcSources & {
     failAfter?: number;
 }): Promise<GcResult>;
 export {};

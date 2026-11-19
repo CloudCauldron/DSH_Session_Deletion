@@ -7,7 +7,7 @@
 <span style="margin-left:2em;">​</span>Out of the box, DeepSeek Harness `0.2.2-rc.5` only supports session archiving. As daily usage and multi-agent collaboration grow, historical sessions, subagent records, and associated file and image attachments remain on the local disk indefinitely. `dsh-session-deletion` fills this gap by bringing two key maintenance capabilities to DSH:
 
 - **Session Deletion**: Removes the logs and projection caches of the target session and its subagents, and cleans up session associations and related configurations in the workspace.
-- **Orphaned Attachment and Cache Cleanup (GC)**: Intelligently scans all live sessions when the system is idle to accurately identify and clean up unreferenced orphaned attachments and local image caches, freeing up disk space.
+- **Orphaned Attachment and Cache Cleanup (GC)**: Reclaims unreferenced local attachments and regenerable image caches when DSH is idle.
 
 ## **2 - Key Features**
 
@@ -16,9 +16,9 @@
 - **Fine-Grained Isolation and Concurrency Safety**
     Deletion operations lock only the target session and its subagents, leaving other active sessions, AI tasks, background executions, and file uploads completely undisturbed.
 - **Global Orphaned Attachment and Cache Reclamation**
-    Provides a dedicated garbage collection feature. Safely scans actual references across all active sessions and removes only confirmed unlinked orphaned attachments and temporary image caches, preventing accidental deletion of valid data.
+    Checks persisted session logs, live sessions, staged uploads, and DSH storage before removing orphaned attachments. A shared image becomes reclaimable after its last reference disappears.
 - **Automatic Recovery from Unexpected Interruptions**
-    Uses a transactional mechanism. If a power outage or abnormal process termination occurs during cleanup, DSH automatically resumes and completes unfinished deletions on the next startup, preventing data inconsistency or leftover remnants.
+    The recovery guard resumes a pending session deletion after the host exits or at the next startup. If attachment cleanup is interrupted, run **Free Up Space** again for a fresh scan.
 
 ## **3 - User Guide**
 
@@ -36,7 +36,7 @@ The scope of deletion and cleanup is as follows:
 | Session associations in the workspace, archive and pin records, and linked scheduled tasks | Deleted with the session |
 | Browser session state recognized by the plugin | Cleaned up after the plugin runs in the corresponding browser |
 | Unreferenced local attachments, local upload mappings, and regenerable image caches | Cleaned up by running GC separately |
-| Tool output temporary files (spill) and staged upload files | Not reclaimed by the plugin |
+| Tool-output spill files and temporary attachment files in `attachments/v1/tmp/` | Retained |
 | Workspaces and their path information, empty project container directories, and user-saved project files | Retained |
 
 Content already inherited or copied by other sessions, server-side files, and filesystem snapshots and backups are outside the deletion scope of this plugin.
@@ -46,14 +46,14 @@ Content already inherited or copied by other sessions, server-side files, and fi
 <span style="margin-left:2em;">​</span>The plugin separates the reclamation of orphaned attachments and caches into a standalone cleanup feature rather than performing it alongside session deletion, primarily to ensure data safety during multi-session concurrency and resource sharing:
 
 - **Attachments May Be Shared Across Multiple Sessions**: DSH stores local attachments by content hash value. The same file may be jointly referenced by forked sessions, inherited history, or other sessions, making it impossible to determine whether it can be deleted based solely on the owning session.
-- **Preventing Accidental Deletion from Concurrent Writes**: While a single session is being deleted, other sessions might be referencing the same attachment or holding staged uploads not yet written to logs. Global cleanup uniformly inspects references across all live sessions, in-memory snapshots, and staging areas when the system is idle, while blocking new related writes during scanning and deletion.
+- **Preventing Accidental Deletion from Concurrent Writes**: While a single session is being deleted, other sessions might be referencing the same attachment or holding staged uploads not yet written to logs. While DeepSeek chat import is active, both the size estimate and cleanup are unavailable. An unrecognized JSONL backup also stops both operations so its attachments can be reviewed.
 - **Distinguishing Exclusive vs. Shared Caches**: Projection caches exclusive to the target session are deleted directly with the session, whereas rebuildable shared caches (such as request images) are safely reclaimed by global cleanup when no related generation tasks are running.
 
 By separating the two, routine session deletion only needs to lock the target session and its subagents without disturbing other active tasks; the overhead of global scanning and concurrency protection is incurred only when you explicitly need to free up disk space.
 
 1. Click **"More"** at the bottom of the left navigation sidebar.
 2. Select **"Free Up Space"**. The menu shows how much space can be reclaimed, or **"Size unknown"** if the estimate is unavailable.
-3. After confirmation, the system completes the scan and cleanup while idle, and displays the number of reclaimed resource items upon completion.
+3. Confirm cleanup when all sessions are idle. DSH displays the number of reclaimed attachments and cache files.
 
 ## **4 - Requirements**
 
@@ -119,6 +119,8 @@ After any pending recovery deletions have finished and DSH is stopped, you can o
 ## **6 - Development and Testing**
 
 <span style="margin-left:2em;">​</span>All source code and tests are written in TypeScript. Builds still use TypeScript 7 via the `@typescript/native` alias, while the `typescript` alias provides the TypeScript 6 compatibility API solely for ESLint, following [Microsoft's side-by-side instructions](https://devblogs.microsoft.com/typescript/announcing-typescript-7-0/#running-side-by-side-with-typescript-60).
+
+The browser suite uses Chrome and a local rc.5 CLI. On Windows, set `DSH_CLI` to the absolute path of the installed `@deepseek-ai/dsh/lib/bin.js`. Set `CHROME_PATH` if Chrome is installed outside its default location.
 
 ```bash
 pnpm lint              # ESLint correctness and async checks

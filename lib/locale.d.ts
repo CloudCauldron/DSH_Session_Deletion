@@ -12,7 +12,5 @@ export declare class LocalizedError extends Error {
     readonly messages: LocalizedMessage[];
     readonly diagnostic?: string;
     constructor(key: string | LocalizedMessage[], params?: LocalizedMessage['params'], options?: DiagnosticOptions);
-    /** Keep the original English CLI diagnostic while exposing its keys to the browser. */
-    static english(key: string, params?: LocalizedMessage['params'], options?: DiagnosticOptions): LocalizedError;
 }
 export {};

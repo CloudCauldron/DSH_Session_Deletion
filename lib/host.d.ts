@@ -3,6 +3,7 @@ import type { WebServer } from '@deepseek-ai/dsh-host-webserver';
 import { type DeletionRuntime } from './runtime.js';
 import type { Gate } from './gate.js';
 export interface HostContext {
+    effect(register: () => () => void, label: string): unknown;
     sessionDeletionGate: Gate;
     sessionDeletionRuntime: DeletionRuntime;
     sessionPersistence: {
