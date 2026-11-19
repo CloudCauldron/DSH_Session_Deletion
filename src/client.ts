@@ -66,7 +66,7 @@ window.__ModuleLoader__.load({ id: 'dsh-session-deletion', factory(require) {
     MenuItemButton: import('react').ComponentType<{ children: ElementNode; disabled?: boolean; danger?: boolean; separatorBefore?: boolean; icon?: ElementNode; title?: string; onSelect(): void }>;
     Modal: import('react').ComponentType<{ open: boolean; onClose(): void; closeLabel: string; title: string; description?: ElementNode; footer?: ElementNode; children?: ElementNode; className?: string }>;
     Button: import('react').ComponentType<import('react').ButtonHTMLAttributes<HTMLButtonElement> & { variant: 'outline' }>;
-    Toast: import('react').ComponentType<{ text: string; icon?: ElementNode; holdMs?: number; onDone(): void }>;
+    Toast: import('react').ComponentType<{ text: string; tone?: 'success'; icon?: ElementNode; holdMs?: number; onDone(): void }>;
     IconWarningOutlineRegular: import('react').ComponentType<{ size?: number }>;
     StateDot: import('react').ComponentType<{ state: 'ongoing'; size?: number }>;
   };
@@ -310,7 +310,7 @@ window.__ModuleLoader__.load({ id: 'dsh-session-deletion', factory(require) {
       : recovering ? 'recovery.pending'
       : submitting || state.status.deletionRunning || state.status.locked.length ? 'delete.busy' : undefined;
     const notice = state.toast ? h(ui.Toast, {
-      key: state.toast.id, text: translate(state.toast.message),
+      key: state.toast.id, text: translate(state.toast.message), tone: 'success',
       onDone: () => { if (toast === state.toast) { toast = undefined; publish(); } },
     }) : noticeKey ? h(StatusToast, { key: noticeKey, text: t(noticeKey), warning: recovering }) : null;
     if (!d) return h(React.Fragment, null, notice, null);

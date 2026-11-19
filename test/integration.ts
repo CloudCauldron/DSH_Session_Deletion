@@ -266,6 +266,7 @@ try{
  await page.getByRole('dialog',{name:/归档并删除此会话|删除此会话/}).waitFor({state:'hidden',timeout:30000});
  const deletedToast=page.getByRole('alert').filter({hasText:'会话已删除：Offline deletion integration fixture'});
  await deletedToast.waitFor();
+ assert.equal(await deletedToast.locator(':scope > :first-child svg').count(),1);
  assert.match(await deletedToast.getAttribute('class')??'',/toast/);
  assert.equal(await deletedToast.evaluate(el=>el.parentElement===document.body),true);
  assert.equal(host!.exitCode,null,'DSH must remain running during deletion');
@@ -339,6 +340,7 @@ try{
  await controls('release-gc');
  const resultToast=page.getByRole('alert').filter({hasText:'共清理 3 项残留附件与缓存文件。'});
  await resultToast.waitFor({timeout:30000});
+ assert.equal(await resultToast.locator(':scope > :first-child svg').count(),1);
  assert.equal(await resultToast.innerText(),'共清理 3 项残留附件与缓存文件。');
  assert.match(await resultToast.getAttribute('class')??'',/toast/);
  assert.equal(await resultToast.evaluate(el=>el.parentElement===document.body),true);
@@ -351,6 +353,7 @@ try{
  await page.getByRole('button',{name:'确认清理',exact:true}).click();
  const emptyResult=page.getByRole('alert').filter({hasText:'共清理 0 项残留附件与缓存文件。'});
  await emptyResult.waitFor({timeout:30000});
+ assert.equal(await emptyResult.locator(':scope > :first-child svg').count(),1);
  assert.equal(await emptyResult.innerText(),'共清理 0 项残留附件与缓存文件。');
  assert.equal(await page.locator('.dsh-session-deletion-gc').count(),0);
  assert.equal(await exists(join(home,'attachments/v1/objects',exclusive.slice(0,2),exclusive)),false);
