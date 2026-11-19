@@ -1,10 +1,18 @@
 {
   "compilerOptions": {
-    "target": "ES2023", "module": "NodeNext", "moduleResolution": "NodeNext", "moduleDetection": "legacy",
-    "lib": ["ES2024", "DOM"], "types": ["node", "react"],
-    "strict": true, "noUncheckedIndexedAccess": false, "skipLibCheck": true,
-    "rootDir": "src", "outDir": "lib", "declaration": true,
-    "sourceMap": false, "forceConsistentCasingInFileNames": true
+    "target": "ESNext",
+    "module": "NodeNext",
+    "moduleResolution": "NodeNext",
+    "moduleDetection": "legacy",
+    "lib": ["ES2024", "DOM"],
+    "strict": true,
+    "noUncheckedIndexedAccess": false,
+    "allowImportingTsExtensions": true,
+    "noEmit": true,
+    "types": ["node", "react"],
+    "skipLibCheck": true,
+    "forceConsistentCasingInFileNames": true
   },
-  "include": ["src/**/*.ts"]
+  "include": ["src/**/*.ts", "scripts/**/*.ts", "test/**/*.ts"],
+  "exclude": ["tmp", "lib", "node_modules"]
 }
