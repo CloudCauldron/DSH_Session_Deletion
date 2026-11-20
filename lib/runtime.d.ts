@@ -1,4 +1,4 @@
-import { type UploadIndex, type LiveSnapshot, type SessionHeader, type GcResult, type ScheduleTask } from './core.js';
+import { type UploadIndex, type LiveSnapshot, type SessionHeader, type SessionStat, type GcResult, type ScheduleTask } from './core.js';
 import { LocalizedError } from './locale/errors.js';
 import { type LocalizedMessage } from './locale/shared.js';
 interface Session {
@@ -103,9 +103,7 @@ export interface RuntimeContext {
     sessionPersistence: {
         name: string;
         root: string;
-        stat(id: string): Promise<{
-            sizeBytes: number;
-        } | undefined>;
+        stat(id: string): Promise<SessionStat | undefined>;
         flush(): Promise<void>;
         coldLogMemo?: DeletionCache;
     };
@@ -253,7 +251,7 @@ export declare class DeletionRuntime {
     /** The public stop APIs do not expose cold-resumed or external Activation cleanup. */
     private manager;
     private activations;
-    /** Start native cleanup synchronously after locking, retaining the main Session until commit. */
+    /** Keep the main session resident until its work and child activations have stopped. */
     private stop;
     private until;
     private checkScheduleDelivery;
@@ -262,7 +260,7 @@ export declare class DeletionRuntime {
     get archivedIds(): string[];
     private gcSources;
     private runMaintenance;
-    remove(id: string, createdAt: number, expectedIds: readonly string[]): Promise<{
+    remove(id: string, confirmed: ReadonlyMap<string, number>): Promise<{
         deleted: number;
     }>;
     private assertSoleHost;

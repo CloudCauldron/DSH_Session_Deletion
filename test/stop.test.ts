@@ -3,10 +3,13 @@ import assert from 'node:assert/strict';
 import fs from 'node:fs/promises';
 import { syncBuiltinESMExports } from 'node:module';
 import { join } from 'node:path';
+import { hash } from 'node:crypto';
+import { zstdCompressSync } from 'node:zlib';
 import { setTimeout as delay } from 'node:timers/promises';
 import { fixture } from './fixtures.ts';
 import { makeRuntime } from './runtime-fixture.ts';
 import { familyOf, exists, listRequests, stateDir, requestPath } from '../lib/core.js';
+import { tryLock } from '../lib/locks.js';
 import type { RuntimeContext } from '../lib/runtime.js';
 import type { DeletionRuntime } from '../src/runtime.ts';
 
@@ -49,7 +52,7 @@ async function stoppingFixture() {
     dshHomePath: () => f.home, subagents,
     agents: { get: id => agents.get(id) },
     sessions: { get: id => agents.get(id)?.session, list: () => [...agents.values()].map(agent => agent.session) },
-    sessionPersistence: { stat: async () => ({ sizeBytes: 1 }) },
+    sessionPersistence: { stat: f.stat },
     sessionProjectionCache: { table: new Map() },
     sessionQuery: { listSessions: async () => Object.values(f.headers).map(header => ({ header, persisted: true })) },
     workspaceRegistry: { archivedSessionIds: [], archiveSession: async () => { assert.fail('deletion must not archive'); } },
@@ -80,14 +83,14 @@ async function stoppingFixture() {
     agents.set(id, agent);
     runtime.handles.set(id, { agent, dispose: async () => {
       disposed.push(id);
-      if (id === f.ids.main) assert.equal((await listRequests(f.home)).length, 1, 'the visible main Session remains until durable deletion intent');
       await options.dispose?.(); agents.delete(id);
     } });
     return agent;
   };
   const root = addAgent(f.ids.main);
   const ids = familyOf(new Map(Object.entries(f.headers)), f.ids.main);
-  const remove = () => runtime.remove(f.ids.main, f.headers[f.ids.main].createdAt, ids);
+  const confirmed = new Map(ids.map(id => [id, f.headers[id].createdAt]));
+  const remove = () => runtime.remove(f.ids.main, confirmed);
   const settleJob = (job: Job, proof: boolean | undefined) => {
     job.status = 'killed';
     if (proof !== undefined) emit('session/event', agents.get(job.owner!)!.session,
@@ -142,11 +145,15 @@ for (const kind of ['local', 'external', 'closing'] as const) void test(`joins n
   } finally { cleanup.resolve(); await s.f.cleanup(); }
 });
 
-void test('the shared deadline invalidates deletion while late native cleanup retains protection', async () => {
+for (const phase of ['agent work', 'writer drain']) void test(`the shared deadline keeps protection until late ${phase} settles`, async () => {
   const s = await stoppingFixture(), cleanup = deferred();
   try {
     s.runtime.stopTimeoutMs = 200;
-    s.root.status = 'idle'; s.root.whenIdle = () => cleanup.promise; // maintenance is publicly idle
+    if (phase === 'agent work') s.root.whenIdle = () => cleanup.promise; // maintenance is publicly idle
+    else {
+      const handle = s.runtime.handles.get(s.root.id)!, dispose = handle.dispose;
+      handle.dispose = async () => { await cleanup.promise; await dispose(); };
+    }
     await assert.rejects(s.remove(), /did not stop within 30 seconds/);
     assert(s.runtime.isLocked(s.root.id)); assert.equal(s.runtime.deletionRunning, true);
     assert(s.agents.has(s.root.id)); assert.deepEqual(await listRequests(s.f.home), []);
@@ -155,7 +162,7 @@ void test('the shared deadline invalidates deletion while late native cleanup re
     assert.ok(unloading);
     await assert.rejects(s.remove(), /no longer active/);
     cleanup.resolve(); await unloading;
-    assert.equal(s.runtime.isLocked(s.root.id), false); assert(s.agents.has(s.root.id));
+    assert.equal(s.runtime.isLocked(s.root.id), false); assert.equal(s.agents.has(s.root.id), phase === 'agent work');
     assert.deepEqual(await listRequests(s.f.home), []);
     assert.equal(await exists(join(s.f.home, 'sessions/project', s.root.id)), true, 'late completion never enters enqueue or sweep');
     assert.equal(s.listeners(), 0);
@@ -246,16 +253,64 @@ void test('duplicate operation identities drain once and do not wedge stopping',
 void test('a request rename committed before a post-rename error preserves the journal and locks', async () => {
   const s = await stoppingFixture(); const rm = fs.rm;
   try {
+    const handle = s.runtime.handles.get(s.root.id)!, dispose = handle.dispose;
+    const { location } = await s.f.stat(s.root.id);
+    handle.dispose = async () => {
+      assert.deepEqual(await listRequests(s.f.home), []);
+      await fs.appendFile(location.path, zstdCompressSync('{"type":"final-drain"}\n'));
+      await dispose();
+    };
     fs.rm = async function (path, ...args) {
       await rm.call(this, path, ...args);
       if (String(path).includes('.session-deletion-write-') && await exists(requestPath(s.f.home, s.root.id))) throw Error('post-rename cleanup failure');
     };
     syncBuiltinESMExports();
     await assert.rejects(s.remove(), /post-rename/);
-    assert.equal((await listRequests(s.f.home)).length, 1);
-    assert(s.runtime.isLocked(s.root.id)); assert(s.agents.has(s.root.id));
-    assert.deepEqual(s.disposed, []);
+    const [request] = await listRequests(s.f.home);
+    const bytes = await fs.readFile(location.path);
+    const transcript = request.plan.directories.find(row => row.id === s.root.id)!.transcript;
+    assert.equal(transcript.sha256, hash('sha256', bytes)); assert.equal(transcript.sizeBytes, bytes.length);
+    assert(s.runtime.isLocked(s.root.id)); assert.deepEqual(s.disposed, [s.root.id]);
   } finally { fs.rm = rm; syncBuiltinESMExports(); await s.f.cleanup(); }
+});
+
+for (const failure of ['writer', 'missing', 'identity', 'path', 'size', 'journal'] as const) void test(`${failure} failure before publication preserves every transcript and projection`, async () => {
+  const s = await stoppingFixture(), open = fs.open;
+  const competingWriter = failure === 'writer' && await tryLock(join(s.f.home, 'sessions/project', s.f.ids.grand, 'session.lock'));
+  try {
+    const paths = s.ids.flatMap(id => [join(s.f.home, 'sessions/project', id, 'session.v4.jsonl.zstd'),
+      join(s.f.home, 'storages/session_projcache/sessions', id + '.json')]);
+    const contents = () => Promise.all(paths.map(path => fs.readFile(path)));
+    const before = await contents();
+    let projectionDeletes = 0;
+    s.runtime.ctx.sessionProjectionCache.table.delete = () => { projectionDeletes++; };
+    s.runtime.ctx.sessionPersistence.stat = async id => {
+      const stored = await s.f.stat(id);
+      if (id !== s.root.id || s.agents.has(id)) return stored;
+      for (const target of s.ids) {
+        const lock = await tryLock(join(s.f.home, 'sessions/project', target, 'session.lock'));
+        if (lock) { await lock.close(); assert.fail('Every family writer must be excluded during transcript capture'); }
+      }
+      if (failure === 'missing') return { header: stored.header };
+      if (failure === 'identity') return { ...stored, header: { ...stored.header, createdAt: 0 } };
+      if (failure === 'path') return { ...stored, location: (await s.f.stat(s.f.ids.other)).location };
+      if (failure === 'size') return { ...stored, sizeBytes: stored.sizeBytes + 1 };
+      return stored;
+    };
+    if (failure === 'journal') {
+      fs.open = async (file, ...args) => {
+        if (String(file).startsWith(join(stateDir(s.f.home), 'pending', '.session-deletion-write-'))) throw Error('journal write failed');
+        return open(file, ...args);
+      };
+      syncBuiltinESMExports();
+    }
+    const reason = { writer: /writer is still active/, missing: /session has changed/, identity: /session has changed/,
+      path: /Invalid deletion plan path/, size: /session has changed/, journal: /journal write failed/ };
+    await assert.rejects(s.remove(), reason[failure]);
+    assert.deepEqual(await listRequests(s.f.home), []); assert.equal(projectionDeletes, 0);
+    assert.deepEqual(await contents(), before); assert.equal(s.runtime.locked.size, 0);
+    assert.deepEqual(s.runtime.receipt.deletedIdHashes, []);
+  } finally { fs.open = open; syncBuiltinESMExports(); if (competingWriter) await competingWriter.close(); await s.f.cleanup(); }
 });
 
 void test('directory fsync failure after journal rename cannot reopen the target', { skip: process.platform !== 'linux' }, async () => {
@@ -275,7 +330,7 @@ void test('directory fsync failure after journal rename cannot reopen the target
     syncBuiltinESMExports();
     await assert.rejects(s.remove(), /directory fsync/);
     assert.equal(failed, true); assert.equal((await listRequests(s.f.home)).length, 1);
-    assert(s.runtime.isLocked(s.root.id)); assert(s.agents.has(s.root.id)); assert.deepEqual(s.disposed, []);
+    assert(s.runtime.isLocked(s.root.id)); assert.deepEqual(s.disposed, [s.root.id]);
   } finally { fs.open = open; syncBuiltinESMExports(); await s.f.cleanup(); }
 });
 
@@ -286,10 +341,10 @@ void test('a final read crossing the deadline cannot enqueue after it eventually
     const headers = s.runtime.headers.bind(s.runtime); let reads = 0;
     s.runtime.headers = async () => { if (++reads > 1) await read.promise; return headers(); };
     await assert.rejects(s.remove(), /did not stop within 30 seconds/);
-    assert.deepEqual(s.cancelled, [s.root.id]); assert(s.agents.has(s.root.id));
+    assert.deepEqual(s.cancelled, [s.root.id]); assert.deepEqual(s.disposed, [s.root.id]);
     assert.deepEqual(await listRequests(s.f.home), []);
     read.resolve(); await delay(10);
-    assert.deepEqual(await listRequests(s.f.home), []); assert.deepEqual(s.disposed, []);
+    assert.deepEqual(await listRequests(s.f.home), []); assert.equal(await exists((await s.f.stat(s.root.id)).location.path), true);
   } finally { read.resolve(); await s.f.cleanup(); }
 });
 

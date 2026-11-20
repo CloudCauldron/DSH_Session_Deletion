@@ -38,7 +38,7 @@ async function body(req: IncomingMessage): Promise<Record<string, unknown>> {
 export function registerRoutes(ctx: HostContext, runtime: DeletionRuntime): void {
   const home = runtime.home;
   registerCatalogs(ctx.connection.fetch, 'session-deletion');
-  const previews = new Map<string, { token: string; expires: number; createdAt: number; ids: string[] }>();
+  const previews = new Map<string, { token: string; expires: number; family: Map<string, number> }>();
   ctx.effect(() => ctx.webServer.register({ kind: 'prefix', path: '/session-deletion/api', async handler(req, res) {
     try {
       const admission = ctx.connection.admit(req);
@@ -75,7 +75,7 @@ export function registerRoutes(ctx: HostContext, runtime: DeletionRuntime): void
           || !timingSafeEqual(Buffer.from(token), Buffer.from(preview.token))) throw new HttpError(409, 'error.previewExpired');
         previews.delete(id);
         // remove() reserves maintenance synchronously, before its authoritative async reads.
-        send(res, 200, { ok: true, ...await runtime.remove(id, preview.createdAt, preview.ids) }); return;
+        send(res, 200, { ok: true, ...await runtime.remove(id, preview.family) }); return;
       }
       const result = await (async () => {
         const headers = await runtime.headers(); const header = headers.get(id);
@@ -85,7 +85,7 @@ export function registerRoutes(ctx: HostContext, runtime: DeletionRuntime): void
         if (path === '/session-deletion/api/preview') {
           const token = randomBytes(24).toString('hex');
           if (previews.size >= 256) previews.delete(previews.keys().next().value!);
-          previews.set(id, { token, expires: Date.now() + 120000, createdAt: header.createdAt, ids });
+          previews.set(id, { token, expires: Date.now() + 120000, family: new Map(ids.map(member => [member, headers.get(member)!.createdAt])) });
           return { ok: true, sessionId: id, count: ids.length, token, archived: runtime.archivedIds.includes(id) };
         }
         throw new HttpError(404, 'error.unknownRoute');

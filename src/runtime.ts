@@ -7,7 +7,7 @@ import { realpath } from 'node:fs/promises';
 import { join, relative, resolve } from 'node:path';
 import { setTimeout as delay } from 'node:timers/promises';
 import { SUPPORTED_DSH, digest, enqueue, familyOf, listRequests, readJSON, readSchedule, stateDir, sweep, planSessionDeletion, collectGarbage, garbageSize, scheduledSession,
-  type UploadIndex, type LiveSnapshot, type Receipt, type SessionHeader, type GcResult, type ScheduleTask } from './core.js';
+  type UploadIndex, type LiveSnapshot, type Receipt, type SessionHeader, type SessionStat, type GcResult, type ScheduleTask } from './core.js';
 import { tryLock, sameHomeHosts } from './locks.js';
 import type { Lock } from './platform/index.js';
 import { LocalizedError } from './locale/errors.js';
@@ -64,7 +64,7 @@ export interface RuntimeContext {
   sessions: { list(): Session[]; get(id: string): Session | undefined };
   sessionPersistence: {
     name: string; root: string;
-    stat(id: string): Promise<{ sizeBytes: number } | undefined>;
+    stat(id: string): Promise<SessionStat | undefined>;
     flush(): Promise<void>;
     coldLogMemo?: DeletionCache;
   };
@@ -466,7 +466,7 @@ export class DeletionRuntime {
     }
     return targets;
   }
-  /** Start native cleanup synchronously after locking, retaining the main Session until commit. */
+  /** Keep the main session resident until its work and child activations have stopped. */
   private stop(root: SessionHeader, headers: Map<string, SessionHeader>, ids: string[], deadline: number): { done: Promise<void>; manager: SubagentManager } {
     const manager = this.manager();
     const activations = this.activations(root, ids, manager);
@@ -554,7 +554,7 @@ export class DeletionRuntime {
     for (const id of all) {
       if (targets.has(id)) {
         const stored = await this.ctx.sessionPersistence.stat(id);
-        if (!stored || !(stored.sizeBytes > 0)) reasons.push(message('activity.unsaved'));
+        if ((stored?.sizeBytes ?? 0) <= 0) reasons.push(message('activity.unsaved'));
       }
       if (this.operations.get(id)?.size) reasons.push(message('activity.operations'));
       const agent = this.ctx.agents.get(id) as Agent | undefined;
@@ -603,8 +603,8 @@ export class DeletionRuntime {
       else finish();
     }
   }
-  remove(id: string, createdAt: number, expectedIds: readonly string[]): Promise<{ deleted: number }> {
-    return this.runMaintenance('delete', () => this.removeOne(id, createdAt, expectedIds));
+  remove(id: string, confirmed: ReadonlyMap<string, number>): Promise<{ deleted: number }> {
+    return this.runMaintenance('delete', () => this.removeOne(id, confirmed));
   }
   private async assertSoleHost(): Promise<void> {
     if ((await sameHomeHosts(this.home, process.pid)).length) throw new DeletionRefused('error.otherHost');
@@ -649,16 +649,21 @@ export class DeletionRuntime {
       });
     });
   }
-  private async removeOne(id: string, createdAt: number, expectedIds: readonly string[]): Promise<{ deleted: number }> {
+  private async removeOne(id: string, confirmed: ReadonlyMap<string, number>): Promise<{ deleted: number }> {
     const deadline = performance.now() + this.stopTimeoutMs;
     if ((await this.until(listRequests(this.home), deadline)).length) throw new DeletionRefused('error.pendingCleanup');
     // A preview can see an imported log before its workspace attachment settles.
     if (this.importer?.active) await this.until(this.importer.active.settled, deadline);
-    const headers = await this.until(this.headers(), deadline); const root = headers.get(id);
-    if (!root || root.createdAt !== createdAt) throw new DeletionRefused('error.sessionChanged');
-    if (root.origin === 'subagent' || (root.delegationDepth ?? 0) > 0) throw new DeletionRefused('error.mainSessionRequired');
-    const ids = familyOf(headers, id);
-    if (JSON.stringify(ids) !== JSON.stringify(expectedIds)) throw new DeletionRefused('error.familyChanged');
+    const readConfirmedFamily = async () => {
+      const headers = await this.until(this.headers(), deadline); const root = headers.get(id);
+      if (!root || root.createdAt !== confirmed.get(id)) throw new DeletionRefused('error.sessionChanged');
+      if (root.origin === 'subagent' || (root.delegationDepth ?? 0) > 0) throw new DeletionRefused('error.mainSessionRequired');
+      const ids = familyOf(headers, id);
+      if (ids.length !== confirmed.size || ids.some(member => !confirmed.has(member))) throw new DeletionRefused('error.familyChanged');
+      if (ids.some(member => headers.get(member)!.createdAt !== confirmed.get(member))) throw new DeletionRefused('error.sessionChanged');
+      return { headers, root, ids };
+    };
+    const { headers, root, ids } = await readConfirmedFamily();
     this.assertAllowed(ids);
     await this.checkScheduleDelivery(ids, deadline);
     await this.until(this.assertSoleHost(), deadline);
@@ -671,32 +676,35 @@ export class DeletionRuntime {
       if (this.manager() !== stopped.manager || this.activations(root, ids, stopped.manager).length) throw new DeletionRefused('activity.unconfirmed');
       const again = await this.until(this.quiescence(ids, false, true), deadline);
       if (again.busy) throw new DeletionRefused(again.reasons);
-      const current = await this.until(this.headers(), deadline);
-      if (JSON.stringify(familyOf(current, id)) !== JSON.stringify(ids)) throw new DeletionRefused('error.familyChanged');
-      if (ids.some(member => current.get(member)?.createdAt !== headers.get(member)?.createdAt)) throw new DeletionRefused('error.sessionChanged');
-      const plan = await this.until(planSessionDeletion(this.home, current, id), deadline);
+      const plan = await this.until(planSessionDeletion(this.home, headers, id), deadline);
       await this.checkScheduleDelivery(ids, deadline);
       if (performance.now() >= deadline) throw new DeletionRefused('error.stopTimeout');
-      if (this.manager() !== stopped.manager || this.activations(root, ids, stopped.manager).length) throw new DeletionRefused('activity.unconfirmed');
-      // Commit only private paths. No attachment reference snapshot is needed.
-      enqueueAttempted = true;
-      const request = await enqueue(this.home, root, plan);
       for (const member of [...ids].reverse()) {
         const agent = this.ctx.agents.get(member);
         if (agent) {
           const handle = this.handles.get(member);
-          if (!handle || handle.agent !== agent) throw new LocalizedError('error.lifecycleChanged');
-          await handle.dispose();
+          if (!handle || handle.agent !== agent || agent.session.header.createdAt !== confirmed.get(member)) throw new LocalizedError('error.lifecycleChanged');
+          // DSH drains the transcript and releases its writer lease during disposal.
+          this.stopping = handle.dispose();
+          await this.until(this.stopping, deadline);
+          this.stopping = undefined;
         }
         if (this.ctx.sessions.get(member) || this.ctx.agents.get(member)) throw new LocalizedError('error.liveStoresRetained');
-        const writes = this.cacheWrites.get(member);
-        if (writes?.size) await Promise.all(writes);
-        await this.unwrap(this.ctx.sessionProjectionCache).table.delete(member);
       }
-      for (const record of request.plan.directories) {
+      for (const record of plan.directories) {
         const lock = await tryLock(join(this.home, record.path, 'session.lock'), true);
         if (!lock) throw new LocalizedError('error.activeSessionWriter');
         writerLocks.push(lock);
+      }
+      await readConfirmedFamily();
+      await this.checkScheduleDelivery(ids, deadline);
+      if (this.manager() !== stopped.manager || this.activations(root, ids, stopped.manager).length) throw new DeletionRefused('activity.unconfirmed');
+      enqueueAttempted = true;
+      await enqueue(this.home, root, plan, member => this.ctx.sessionPersistence.stat(member));
+      for (const member of ids) {
+        const writes = this.cacheWrites.get(member);
+        if (writes?.size) await Promise.all(writes);
+        await this.unwrap(this.ctx.sessionProjectionCache).table.delete(member);
       }
       const result = await sweep(this.home, { hooks: {
         onlySessionId: id,

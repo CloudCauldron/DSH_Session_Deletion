@@ -12,12 +12,15 @@ export interface SessionHeader {
   type?: 'session'; version: number; id: string; createdAt: number; cwd?: string;
   parentSession?: string; origin?: 'subagent'; delegationDepth?: number; isSeeded?: boolean;
 }
-export interface DeletionPlan {
-  ids: string[]; directories: { path: string; id: string; createdAt: number }[];
+interface SessionDirectory { path: string; id: string; createdAt: number }
+interface Transcript { path: string; sizeBytes: number; sha256: string }
+export interface SessionStat { header: SessionHeader; sizeBytes?: number; location?: { kind: string; path: string } }
+export interface DeletionPlan<T extends SessionDirectory = SessionDirectory> {
+  ids: string[]; directories: T[];
 }
 export interface DeletionRequest {
-  schema: 3; dshVersion: string; sessionId: string; createdAt: number; queuedAt: string;
-  plan: DeletionPlan;
+  schema: 1; dshVersion: string; sessionId: string; createdAt: number; queuedAt: string;
+  plan: DeletionPlan<SessionDirectory & { transcript: Transcript }>;
 }
 export interface Result { sessions: number }
 export interface GcResult { total: number; objects: number; fileLinks: number; cacheFiles: number; uploadMappings: number }
@@ -314,7 +317,7 @@ function validatePlan(home: string, id: string, plan: DeletionPlan): void {
     const path = resolve(home, row.path);
     const parts = relative(join(home, 'sessions'), path).split(sep);
     if (!ids.has(row.id) || !Number.isFinite(row.createdAt) || parts.length !== 2
-      || !inside(join(home, 'sessions'), path) || basename(path) !== encodeSegment(row.id)) throw new LocalizedError('error.invalidPlanPath');
+      || relative(home, path) !== row.path || !inside(join(home, 'sessions'), path) || basename(path) !== encodeSegment(row.id)) throw new LocalizedError('error.invalidPlanPath');
   }
 }
 export async function listRequests(home: string): Promise<DeletionRequest[]> {
@@ -324,21 +327,44 @@ export async function listRequests(home: string): Promise<DeletionRequest[]> {
     if (!/^[a-f0-9]{64}\.json$/.test(e.name)) throw new LocalizedError('error.pendingQueueFile');
     const r = await readJSON<DeletionRequest | undefined>(join(stateDir(home), 'pending', e.name));
     if (r === undefined) continue;
-    if (r.schema !== 3 || digest(r.sessionId) + '.json' !== e.name || r.dshVersion !== SUPPORTED_DSH)
+    if (r.schema !== 1 || digest(r.sessionId) + '.json' !== e.name || r.dshVersion !== SUPPORTED_DSH)
       throw new LocalizedError('error.invalidDeletionRequest');
     validatePlan(home, r.sessionId, r.plan);
+    if (r.plan.directories.find(row => row.id === r.sessionId)?.createdAt !== r.createdAt
+      || r.plan.directories.some(({ transcript }) => !transcript || !LOG.test(transcript.path)
+        || !Number.isSafeInteger(transcript.sizeBytes) || transcript.sizeBytes <= 0 || !/^[a-f0-9]{64}$/.test(transcript.sha256)))
+      throw new LocalizedError('error.invalidDeletionRequest');
     out.push(r);
   }
   return out;
 }
-export async function enqueue(home: string, header: SessionHeader, plan: DeletionPlan) {
+/** The caller holds every target writer lock through journal publication and cleanup. */
+export async function enqueue(home: string, header: SessionHeader, plan: DeletionPlan, stat: (id: string) => Promise<SessionStat | undefined>) {
   await safePath(home, { directory: true });
   validatePlan(home, header.id, plan);
   if (plan.directories.find(row => row.id === header.id)?.createdAt !== header.createdAt) throw new LocalizedError('error.targetLifecycleMismatch');
   const path = requestPath(home, header.id);
   if (await exists(path)) throw new LocalizedError('error.deletionAlreadyQueued');
-  const request: DeletionRequest = { schema: 3, dshVersion: SUPPORTED_DSH, sessionId: header.id,
-    createdAt: header.createdAt, queuedAt: new Date().toISOString(), plan };
+  const directories: DeletionRequest['plan']['directories'] = [];
+  for (const row of plan.directories) {
+    const stored = await stat(row.id);
+    if (stored?.header.id !== row.id || stored.header.createdAt !== row.createdAt || stored.location?.kind !== 'jsonl')
+      throw new LocalizedError('error.sessionChanged');
+    const source = stored.location.path, leaf = basename(source);
+    if (!LOG.test(leaf) || source !== join(home, row.path, leaf)) throw new LocalizedError('error.invalidPlanPath');
+    await safePath(source);
+    await using file = await fs.open(source, constants.O_RDONLY | constants.O_NOFOLLOW | constants.O_NONBLOCK);
+    const info = await file.stat();
+    if (!info.isFile()) throw new LocalizedError('error.unexpectedFile', { path: source });
+    if (!info.size || info.size !== stored.sizeBytes) throw new LocalizedError('error.sessionChanged');
+    const input = file.createReadStream();
+    const hash = createHash('sha256');
+    for await (const chunk of input) hash.update(chunk);
+    if (input.bytesRead !== stored.sizeBytes) throw new LocalizedError('error.sessionChanged');
+    directories.push({ ...row, transcript: { path: leaf, sizeBytes: input.bytesRead, sha256: hash.digest('hex') } });
+  }
+  const request: DeletionRequest = { schema: 1, dshVersion: SUPPORTED_DSH, sessionId: header.id,
+    createdAt: header.createdAt, queuedAt: new Date().toISOString(), plan: { ids: plan.ids, directories } };
   await atomicJSON(path, request);
   return request;
 }

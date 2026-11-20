@@ -5,7 +5,7 @@ import { zstdCompressSync } from 'node:zlib';
 import { digest, encodeSegment, enqueue, planSessionDeletion } from '../lib/core.js';
 import type { SessionHeader } from '../lib/core.js';
 
-export async function fixture() {
+export async function fixture(compressed = true) {
   const base = await fs.mkdtemp(join(tmpdir(), 'dsh-deletion-测试 空格-'));
   const home = join(base, 'home'); const temporary = join(base, 'tmp');
   await fs.mkdir(home, { mode: 0o700 }); await fs.mkdir(temporary, { mode: 0o700 });
@@ -13,13 +13,14 @@ export async function fixture() {
   const ids = { main: 'session-main', child: 'session-child', grand: 'session-grand', fork: 'session-fork', other: 'session-other' };
   const write = async (path: string, value: string | Buffer) => { await fs.mkdir(join(path, '..'), { recursive: true, mode: 0o700 }); await fs.writeFile(path, value, { mode: 0o600 }); };
   const headers: Record<string, SessionHeader> = {};
+  const logName = compressed ? 'session.v4.jsonl.zstd' : 'session.v4.jsonl';
   async function session(id: string, extra: Partial<SessionHeader> = {}, refs: unknown[] = []) {
     const header: SessionHeader = { type: 'session', version: 4, id, createdAt: 1234, cwd: '/project', isSeeded: false, ...extra };
     headers[id] = header;
-    const path = join(home, 'sessions', 'project', encodeSegment(id), 'session.v4.jsonl.zstd');
+    const path = join(home, 'sessions', 'project', encodeSegment(id), logName);
     // Real persistence uses concatenated independent Zstandard frames.
-    await write(path, Buffer.concat([zstdCompressSync(JSON.stringify(header) + '\n'),
-      zstdCompressSync(JSON.stringify({ type: 'user/message', seq: 0, data: { content: refs } }) + '\n')]));
+    const lines = [header, { type: 'user/message', seq: 0, data: { content: refs } }].map(record => JSON.stringify(record) + '\n');
+    await write(path, compressed ? Buffer.concat(lines.map(line => zstdCompressSync(line))) : lines.join(''));
     if (process.platform !== 'win32') await write(join(path, '..', 'session.lock'), '');
     await write(join(home, 'storages/session_projcache/sessions', encodeSegment(id) + '.json'), JSON.stringify({ version: 1, record: { title: id, refs } }));
   }
@@ -48,8 +49,12 @@ export async function fixture() {
     bytes: 5, createdAt: 1, expiresAt: 3600001,
   })) }));
   const projectFile = join(base, 'project-file.txt'); await write(projectFile, 'user project must survive');
-  return { base, home, temporary, ids, headers, exclusive, shared, spillRoot, spill, sharedSpill, write, session, projectFile,
-    queue: async () => enqueue(home, headers[ids.main], await planSessionDeletion(home, new Map(Object.entries(headers)), ids.main)),
+  async function stat(id: string) {
+    const path = join(home, 'sessions/project', encodeSegment(id), logName);
+    return { header: headers[id], sizeBytes: (await fs.stat(path)).size, location: { kind: 'jsonl', path } };
+  }
+  return { base, home, temporary, ids, headers, exclusive, shared, spillRoot, spill, sharedSpill, write, session, projectFile, stat,
+    queue: async (id = ids.main) => enqueue(home, headers[id], await planSessionDeletion(home, new Map(Object.entries(headers)), id), stat),
     cleanup: () => fs.rm(base, { recursive: true, force: true }) };
 }
 

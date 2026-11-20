@@ -2,8 +2,8 @@ import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import fs from 'node:fs/promises';
 import { readdirSync } from 'node:fs';
-import { createHash, randomBytes } from 'node:crypto';
-import { join } from 'node:path';
+import { createHash, Hash, hash, randomBytes } from 'node:crypto';
+import { basename, join } from 'node:path';
 import { zstdCompressSync, constants } from 'node:zlib';
 import { syncBuiltinESMExports } from 'node:module';
 import { scanSessions, sweep, collectGarbage, garbageSize, exists, digest, encodeSegment, listRequests, readJSON, stateDir, enqueue, planSessionDeletion, atomicJSON, safePath, readLog, SUPPORTED_DSH, scheduledSession } from '../lib/core.js';
@@ -34,13 +34,33 @@ void test('compressed logs retain every frame across blocks, checksums and input
   } finally { await f.cleanup(); }
 });
 
-void test('journals identify the reviewed host version', async () => {
-  const f = await fixture();
+for (const compressed of [false, true]) void test(`schema 1 captures only the selected ${compressed ? 'compressed' : 'plain'} transcript for each confirmed member`, async t => {
+  const f = await fixture(compressed);
   try {
-    const plan = await planSessionDeletion(f.home, new Map(Object.entries(f.headers)), f.ids.main);
-    await enqueue(f.home, f.headers[f.ids.main], plan);
-    assert.equal((await listRequests(f.home))[0].dshVersion, SUPPORTED_DSH);
+    const root = await f.stat(f.ids.main);
+    const historical = JSON.stringify({ ...root.header, version: 3 }) + '\n';
+    await f.write(root.location.path.replace('.v4.', '.v3.'), compressed ? zstdCompressSync(historical) : historical);
+    await f.session('unlinked');
+    const blank = await f.stat('unlinked');
+    const headerOnly = JSON.stringify(blank.header) + '\n';
+    await f.write(blank.location.path, compressed ? zstdCompressSync(headerOnly) : headerOnly);
+    const updates = t.mock.method(Hash.prototype, 'update');
+    const contentHashes = () => new Set(updates.mock.calls.filter(call => Buffer.isBuffer(call.arguments[0])).map(call => call.this)).size;
+    await garbageSize(f.home); await collectGarbage(f.home);
+    assert.equal(await exists(blank.location.path), true);
+    assert.equal(contentHashes(), 0);
+    await f.queue();
+    const [request] = await listRequests(f.home);
+    assert.equal(request.schema, 1); assert.equal(request.dshVersion, SUPPORTED_DSH);
+    assert.deepEqual(request.plan.ids, [f.ids.child, f.ids.grand, f.ids.main]);
+    for (const row of request.plan.directories) {
+      const { header, location } = await f.stat(row.id);
+      const bytes = await fs.readFile(location.path);
+      assert.equal(row.createdAt, header.createdAt); assert.equal(join(f.home, row.path, row.transcript.path), location.path);
+      assert.deepEqual(row.transcript, { path: basename(location.path), sizeBytes: bytes.length, sha256: hash('sha256', bytes) });
+    }
     await sweep(f.home);
+    assert.equal(contentHashes(), 3);
     assert.equal((await listRequests(f.home)).length, 0);
   } finally { await f.cleanup(); }
 });
@@ -107,7 +127,7 @@ void test('receipts retain all hashes and advance revision after each deletion',
     assert.deepEqual(first.deletedIdHashes.slice(0, previous.length), previous);
     assert.equal(first.deletedIdHashes.length, previous.length + 3);
     assert.match(first.revision, /^[a-f0-9]{32}$/);
-    await enqueue(f.home, f.headers[f.ids.other], await planSessionDeletion(f.home, new Map(Object.entries(f.headers)), f.ids.other));
+    await f.queue(f.ids.other);
     await sweep(f.home);
     const second = await readJSON<Receipt>(path);
     assert.notEqual(second.revision, first.revision);
@@ -203,9 +223,9 @@ void test('plan validation rejects invalid schemas and traversal', async () => {
     const plan = await planSessionDeletion(f.home, new Map(Object.entries(f.headers)), f.ids.main);
     if (process.platform === 'win32') {
       const outside = { ...plan, directories: plan.directories.map(row => ({ ...row, path: `${f.home[0].toUpperCase() === 'Z' ? 'Y' : 'Z'}:\\${row.id}` })) };
-      await assert.rejects(enqueue(f.home, f.headers[f.ids.main], outside), /Invalid deletion plan path/);
+      await assert.rejects(enqueue(f.home, f.headers[f.ids.main], outside, f.stat), /Invalid deletion plan path/);
     }
-    await assert.rejects(enqueue(f.home, { ...f.headers[f.ids.main], createdAt: 9 }, plan), /lifecycle/);
+    await assert.rejects(enqueue(f.home, { ...f.headers[f.ids.main], createdAt: 9 }, plan, f.stat), /lifecycle/);
     await f.queue();
     const path = join(stateDir(f.home), 'pending', digest(f.ids.main) + '.json');
     const request = await readJSON<DeletionRequest>(path);

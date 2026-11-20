@@ -1,5 +1,6 @@
 // Loaded only by the isolated integration profile, never packaged or installed for the user.
 import * as fs from 'node:fs/promises';
+import assert from 'node:assert/strict';
 import { randomUUID } from 'node:crypto';
 import { join } from 'node:path';
 import { stateDir } from '../lib/core.js';
@@ -27,7 +28,10 @@ type FixtureContext = Pick<HostContext, 'webServer' | 'connection'> & Pick<Runti
  attachments: { saveImage(input: unknown): Promise<{ attachmentId: string }> };
  workspaceRegistry: RuntimeContext['workspaceRegistry'] & { create(path: string): Promise<{ id: string; attachSession(id: string): Promise<void>; detachSession(id: string): Promise<void> }> };
  agents: { get(id: string): Agent | undefined };
- sessionPersistence: { flush(): Promise<void>; tracker: { openHandles: Iterable<{ id: string; access: string }> } };
+ sessionPersistence: Pick<RuntimeContext['sessionPersistence'], 'flush' | 'stat'> & {
+  open(id: string, access: 'write'): Promise<{ close(): Promise<void> }>;
+  tracker: { openHandles: Iterable<{ id: string; access: string }> };
+ };
  sessionController: { resolveAgent(id: string): Promise<{ agent: Agent; error?: unknown }>; prompt(request: { sessionId: string }): Promise<unknown> };
  fileUploads: { upload(agent: Agent, data: { data: string; name: string }, signal: AbortSignal): Promise<unknown> };
  sessionDeletionRuntime: Pick<DeletionRuntime, keyof DeletionRuntime> & {
@@ -180,6 +184,11 @@ export function apply(ctx: FixtureContext){
     await ctx.subagents.startActivation({provider:'deletion-test-external',parent:nativeParents.get(data.id!)!,label:'Rejected new work',prompt:[{type:'text',text:'Must not start'}],signal:new AbortController().signal,delivery:'caller'});
    }else if(path==='/deletion-test/release-external'){
     releaseExternal?.();
+   }else if(path==='/deletion-test/locked-transcript'){
+    const id=data.id!;
+    assert.ok(![...persistence.tracker.openHandles].some(h=>h.id===id&&h.access==='write'));
+    await assert.rejects(async()=>(await persistence.open(id,'write')).close(),{name:'SessionAlreadyOwnedError'});
+    res.writeHead(200,{'Content-Type':'application/json'});res.end(JSON.stringify(await persistence.stat(id)));return;
    }else if(path==='/deletion-test/state'||path==='/deletion-test/archive-probe'){
     if(path.endsWith('archive-probe'))await ctx.workspaceRegistry.archiveSession(data.id!);
     const agent=ctx.agents.get(data.id!);

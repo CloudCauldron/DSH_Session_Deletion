@@ -9,21 +9,37 @@ export interface SessionHeader {
     delegationDepth?: number;
     isSeeded?: boolean;
 }
-export interface DeletionPlan {
-    ids: string[];
-    directories: {
+interface SessionDirectory {
+    path: string;
+    id: string;
+    createdAt: number;
+}
+interface Transcript {
+    path: string;
+    sizeBytes: number;
+    sha256: string;
+}
+export interface SessionStat {
+    header: SessionHeader;
+    sizeBytes?: number;
+    location?: {
+        kind: string;
         path: string;
-        id: string;
-        createdAt: number;
-    }[];
+    };
+}
+export interface DeletionPlan<T extends SessionDirectory = SessionDirectory> {
+    ids: string[];
+    directories: T[];
 }
 export interface DeletionRequest {
-    schema: 3;
+    schema: 1;
     dshVersion: string;
     sessionId: string;
     createdAt: number;
     queuedAt: string;
-    plan: DeletionPlan;
+    plan: DeletionPlan<SessionDirectory & {
+        transcript: Transcript;
+    }>;
 }
 export interface Result {
     sessions: number;
@@ -123,7 +139,8 @@ export declare function familyOf(headers: ReadonlyMap<string, SessionHeader>, ro
 /** Locate only the confirmed family's directories. No other transcript or attachment is read. */
 export declare function planSessionDeletion(home: string, headers: Map<string, SessionHeader>, rootId: string): Promise<DeletionPlan>;
 export declare function listRequests(home: string): Promise<DeletionRequest[]>;
-export declare function enqueue(home: string, header: SessionHeader, plan: DeletionPlan): Promise<DeletionRequest>;
+/** The caller holds every target writer lock through journal publication and cleanup. */
+export declare function enqueue(home: string, header: SessionHeader, plan: DeletionPlan, stat: (id: string) => Promise<SessionStat | undefined>): Promise<DeletionRequest>;
 /** Sweep confirmed session data under the caller's live maintenance or exclusive offline writer protections. */
 export declare function sweep(home: string, { failAfter, hooks }?: {
     failAfter?: number;

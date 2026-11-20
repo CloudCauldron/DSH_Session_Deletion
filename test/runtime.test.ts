@@ -237,7 +237,10 @@ void test('a child created after HTTP validation requires renewed confirmation b
    workspaceRegistry: { archiveSession: async () => { archived = true; } },
   });
   runtime.headers = async () => new Map(Object.entries(f.headers));
-  await assert.rejects(runtime.remove(f.ids.main, 1234, [f.ids.main]), /The subagent group has changed/);
+  await assert.rejects(runtime.remove(f.ids.main, new Map([[f.ids.main, 1234]])), /The subagent group has changed/);
+  const confirmed = new Map(familyOf(new Map(Object.entries(f.headers)), f.ids.main).map(id => [id, f.headers[id].createdAt]));
+  f.headers[f.ids.child].createdAt++;
+  await assert.rejects(runtime.remove(f.ids.main, confirmed), /session has changed/);
   assert.equal(archived, false);
   assert.deepEqual(await listRequests(f.home), []);
  } finally { await f.cleanup(); }
@@ -271,7 +274,7 @@ for (const failure of ['receipt-read', 'receipt-cleanup']) void test(`deletion p
    workspaceRegistry: { archiveSession: async () => {}, archivedSessionIds: [f.ids.main] },
    agents: { get: () => undefined }, sessions: { get: () => undefined },
    sessionProjectionCache: { table: { delete: async () => {} } },
-   sessionPersistence: {}, sessionQuery: {}, emit() {},
+   sessionPersistence: { stat: f.stat }, sessionQuery: {}, emit() {},
   });
   const headers = new Map(Object.entries(f.headers));
   runtime.headers = async () => headers;
@@ -293,7 +296,7 @@ for (const failure of ['receipt-read', 'receipt-cleanup']) void test(`deletion p
   };
   syncBuiltinESMExports();
   const ids = familyOf(headers, f.ids.main);
-  const removal = runtime.remove(f.ids.main, f.headers[f.ids.main].createdAt, ids);
+  const removal = runtime.remove(f.ids.main, new Map(ids.map(id => [id, f.headers[id].createdAt])));
   if (failure === 'receipt-read') assert.deepEqual(await removal, { deleted: 3 });
   else await assert.rejects(removal, /Injected post-rename failure/);
   const persisted = JSON.parse(await readFile(path, 'utf8'));

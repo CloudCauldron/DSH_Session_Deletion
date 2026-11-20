@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict';
 import * as fs from 'node:fs/promises';
-import { join, resolve } from 'node:path';
+import { basename, join, resolve } from 'node:path';
 import { tmpdir } from 'node:os';
 import { spawn } from 'node:child_process';
 import { once } from 'node:events';
@@ -114,7 +114,7 @@ try{
  const onboarding=page.getByRole('dialog').filter({hasText:'开始使用'});
  await onboarding.locator('button').first().click();
  await page.addLocatorHandler(page.getByRole('dialog',{name:'开始使用'}),async dialog=>{const close=dialog.locator('button').first();if(await close.isEnabled())await close.click()},{noWaitAfter:true});
- const status=async()=>{const r=await context.request.get(`http://127.0.0.1:${port}/session-deletion/api/status`);assert.equal(r.status(),200);return r.json()};
+ const status=async()=>{const r=await context.request.get(`http://127.0.0.1:${port}/session-deletion/api/status`,{maxRetries:1});assert.equal(r.status(),200);return r.json()};
  const receipt=async()=>{const r=await context.request.get(`http://127.0.0.1:${port}/session-deletion/api/receipt`);assert.equal(r.status(),200);return r.json()};
  const initialStatus=await status();
  assert.equal(initialStatus.ok,true);
@@ -189,7 +189,8 @@ try{
   const staged=await controls('stage',{id:sessionId,text});assert.equal(staged.status(),200,await staged.text());
  }
  assert.equal((await controls('maintain',{id})).status(),200);
- await controls('stop-timeout',{ms:100});
+ // Allow the same-home host scan to finish before the intentionally held work times out.
+ await controls('stop-timeout',{ms:2000});
 
  await page.waitForTimeout(1200);
  await row.hover();await row.locator('xpath=ancestor::*[.//button][1]').locator('button').first().click();
@@ -240,6 +241,13 @@ try{
  await page.getByRole('button',{name:'确认删除',exact:true}).click();
  for(let i=0;i<100;i++){if((await (await controls('held')).json()).held)break;await delay(50)}
  assert.equal((await (await controls('held')).json()).held,true,'test must pause after the backend locks the target');
+ const lockedProbe=await controls('locked-transcript',{id});assert.equal(lockedProbe.status(),200,await lockedProbe.text());
+ const selected=await lockedProbe.json();assert.equal(selected.location.path,log);
+ const [journal]=await listRequests(home);
+ assert.equal(journal.schema,1);assert.deepEqual(journal.plan.ids,[id]);
+ const [target]=journal.plan.directories;
+ assert.equal(join(home,target.path,target.transcript.path),log);
+ assert.deepEqual(target.transcript,{path:basename(log),sizeBytes:selected.sizeBytes,sha256:createHash('sha256').update(await fs.readFile(log)).digest('hex')});
  const deleteToast=page.getByRole('alert').filter({hasText:'正在删除会话…'});
  await page.waitForFunction(()=>[...document.querySelectorAll('[role="alert"]')].some(el=>el.textContent==='正在删除会话…'));
  assert.match(await deleteToast.getAttribute('class')??'',/toast/,'progress uses the DSH Toast primitive');
