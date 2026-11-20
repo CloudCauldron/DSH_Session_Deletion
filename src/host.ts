@@ -46,12 +46,13 @@ export function registerRoutes(ctx: HostContext, runtime: DeletionRuntime): void
       if (admission.peer.principal.kind !== 'owner') throw new HttpError(403, 'error.ownerRequired');
       const path = new URL(req.url || '/', 'http://localhost').pathname;
       if (req.method === 'GET' && path === '/session-deletion/api/status') {
+        const [requests, gc, cleanup] = await Promise.all([
+          listRequests(home), readJSON<unknown>(join(stateDir(home), 'gc.json'), null), readJSON<unknown>(join(stateDir(home), 'status.json'), null),
+        ]);
         send(res, 200, { ok: true, mode: 'private-delete-and-gc', version: SUPPORTED_DSH, gcRunning: runtime.gcRunning, deletionRunning: runtime.deletionRunning,
           archived: runtime.archivedIds, locked: [...runtime.locked],
-          pending: (await listRequests(home)).map(r => ({ sessionId: r.sessionId, queuedAt: r.queuedAt })),
-          receipt: runtime.receiptSummary,
-          gc: await readJSON<unknown>(join(stateDir(home), 'gc.json'), null),
-          cleanup: await readJSON<unknown>(join(stateDir(home), 'status.json'), null) }); return;
+          pending: requests.map(r => ({ sessionId: r.sessionId, queuedAt: r.queuedAt })),
+          receipt: runtime.receiptSummary, gc, cleanup }); return;
       }
       if (req.method === 'GET' && path === '/session-deletion/api/receipt') {
         send(res, 200, { ok: true, ...runtime.receipt }); return;

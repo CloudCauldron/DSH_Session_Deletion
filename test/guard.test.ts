@@ -29,8 +29,12 @@ void test('kernel writer lock defers all cleanup and preserves pending request',
     assert.equal(await exists(join(f.home,'sessions/project',f.ids.main)),true);
     assert.equal((await listRequests(f.home)).length,1);
     await lock.close();lock=undefined;
-    const retry=spawn(process.execPath,['lib/guard.js',f.home],{stdio:'ignore'});
+    const installed=join(f.base,'installed-plugin');
+    await fs.symlink(process.cwd(),installed,'junction');
+    const retry=spawn(process.execPath,[join(installed,'lib/guard.js'),f.home],{stdio:'ignore'});
     assert.equal((await finished(retry)).code,0);
+    assert.deepEqual(await listRequests(f.home),[]);
+    assert.equal(await exists(join(f.home,'sessions/project',f.ids.main)),false);
   } finally {await lock?.close();await f.cleanup();}
 });
 

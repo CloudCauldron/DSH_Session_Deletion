@@ -257,7 +257,7 @@ void test('deletion copy and API errors follow locale changes, use English for m
       if (url.endsWith('/status') && statusFailed) throw new Error('Disconnected');
       return { ok: true, json: async () => url.endsWith('/receipt')
         ? { revision: completed ? 'deleted' : 'empty', deletedIdHashes: completed ? [createHash('sha256').update(id).digest('hex')] : [] }
-        : { pending, deletionRunning, locked: deletionRunning ? [id] : [], archived: [], ok: true, receipt: { revision: completed ? 'deleted' : 'empty', count: completed ? 1 : 0 } } };
+        : { pending, deletionRunning, locked: deletionRunning || pending.length ? [id] : [], archived: [], ok: true, receipt: { revision: completed ? 'deleted' : 'empty', count: completed ? 1 : 0 } } };
     },
   };
   vm.runInNewContext(await readFile(new URL('../lib/client.js', import.meta.url), 'utf8'), sandbox);
@@ -332,13 +332,15 @@ void test('deletion copy and API errors follow locale changes, use English for m
     (buttons().at(-1)!.props.onClick as () => void)(); await new Promise(setImmediate);
     assert(buttons().every(button => button.props.disabled)); assert.equal(closeButton.disabled, true);
     await tick(); assert(buttons().every(button => button.props.disabled), 'failed status reads cannot release unknown server work');
-    statusFailed = false; await tick(); assert(buttons().every(button => button.props.disabled));
+    missingPreview = true; statusFailed = false; await tick(); assert(buttons().every(button => button.props.disabled));
     deletionRunning = false; pending = [{ sessionId: id, queuedAt: 'fixture' }];
-    await tick(); assert(buttons().every(button => button.props.disabled), 'a journal awaiting recovery still owns the target');
-    pending = []; await tick();
-    assert(buttons().every(button => !button.props.disabled)); assert.equal(closeButton.disabled, false);
+    await tick();
+    assert.deepEqual(buttons().map(button => button.props.disabled), [false, true], 'the pending request can be dismissed even when its target has no preview');
+    assert.equal(closeButton.disabled, false);
+    assert.equal(menu.resolve({ sessionId: 'unrelated', displayTitle: 'Other' })[0].disabled, true);
     (modal()!.props.onClose as () => void)(); assert.equal(modal(), undefined);
 
+    pending = []; missingPreview = false; await tick();
     disconnected = false; beforeAcceptance = true;
     menu.resolve({ sessionId: id, displayTitle: 'Test' })[0].run(); await new Promise(setImmediate);
     losePreview = true;

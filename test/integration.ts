@@ -429,17 +429,27 @@ try{
  // A real interrupted private deletion must produce the recovery notice in other tabs.
  const raceSetup=await controls('schedule-race',{id:interrupted.id,otherId:raceDestination.id});assert.equal(raceSetup.status(),200,await raceSetup.text());
  const raceTask=await raceSetup.json();
- const interruptedPreview=await (await context.request.post(`http://127.0.0.1:${port}/session-deletion/api/preview`,{headers:{'X-DSH-Session-Deletion':'1'},data:{sessionId:interrupted.id}})).json();
- const interrupting=context.request.post(`http://127.0.0.1:${port}/session-deletion/api/delete`,{headers:{'X-DSH-Session-Deletion':'1'},data:{sessionId:interrupted.id,token:interruptedPreview.token,confirmation:'DELETE_SESSION'}});
+ assert.equal((await controls('attach',{cwd,id:interrupted.id})).status(),200);
+ assert.equal((await controls('pin',{id:interrupted.id})).status(),200);
+ const interruptedRow=page.locator(`[data-row-key="session:${interrupted.id}"]`);
+ await interruptedRow.click();
+ await interruptedRow.click({button:'right'});
+ await page.getByRole('menuitem',{name:'删除会话',exact:true}).click();
+ const interruptedDialog=page.getByRole('dialog',{name:'删除此会话？',exact:true});
+ const interrupting=page.waitForResponse(r=>new URL(r.url()).pathname==='/session-deletion/api/delete');
+ await interruptedDialog.getByRole('button',{name:'确认删除',exact:true}).click();
  assert.equal((await controls('release-schedule-race')).status(),200);
- const interruptedDelete=await interrupting;
- assert.equal(interruptedDelete.status(),500);
+ assert.equal((await interrupting).status(),500);
  assert.equal((await status()).deletionRunning,false);
  assert.equal((await status()).pending.length,1);
  const recoveryToast=page.getByRole('alert').filter({hasText:'清理未完成，将在下次启动时自动恢复'});
  await recoveryToast.waitFor();
  assert.equal(await recoveryToast.locator('svg').count(),1,'recovery uses the native warning icon');
  await page.waitForFunction(()=>[...document.querySelectorAll('[role="alert"]')].some(el=>el.textContent==='清理未完成，将在下次启动时自动恢复'&&getComputedStyle(el).opacity==='1'));
+ assert.ok(await interruptedDialog.getByRole('button',{name:'确认删除',exact:true}).isDisabled());
+ await interruptedDialog.getByRole('button',{name:'取消',exact:true}).click();
+ await page.getByRole('button',{name:'插件',exact:true}).click();
+ await page.locator('[data-plugin-package="dsh-session-deletion"]').waitFor();
  await recoveryToast.waitFor({state:'detached',timeout:12000});
  await delay(1200);
  assert.equal(await recoveryToast.count(),0,'polling an unchanged state must not reopen an expired Toast');
@@ -496,7 +506,7 @@ try{
   await transcript.waitFor();
   await survivor.click({button:'right'});
   const action=page.getByRole('menuitem',{name:'删除会话',exact:true});
-  await action.waitFor();assert.equal(await action.count(),1);assert.ok(await action.isEnabled());
+  await action.waitFor();assert.equal(await action.count(),1);assert.ok(await action.isDisabled(),'the pending journal still blocks new deletions');
   await page.keyboard.press('Escape');
  }
  await page.goto('about:blank');await stop();

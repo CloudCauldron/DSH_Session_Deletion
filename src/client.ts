@@ -110,10 +110,14 @@ async function mountClient(ctx: DeletionClientContext, require: (name: string) =
   let submitting = false;
   let lastMainId: string | undefined;
   const inputStates = new Map<HTMLElement, { inert: boolean; aria: string | null }>();
+  function maintenanceReady(state: DeletionStatus): boolean {
+    return state.ok && !state.gcRunning && !state.deletionRunning && !state.pending.length;
+  }
   function affected(): boolean {
     if (!active) return false;
     if (gcDialog?.busy || status.gcRunning) return true;
     if (submitting && dialog?.id === lastMainId) return true;
+    if (!status.deletionRunning) return false;
     if (lastMainId && status.locked.includes(lastMainId)) return true;
     const rows = Object.values(ctx.sessions.list.getSnapshot().byId);
     return rows.some(row => status.locked.includes(row.id) && Object.values(row.retainedBy).some(n => n > 0));
@@ -188,7 +192,7 @@ async function mountClient(ctx: DeletionClientContext, require: (name: string) =
     const own = generation, wasSubmitting = submitting;
     // Replacing the existing preview revokes a delete request whose body has
     // not arrived yet. An idle status alone cannot prove that request ended.
-    const failed = dialog?.error && !submitting && !dialog.preview ? dialog : undefined;
+    const failed = dialog?.error && !submitting && !dialog.preview && !status.pending.length ? dialog : undefined;
     if (failed) {
       try {
         const preview = await api<DeletionPreview>('preview', { sessionId: failed.id });
@@ -201,8 +205,8 @@ async function mountClient(ctx: DeletionClientContext, require: (name: string) =
       throw error;
     }
     if (!active) return;
-    if (own === generation && !wasSubmitting && !submitting && dialog?.error && dialog.preview && status.deletionRunning === false
-      && !status.locked.includes(dialog.id) && !status.pending.some(item => item.sessionId === dialog!.id)) dialog = { ...dialog, busy: false };
+    if (own === generation && !wasSubmitting && !submitting && dialog?.busy && dialog.error && status.deletionRunning === false
+      && (dialog.preview || status.pending.some(item => item.sessionId === dialog!.id))) dialog = { ...dialog, busy: false };
     publish();
     try {
       if (!receipt || receipt.revision !== status.receipt.revision) receipt = await api<DeletionReceipt>('receipt');
@@ -233,13 +237,13 @@ async function mountClient(ctx: DeletionClientContext, require: (name: string) =
     close();
   }
   async function confirm(): Promise<void> {
-    if (!dialog?.preview || dialog.busy || submitting || status.gcRunning) return;
+    if (!dialog?.preview || dialog.busy || submitting || !maintenanceReady(status)) return;
     const current = dialog;
     generation++; submitting = true; toast = undefined; dialog = { ...current, busy: true, error: undefined }; publish();
     try {
       await api('delete', { sessionId: current.id, token: current.preview!.token, confirmation: 'DELETE_SESSION' });
       submitting = false;
-      completeDeletion(current.title); await poll();
+      completeDeletion(current.title);
     } catch (e) { submitting = false; dialog = { ...current, preview: undefined, busy: true, error: asFailure(e) }; publish(); }
     finally { await poll(); protectInputs(); }
   }
@@ -270,14 +274,14 @@ async function mountClient(ctx: DeletionClientContext, require: (name: string) =
       ? h('span', { role: 'status', 'aria-label': t('gc.calculating'), style: { display: 'inline-flex', verticalAlign: 'middle' } }, h(ui.StateDot, { state: 'ongoing', size: 12 }))
       : bytes === null ? t('gc.sizeUnavailable') : formatBytes(bytes);
     const [before, after] = t('gc.menu', { size: '{size}' }).split('{size}');
-    return h(ui.MenuItemButton, { disabled: !state.status.ok || !!state.status.gcRunning, separatorBefore: true,
+    return h(ui.MenuItemButton, { disabled: !maintenanceReady(state.status), separatorBefore: true,
       // Phosphor Broom (MIT): its 16-unit outline renders at DSH's regular 1px weight at 16px.
       icon: h('svg', { width: 16, height: 16, viewBox: '0 0 256 256', fill: 'currentColor', 'aria-hidden': true, focusable: false },
         h('path', { d: 'M235.5 216.81c-22.56-11-35.5-34.58-35.5-64.8v-17.28a15.94 15.94 0 0 0-10.09-14.87L165 110a8 8 0 0 1-4.48-10.34l21.32-53a28 28 0 0 0-16.1-37a28.14 28.14 0 0 0-35.82 16a.6.6 0 0 0 0 .12L108.9 79a8 8 0 0 1-10.37 4.49L73.11 73.14a15.89 15.89 0 0 0-17.37 3.66C34.68 98.45 24 123.75 24 152a111.45 111.45 0 0 0 31.18 77.53A8 8 0 0 0 61 232h171a8 8 0 0 0 3.5-15.19M67.14 88l25.41 10.3a24 24 0 0 0 31.23-13.45l21-53c2.56-6.11 9.47-9.27 15.43-7a12 12 0 0 1 6.88 15.92l-21.4 52.99a24 24 0 0 0 13.43 31.14l24.88 9.83V153L55.77 101.71A109 109 0 0 1 67.14 88m48 128a87.53 87.53 0 0 1-24.34-42a8 8 0 0 0-15.49 4a105.2 105.2 0 0 0 18.36 38H64.44A95.54 95.54 0 0 1 40 152a85.9 85.9 0 0 1 7.73-36.29l137.8 55.12c3 18 10.56 33.48 21.89 45.16Z' })),
       onSelect: () => { onDismiss(); gcDialog = {}; publish(); }, children: h(React.Fragment, null, before, size, after) });
   }
   async function collect(): Promise<void> {
-    if (gcDialog?.busy || status.gcRunning) return;
+    if (gcDialog?.busy || !maintenanceReady(status)) return;
     gcDialog = { busy: true }; toast = undefined; publish();
     try {
       const result = await api<GcResult>('gc', { confirmation: 'COLLECT_ORPHAN_ATTACHMENTS' });
@@ -299,7 +303,7 @@ async function mountClient(ctx: DeletionClientContext, require: (name: string) =
       description: h(React.Fragment, null, t('gc.description'), d.error ? errorContent(d.error, t) : null),
       footer: h(React.Fragment, null,
         h(ui.Button, { variant: 'outline', onClick: dismiss, disabled: busy }, t('common.cancel')),
-        h(ui.Button, { variant: 'outline', onClick: () => { void collect(); }, disabled: busy }, t(busy ? 'gc.busy' : 'gc.confirm'))),
+        h(ui.Button, { variant: 'outline', onClick: () => { void collect(); }, disabled: busy || !maintenanceReady(state.status) }, t(busy ? 'gc.busy' : 'gc.confirm'))),
     });
   }
 
@@ -314,8 +318,7 @@ async function mountClient(ctx: DeletionClientContext, require: (name: string) =
 
   function Overlay({ t }: LocalizedProps): ElementNode {
     const state = useSnapshot(); const d = state.dialog;
-    const busy = !!d?.busy || submitting || !!state.status.gcRunning || !!state.status.deletionRunning
-      || !!d && (state.status.locked.includes(d.id) || state.status.pending.some(item => item.sessionId === d.id));
+    const busy = !!d?.busy || submitting || !!state.status.gcRunning || !!state.status.deletionRunning;
     useDisabledClose('.dsh-session-deletion-confirmation', !!d, busy);
     const gcBusy = !!state.status.gcRunning || !!state.gcDialog?.busy;
     const recovering = !gcBusy && state.status.pending.length > 0 && !submitting && state.status.deletionRunning === false;
@@ -342,14 +345,14 @@ async function mountClient(ctx: DeletionClientContext, require: (name: string) =
           d.error ? errorContent(d.error, t) : null),
         footer: h(React.Fragment, null,
           h(ui.Button, { variant: 'outline', onClick: dismiss, disabled: busy }, t('common.cancel')),
-          h(ui.Button, { variant: 'outline', className: 'dsh-session-deletion-danger', onClick: () => { void confirm(); }, disabled: busy || !d.preview }, t(submitting ? 'delete.submitting' : 'delete.confirm'))),
+          h(ui.Button, { variant: 'outline', className: 'dsh-session-deletion-danger', onClick: () => { void confirm(); }, disabled: busy || !d.preview || !maintenanceReady(state.status) }, t(submitting ? 'delete.submitting' : 'delete.confirm'))),
       }));
   }
   const t = ctx.locale.bind(namespace);
   ctx.effect(() => ctx.contextMenus.register({ id: 'session-deletion.action', target: 'session', order: 10000,
     observe: () => [stateSource, ctx.sessions.list, ctx.locale],
     resolve({ sessionId, displayTitle }) {
-      const disabled = status.locked.includes(sessionId) || !status.ok || !globalThis.crypto?.subtle || !!status.gcRunning;
+      const disabled = status.locked.includes(sessionId) || !maintenanceReady(status) || !globalThis.crypto?.subtle;
       return [{ id: 'delete', label: t('delete.menu'), disabled, danger: true, separatorBefore: true,
         afterContent: true, icon: { key: 'workspace.delete' }, run: () => { void open(sessionId, displayTitle); } }];
     } }), 'session-deletion menu');
