@@ -107,7 +107,6 @@
     "error.readSessionLog": "Cannot read session log {path}",
     "error.sessionFormatUnsupported": "Unsupported session format: {path}",
     "error.sessionHeaderUnsupported": "Unsupported session header: {path}",
-    "error.targetHeaderMissing": "Missing target header",
     "error.unclassifiedBackup": "Unclassified backup log requires review: {path}",
 
     "error.confirmDeletion": "Explicit confirmation is required for permanent deletion.",

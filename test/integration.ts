@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict';
 import * as fs from 'node:fs/promises';
-import { basename, join, resolve } from 'node:path';
+import { basename, dirname, join, resolve } from 'node:path';
 import { tmpdir } from 'node:os';
 import { spawn } from 'node:child_process';
 import { once } from 'node:events';
@@ -375,6 +375,9 @@ try{
  assert.equal(await exists(join(home,'attachments/v1/file-objects',stagedShared.slice(0,2),stagedShared)),true,'GC protects other staged drafts');
  assert.equal(await exists(join(home,'attachments/v1/objects',shared.slice(0,2),shared)),true);
  assert.deepEqual(JSON.parse(await fs.readFile(join(home,'llm-deepseek/files-v3.json'),'utf8')).records.map((r: { attachmentId: string })=>r.attachmentId),['sha256:'+shared]);
+ // DSH resolves the encoded ID using the volume's own case semantics.
+ const caseAlias=join(dirname(dirname(cold.path)),cold.id.toUpperCase());
+ if(await exists(caseAlias))await fs.rename(dirname(cold.path),caseAlias);
  const coldProbe=await (await controls('archive-probe',{id:cold.id})).json();assert.equal(coldProbe.archived,true);
  // A cold session copied from Windows has no pre-existing POSIX writer lock.
  if(process.platform==='linux')assert.equal(await exists(join(cold.path,'../session.lock')),false);

@@ -4,7 +4,7 @@ import type { TestContext } from 'node:test';
 import { join } from 'node:path';
 import { tmpdir } from 'node:os';
 import { zstdCompressSync } from 'node:zlib';
-import { captureDeletionRequest, digest, encodeSegment, enqueue, planSessionDeletion } from '../lib/core.js';
+import { captureDeletionRequest, digest, encodeSegment, enqueue, familyOf, planSessionDeletion } from '../lib/core.js';
 import type { SessionHeader } from '../lib/core.js';
 
 export function trackContentHashes(t: TestContext) {
@@ -61,10 +61,13 @@ export async function fixture(compressed = true) {
     const path = join(home, 'sessions/project', encodeSegment(id), logName);
     return { header: headers[id], sizeBytes: (await fs.stat(path)).size, location: { kind: 'jsonl', path } };
   }
-  return { base, home, temporary, ids, headers, exclusive, shared, spillRoot, spill, sharedSpill, write, session, projectFile, stat,
+  function plan(id = ids.main) {
+    const members = familyOf(new Map(Object.entries(headers)), id);
+    return planSessionDeletion(home, id, new Map(members.map(member => [member, headers[member].createdAt])));
+  }
+  return { base, home, temporary, ids, headers, exclusive, shared, spillRoot, spill, sharedSpill, write, session, projectFile, stat, plan,
     queue: async (id = ids.main) => {
-      const plan = await planSessionDeletion(home, new Map(Object.entries(headers)), id);
-      await enqueue(home, await captureDeletionRequest(home, headers[id], plan, stat));
+      await enqueue(home, await captureDeletionRequest(home, headers[id], await plan(id), stat));
     },
     cleanup: () => fs.rm(base, { recursive: true, force: true }) };
 }

@@ -107,7 +107,6 @@
     "error.readSessionLog": "无法读取会话日志 {path}",
     "error.sessionFormatUnsupported": "不支持此会话格式：{path}。",
     "error.sessionHeaderUnsupported": "不支持此会话头：{path}。",
-    "error.targetHeaderMissing": "缺少目标会话头。",
     "error.unclassifiedBackup": "无法判定备份日志的归属，请检查：{path}。",
 
     "error.confirmDeletion": "需要明确确认永久删除。",

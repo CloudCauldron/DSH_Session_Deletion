@@ -137,7 +137,7 @@ export declare function scanSessions(home: string, refs?: Set<string>): Promise<
 }>>;
 export declare function familyOf(headers: ReadonlyMap<string, SessionHeader>, rootId: string): string[];
 /** Locate only the confirmed family's directories. No other transcript or attachment is read. */
-export declare function planSessionDeletion(home: string, headers: Map<string, SessionHeader>, rootId: string): Promise<DeletionPlan>;
+export declare function planSessionDeletion(home: string, rootId: string, confirmed: ReadonlyMap<string, number>): Promise<DeletionPlan>;
 export declare function listRequests(home: string): Promise<DeletionRequest[]>;
 /** The caller holds every target writer lock through journal publication and cleanup. */
 export declare function captureDeletionRequest(home: string, header: SessionHeader, plan: DeletionPlan, stat: (id: string) => Promise<SessionStat | undefined>): Promise<DeletionRequest>;

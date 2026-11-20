@@ -676,7 +676,7 @@ export class DeletionRuntime {
       if (this.manager() !== stopped.manager || this.activations(root, ids, stopped.manager).length) throw new DeletionRefused('activity.unconfirmed');
       const again = await this.until(this.quiescence(ids, false, true), deadline);
       if (again.busy) throw new DeletionRefused(again.reasons);
-      const plan = await this.until(planSessionDeletion(this.home, headers, id), deadline);
+      const plan = await this.until(planSessionDeletion(this.home, id, confirmed), deadline);
       await this.checkScheduleDelivery(ids, deadline);
       if (performance.now() >= deadline) throw new DeletionRefused('error.stopTimeout');
       for (const member of [...ids].reverse()) {

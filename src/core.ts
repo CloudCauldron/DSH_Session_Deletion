@@ -291,21 +291,22 @@ export function familyOf(headers: ReadonlyMap<string, SessionHeader>, rootId: st
 }
 
 /** Locate only the confirmed family's directories. No other transcript or attachment is read. */
-export async function planSessionDeletion(home: string, headers: Map<string, SessionHeader>, rootId: string): Promise<DeletionPlan> {
-  const ids = familyOf(headers, rootId);
-  const names = new Map(ids.map(id => [encodeSegment(id), id]));
+export async function planSessionDeletion(home: string, rootId: string, confirmed: ReadonlyMap<string, number>): Promise<DeletionPlan> {
+  const targets = Array.from(confirmed, ([id, createdAt]) => ({ id, createdAt, name: encodeSegment(id) }));
   const directories: DeletionPlan['directories'] = [];
   for (const project of await entries(join(home, 'sessions'))) {
     if (!project.isDirectory()) continue;
-    for (const child of await entries(join(home, 'sessions', project.name))) {
-      const id = names.get(child.name); if (!id) continue;
-      const path = join('sessions', project.name, child.name);
-      await safePath(join(home, path), { directory: true });
-      const header = headers.get(id); if (!header) throw new LocalizedError('error.targetHeaderMissing');
-      directories.push({ path, id, createdAt: header.createdAt });
+    const projectPath = join('sessions', project.name);
+    await safePath(join(home, projectPath), { directory: true });
+    for (const { id, createdAt, name } of targets) {
+      // Match the provider's path lookup on both case-sensitive and case-insensitive volumes.
+      const path = join(projectPath, name), dir = join(home, path);
+      if (!await exists(dir)) continue;
+      await safePath(dir, { directory: true });
+      directories.push({ path, id, createdAt });
     }
   }
-  const plan = { ids, directories };
+  const plan = { ids: [...confirmed.keys()].sort(), directories };
   validatePlan(home, rootId, plan);
   return plan;
 }

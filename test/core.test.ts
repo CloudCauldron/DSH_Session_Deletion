@@ -6,7 +6,7 @@ import { createHash, hash, randomBytes } from 'node:crypto';
 import { basename, join } from 'node:path';
 import { zstdCompressSync, constants } from 'node:zlib';
 import { syncBuiltinESMExports } from 'node:module';
-import { scanSessions, sweep, collectGarbage, garbageSize, exists, digest, encodeSegment, listRequests, readJSON, stateDir, captureDeletionRequest, planSessionDeletion, atomicJSON, safePath, readLog, SUPPORTED_DSH, scheduledSession } from '../lib/core.js';
+import { scanSessions, sweep, collectGarbage, garbageSize, exists, digest, encodeSegment, listRequests, readJSON, stateDir, captureDeletionRequest, atomicJSON, safePath, readLog, SUPPORTED_DSH, scheduledSession } from '../lib/core.js';
 import type { Receipt, DeletionRequest } from '../lib/core.js';
 import { birth } from '../lib/platform/index.js';
 import { fixture, trackContentHashes } from './fixtures.ts';
@@ -217,7 +217,7 @@ void test('plan validation rejects invalid schemas and traversal', async () => {
   const f = await fixture();
   try {
     assert.equal(encodeSegment('../outside'), '..~002Foutside');
-    const plan = await planSessionDeletion(f.home, new Map(Object.entries(f.headers)), f.ids.main);
+    const plan = await f.plan();
     if (process.platform === 'win32') {
       const outside = { ...plan, directories: plan.directories.map(row => ({ ...row, path: `${f.home[0].toUpperCase() === 'Z' ? 'Y' : 'Z'}:\\${row.id}` })) };
       await assert.rejects(captureDeletionRequest(f.home, f.headers[f.ids.main], outside, f.stat), /Invalid deletion plan path/);
@@ -237,6 +237,15 @@ void test('plan validation rejects invalid schemas and traversal', async () => {
     plan.directories[0].path = '../outside';
     await f.write(path, JSON.stringify({ ...request, plan }));
     await assert.rejects(sweep(f.home), /Invalid deletion plan path/);
+  } finally { await f.cleanup(); }
+});
+
+void test('even a lock-only directory in another project prevents an ambiguous deletion', async () => {
+  const f = await fixture();
+  try {
+    await f.write(join(f.home, 'sessions/other-project', f.ids.child, 'session.lock'), '');
+    await assert.rejects(f.queue(), /Invalid deletion plan identities/);
+    assert.deepEqual(await listRequests(f.home), []);
   } finally { await f.cleanup(); }
 });
 
