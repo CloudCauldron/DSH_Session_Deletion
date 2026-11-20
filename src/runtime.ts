@@ -6,7 +6,7 @@ import { createRequire } from 'node:module';
 import { realpath } from 'node:fs/promises';
 import { join, relative, resolve } from 'node:path';
 import { setTimeout as delay } from 'node:timers/promises';
-import { SUPPORTED_DSH, captureDeletionRequest, digest, enqueue, exists, familyOf, listRequests, readJSON, readSchedule, requestPath, stateDir, sweep, planSessionDeletion, collectGarbage, garbageSize, scheduledSession,
+import { SUPPORTED_DSH, captureDeletionRequest, digest, enqueue, exists, familyOf, listRequests, readReceipt, readSchedule, requestPath, sweep, planSessionDeletion, collectGarbage, garbageSize, scheduledSession,
   type UploadIndex, type LiveSnapshot, type Receipt, type SessionHeader, type SessionStat, type GcResult, type ScheduleTask } from './core.js';
 import { tryLock, sameHomeHosts } from './locks.js';
 import type { Lock } from './platform/index.js';
@@ -255,7 +255,7 @@ export class DeletionRuntime {
     this.receiptRevision = receipt.revision;
   }
   private async loadReceipt(): Promise<void> {
-    this.installReceipt(await readJSON<Receipt>(join(stateDir(this.home), 'receipt.json'), { schema: 1, revision: '', deletedIdHashes: [] }));
+    this.installReceipt(await readReceipt(this.home));
   }
   closeAdmission(): Promise<void> | undefined {
     this.disposed = true;

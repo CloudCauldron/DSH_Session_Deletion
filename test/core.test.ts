@@ -80,12 +80,12 @@ void test('schedule cleanup follows explicit destinations and the native legacy 
   try {
     const path = join(f.home, 'storages/schedule.json');
     await f.write(path, JSON.stringify({ unit: { name: 'schedule', version: 2 }, tables: { tasks: {
-      legacy: { sessionId: f.ids.main },
-      current: { target: { kind: 'session', sessionId: f.ids.main }, sessionId: f.ids.other },
-      child: { target: { kind: 'new_once', sessionId: f.ids.child } },
-      rebound: { target: { kind: 'session', sessionId: f.ids.other }, sessionId: f.ids.main },
-      independent: { target: { kind: 'new' }, sessionId: f.ids.main },
-      involved: { target: { kind: 'session', sessionId: f.ids.other }, involvedSessionIds: [f.ids.main] },
+      legacy: { record: { id: 'legacy' }, sessionId: f.ids.main },
+      current: { record: { id: 'current' }, target: { kind: 'session', sessionId: f.ids.main }, sessionId: f.ids.other },
+      child: { record: { id: 'child' }, target: { kind: 'new_once', sessionId: f.ids.child } },
+      rebound: { record: { id: 'rebound' }, target: { kind: 'session', sessionId: f.ids.other }, sessionId: f.ids.main },
+      independent: { record: { id: 'independent' }, target: { kind: 'new' }, sessionId: f.ids.main },
+      involved: { record: { id: 'involved' }, target: { kind: 'session', sessionId: f.ids.other }, involvedSessionIds: [f.ids.main] },
     } } }));
     assert.equal(scheduledSession({ record: { id: 'legacy-unbound' } }), 'session-schedule-' + digest('legacy-unbound'));
     assert.equal(scheduledSession({ target: { kind: 'new_once' }, record: { id: 'reserved' } }), 'session-schedule-' + digest('reserved'));
@@ -108,7 +108,9 @@ void test('offline recovery refuses unclassifiable bookkeeping before removing s
     }
     await f.write(workspace, original);
     const unit = { name: 'schedule', version: 2 };
-    for (const data of [null, { unit, tables: { tasks: [] } }, { unit, tables: { tasks: { task: { target: null, sessionId: f.ids.child } } } }]) {
+    for (const data of [null, { unit, tables: { tasks: [] } },
+      { unit, tables: { tasks: { task: { record: { id: 'task' }, target: null, sessionId: f.ids.child } } } },
+      { unit, tables: { tasks: { task: { record: { id: 'another-task' }, target: { kind: 'new_once' } } } } }]) {
       const saved = JSON.stringify(data);
       await f.write(schedule, saved);
       await assert.rejects(sweep(f.home), /schedule schema|schedule destination/);
@@ -117,6 +119,12 @@ void test('offline recovery refuses unclassifiable bookkeeping before removing s
     await fs.unlink(schedule);
     await fs.mkdir(schedule);
     await assert.rejects(sweep(f.home), /Unexpected file/);
+    await fs.rmdir(schedule);
+    const receipt = join(stateDir(f.home), 'receipt.json');
+    const malformed = JSON.stringify({ schema: 1, revision: 'prior', deletedIdHashes: digest('prior') });
+    await f.write(receipt, malformed);
+    await assert.rejects(sweep(f.home), /Invalid session deletion receipt/);
+    assert.equal(await fs.readFile(receipt, 'utf8'), malformed);
     assert.deepEqual(await fs.readFile(workspace), original);
     assert.deepEqual(await listRequests(f.home), [request]);
     for (const row of request.plan.directories) assert.ok(await exists(join(f.home, row.path, row.transcript.path)));
@@ -131,10 +139,19 @@ void test('offline recovery honors storage defaults and removes only the targetâ
     const staged = join(projections, f.ids.main + '.json.deleting'), other = join(projections, f.ids.other + '.json.deleting');
     await fs.rename(join(projections, f.ids.main + '.json'), staged);
     await f.write(other, 'unrelated');
+    const backup = join(projections, f.ids.main + '.json.bak.202611201230');
+    const unknown = join(projections, f.ids.main + '.json.bak.notes');
+    await f.write(backup, 'native backup');
+    await f.write(unknown, 'unclassified');
     for (const [name, global] of [['workspace', { initialized: true, workspaceIds: [] }], ['schedule', null]] as const)
       await f.write(join(f.home, 'storages', name + '.json'), JSON.stringify({ unit: { name, version: 2 }, global, tables: {} }));
+    await assert.rejects(sweep(f.home), /Unexpected filesystem entry/);
+    assert.equal(await fs.readFile(unknown, 'utf8'), 'unclassified');
+    assert.ok(await exists(staged));
+    await fs.unlink(unknown);
     assert.deepEqual(await sweep(f.home), [{ sessions: 3 }]);
     assert.equal(await exists(staged), false);
+    assert.equal(await exists(backup), false);
     assert.equal(await fs.readFile(other, 'utf8'), 'unrelated');
   } finally { await f.cleanup(); }
 });

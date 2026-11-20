@@ -139,6 +139,7 @@
     "error.scheduleDestination": "计划任务的目标无效。",
     "error.scheduleEdit": "不支持此计划任务编辑能力。",
     "error.scheduleSchema": "不支持此计划任务数据结构。",
+    "error.receiptSchema": "会话删除回执格式无效。",
     "error.unsupportedLiveEdit": "不支持修改此活动存储：{path}。",
     "error.workspaceSchema": "不支持此工作区存储结构。",
     "error.workspaceSessionsInvalid": "工作区会话记录无效。",

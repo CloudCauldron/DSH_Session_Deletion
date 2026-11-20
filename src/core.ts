@@ -156,6 +156,13 @@ export async function readJSON<T>(path: string, fallback?: T): Promise<T> {
     throw error;
   }
 }
+export async function readReceipt(home: string): Promise<Receipt> {
+  const receipt = await readJSON<Receipt>(join(stateDir(home), 'receipt.json'), { schema: 1, revision: '', deletedIdHashes: [] });
+  if (receipt?.schema !== 1 || typeof receipt.revision !== 'string' || !Array.isArray(receipt.deletedIdHashes)
+    || !receipt.deletedIdHashes.every(hash => typeof hash === 'string' && /^[a-f0-9]{64}$/.test(hash)))
+    throw new LocalizedError('error.receiptSchema');
+  return receipt;
+}
 async function entries(path: string) {
   if (!(await exists(path))) return [];
   await safePath(path, { directory: true });
@@ -430,9 +437,13 @@ async function privateInventory(home: string, ids: ReadonlySet<string>) {
   const rewrite: Edit[] = []; const remove: string[] = [];
   const projections = join(home, 'storages/session_projcache/sessions');
   const names = [...ids].map(id => encodeSegment(id) + '.json');
-  for (const entry of await entries(projections)) if (names.some(name => entry.name === name || entry.name === name + '.deleting' || entry.name.startsWith(name + '.bak.'))) {
-    const path = join(projections, entry.name); await safePath(path);
-    if (!entry.isFile()) throw new LocalizedError('error.unexpectedFile', { path });
+  for (const entry of await entries(projections)) {
+    const name = names.find(name => entry.name === name || entry.name === name + '.deleting' || entry.name.startsWith(name + '.bak.'));
+    if (!name) continue;
+    const path = join(projections, entry.name);
+    const suffix = entry.name.slice(name.length);
+    if (suffix.startsWith('.bak.') && !/^\.bak\.\d{12}$/.test(suffix)) throw new LocalizedError('error.unexpectedEntry', { path });
+    await safePath(path, { file: true });
     remove.push(path);
   }
   const workspacePath = join(home, 'storages/workspace.json');
@@ -463,8 +474,8 @@ async function privateInventory(home: string, ids: ReadonlySet<string>) {
   if (schedule) {
     let changed = false;
     for (const [key, task] of Object.entries(schedule.tables.tasks)) {
+      if (!key || key.trim() !== key || task?.record?.id !== key) throw new LocalizedError('error.scheduleSchema');
       const destination = scheduledSession(task);
-      if (destination === undefined && task.target?.kind !== 'new') throw new LocalizedError('error.scheduleDestination');
       if (destination !== undefined && ids.has(destination)) { delete schedule.tables.tasks[key]; changed = true; }
     }
     if (changed) rewrite.push({ path: schedulePath, data: schedule });
@@ -555,7 +566,7 @@ export async function sweep(home: string, { failAfter, hooks, onResolved }: {
     }
     const work = await privateInventory(home, ids);
     const receiptPath = join(stateDir(home), 'receipt.json');
-    const receipt = await readJSON<Receipt>(receiptPath, { schema: 1, revision: '', deletedIdHashes: [] });
+    const receipt = await readReceipt(home);
     receipt.deletedIdHashes = [...new Set([...receipt.deletedIdHashes, ...plan.ids.map(digest)])];
     checkpoint();
     for (const edit of work.rewrite) {

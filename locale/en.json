@@ -139,6 +139,7 @@
     "error.scheduleDestination": "Invalid schedule destination",
     "error.scheduleEdit": "Unsupported schedule edit capability",
     "error.scheduleSchema": "Unsupported schedule schema",
+    "error.receiptSchema": "Invalid session deletion receipt",
     "error.unsupportedLiveEdit": "Unsupported live storage edit: {path}",
     "error.workspaceSchema": "Unsupported workspace storage schema",
     "error.workspaceSessionsInvalid": "Invalid workspace session accounting",
