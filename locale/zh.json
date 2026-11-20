@@ -111,7 +111,7 @@
 
     "error.confirmDeletion": "需要明确确认永久删除。",
     "error.deletionAlreadyQueued": "删除请求已存在。",
-    "error.identityChangedDuringRecovery": "会话标识在恢复期间发生了变化。",
+    "error.identityChangedDuringRecovery": "{path} 中的会话标识与删除记录不符。",
     "error.injectedInterruption": "已触发模拟中断。",
     "error.invalidDeletionRequest": "删除请求无效。",
     "error.invalidPlanIds": "删除计划中的会话标识无效。",

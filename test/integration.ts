@@ -11,7 +11,7 @@ import { setTimeout as delay } from 'node:timers/promises';
 import { zipSync, strToU8 } from 'fflate';
 import { chromium, type Browser, type Locator } from 'playwright-core';
 import type { SessionHeader } from '../lib/core.js';
-import { exists, encodeSegment, listRequests, SUPPORTED_DSH } from '../lib/core.js';
+import { exists, projectKey, listRequests, SUPPORTED_DSH } from '../lib/core.js';
 import { runGuard } from '../lib/guard.js';
 import { tryLock } from '../lib/locks.js';
 
@@ -43,7 +43,6 @@ const id='session-'+randomUUID();
 const exclusive='a'.repeat(64),shared='b'.repeat(64);
 const stagedShared=createHash('sha256').update('other draft upload').digest('hex');
 const stagedExclusive=createHash('sha256').update('target draft upload').digest('hex');
-const projectKey=(path:string)=>'--'+encodeSegment(path.replace(/[\\/:]+/g,'-').replace(/^-+/,'')||'root').slice(0,251)+'--';
 const sessionDir=join(home,'sessions',projectKey(cwd),id);await fs.mkdir(sessionDir,{recursive:true,mode:0o700});
 const log=join(sessionDir,'session.v4.jsonl.zstd');
 const header: SessionHeader={type:'session',version:4,id,createdAt:Date.now(),cwd,isSeeded:false,delegationDepth:0};
@@ -400,7 +399,7 @@ try{
  assert.equal(nativePreview.count,2);
  const activeRow=page.locator(`[data-row-key="session:${nativeActive.id}"]`);
  await activeRow.hover();await activeRow.locator('button').first().click();
- assert.equal(await page.getByRole('menuitem',{name:'删除会话',exact:true}).isEnabled(),true,'running native work does not disable deletion');
+ // The click waits for the next status poll after the injected diagnostic failure.
  await page.getByRole('menuitem',{name:'删除会话',exact:true}).click();
  const stoppingDialog=page.getByRole('dialog',{name:'删除此会话？',exact:true});
  await stoppingDialog.getByRole('button',{name:'确认删除',exact:true}).click();
@@ -536,11 +535,22 @@ try{
   await assert.rejects(runGuard(home),process.platform==='linux'?/launch environment/:/Another DSH process/);
   assert.equal((await listRequests(home)).length,1);
  }finally{envHost.kill();await envExited}
- await runGuard(home);
+ // Reopening a native session can persist more events before the host stops.
+ const [queued]=await listRequests(home);
+ assert.deepEqual(queued.plan.ids,[interrupted.id]);
+ const survivorRecord=queued.plan.directories[0];
+ assert.equal(join(home,survivorRecord.path,survivorRecord.transcript.path),interrupted.path);
+ const beforeRecovery=await fs.readFile(interrupted.path);
+ const changed=createHash('sha256').update(beforeRecovery).digest('hex')!==survivorRecord.transcript.sha256;
+ const reports:string[]=[];
+ await runGuard(home,line=>reports.push(line));
+ assert.deepEqual(reports,[`Deletion ${changed?'abandoned':'completed'} for ${interrupted.id}.`]);
+ if(changed)assert.deepEqual(await fs.readFile(interrupted.path),beforeRecovery);
+ else assert.equal(await exists(interrupted.path),false);
  await fs.rmdir(oldWorkspace);await fs.writeFile(oldWorkspace,'former workspace directory');
  const again=await start();await page.goto(again);await page.waitForTimeout(2000);
  assert.equal((await status()).pending.length,0);
- assert.equal(await exists(interrupted.path),false,'explicit offline recovery completes the pending deletion');
+ assert.equal((await receipt()).deletedIdHashes.includes(createHash('sha256').update(interrupted.id).digest('hex')),!changed);
  const scheduleAfterRecovery=JSON.parse(await fs.readFile(join(home,'storages/schedule.json'),'utf8'));
  assert.equal(scheduleAfterRecovery.tables.tasks[raceTask.taskId].target.sessionId,raceDestination.id,'a concurrently retargeted reminder survives both failure and recovery');
  assert.equal(await page.evaluate(id=>localStorage.getItem('dsh.conversation.'+id),id),null);

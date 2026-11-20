@@ -105,7 +105,7 @@ export interface SweepHooks {
     /** Live owners mutate their own tables, never overwrite them from a disk snapshot. */
     applyEdit?(edit: Edit, ids: ReadonlySet<string>): Promise<void>;
     receiptCommitted?(receipt: Receipt): void;
-    onlySessionId?: string;
+    onlySessionId: string;
 }
 export interface GcSources {
     snapshots?: readonly LiveSnapshot[];
@@ -120,6 +120,8 @@ export declare const requestPath: (home: string, id: string) => string;
 export declare function scheduledSession(task: ScheduleTask): string | undefined;
 export declare function readSchedule(home: string): Promise<ScheduleData | undefined>;
 export declare function encodeSegment(raw: string): string;
+/** rc.5's JSONL project directory for a stored header's working directory. */
+export declare function projectKey(cwd: string | undefined): string;
 export declare function exists(path: string): Promise<boolean>;
 export declare function safePath(path: string, { missing, directory }?: {
     missing?: boolean;
@@ -143,9 +145,10 @@ export declare function listRequests(home: string): Promise<DeletionRequest[]>;
 export declare function captureDeletionRequest(home: string, header: SessionHeader, plan: DeletionPlan, stat: (id: string) => Promise<SessionStat | undefined>): Promise<DeletionRequest>;
 export declare function enqueue(home: string, request: DeletionRequest): Promise<void>;
 /** Sweep confirmed session data under the caller's live maintenance or exclusive offline writer protections. */
-export declare function sweep(home: string, { failAfter, hooks }?: {
+export declare function sweep(home: string, { failAfter, hooks, onResolved }?: {
     failAfter?: number;
     hooks?: SweepHooks;
+    onResolved?: (id: string, outcome: 'completed' | 'abandoned') => void;
 }): Promise<Result[]>;
 /** Read-only estimate using the same reference checks as the actual collection. */
 export declare function garbageSize(home: string, sources?: GcSources): Promise<number>;

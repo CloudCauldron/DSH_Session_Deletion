@@ -6,7 +6,7 @@ import { sameHomeHosts, tryLock } from './locks.js';
 import { usesLockFiles, type Lock } from './platform/index.js';
 import { LocalizedError } from './locale/errors.js';
 
-async function offline(home: string): Promise<void> {
+async function offline(home: string, report?: (line: string) => void): Promise<void> {
   const state = stateDir(home);
   const pending = join(state, 'pending');
   const hasPending = await exists(pending) && (await fs.readdir(pending)).length > 0;
@@ -24,13 +24,18 @@ async function offline(home: string): Promise<void> {
         handles.push(lock);
       }
     }
+    let resolved = 0;
+    await sweep(home, { onResolved(id, outcome) {
+      resolved++;
+      report?.(`Deletion ${outcome} for ${id}.`);
+    } });
     await cleanAtomicTemps(state);
     await cleanAtomicTemps(join(home, 'storages'));
-    await sweep(home);
+    if (!resolved) report?.('Nothing pending.');
   } finally { await Promise.all(handles.map(h => h.close())); }
 }
 
-export async function runGuard(home: string): Promise<void> {
+export async function runGuard(home: string, report?: (line: string) => void): Promise<void> {
   home = resolve(home);
   await safePath(home, { directory: true });
   if ((await sameHomeHosts(home)).length) throw new LocalizedError('error.otherProcessCleanup');
@@ -39,7 +44,7 @@ export async function runGuard(home: string): Promise<void> {
   const lock = await tryLock(join(await fs.realpath(state), 'lifecycle.lock'), true, true);
   if (!lock) throw new LocalizedError('error.cleanupBusy');
   try {
-    await offline(home);
+    await offline(home, report);
   } catch (error) {
     const message = error instanceof Error ? error.message : String(error);
     await atomicJSON(join(state, 'status.json'), { schema: 1, state: 'blocked', error: message.slice(0, 2000), checkedAt: new Date().toISOString() });
@@ -50,8 +55,7 @@ export async function runGuard(home: string): Promise<void> {
 if (import.meta.main) {
   try {
     if (process.argv.length !== 3) throw new LocalizedError('error.guardUsage', { command: 'node lib/guard.js <DSH_HOME>' });
-    await runGuard(process.argv[2]);
-    console.log('Cleanup verified');
+    await runGuard(process.argv[2], console.log);
   } catch (error) {
     console.error(error instanceof Error ? error.message : error);
     process.exitCode = 1;

@@ -49,7 +49,7 @@ export interface SweepHooks {
   /** Live owners mutate their own tables, never overwrite them from a disk snapshot. */
   applyEdit?(edit: Edit, ids: ReadonlySet<string>): Promise<void>;
   receiptCommitted?(receipt: Receipt): void;
-  onlySessionId?: string;
+  onlySessionId: string;
 }
 export interface GcSources {
   snapshots?: readonly LiveSnapshot[];
@@ -76,14 +76,19 @@ export async function readSchedule(home: string): Promise<ScheduleData | undefin
   if (schedule && (schedule.unit?.name !== 'schedule' || !schedule.tables?.tasks)) throw new LocalizedError('error.scheduleSchema');
   return schedule;
 }
+function escapeSegment(raw: string) {
+  return raw.replace(/[^A-Za-z0-9._-]/g, c => '~' + c.charCodeAt(0).toString(16).toUpperCase().padStart(4, '0'));
+}
 export function encodeSegment(raw: string) {
   if (typeof raw !== 'string' || !raw || raw.length > 1024) throw new LocalizedError('error.invalidSessionId');
-  let out = '';
-  for (let i = 0; i < raw.length; i++) {
-    const c = raw[i];
-    out += /[A-Za-z0-9._-]/.test(c) ? c : '~' + raw.charCodeAt(i).toString(16).toUpperCase().padStart(4, '0');
-  }
+  const out = escapeSegment(raw);
   return out === '.' || out === '..' ? out.replaceAll('.', '~002E') : out;
+}
+/** rc.5's JSONL project directory for a stored header's working directory. */
+export function projectKey(cwd: string | undefined) {
+  if (cwd === undefined) return '_no-cwd';
+  const slug = escapeSegment(cwd.replace(/[\\/:]+/g, '-')).replace(/^-+/, '') || 'root';
+  return '--' + slug.slice(0, 251) + '--';
 }
 
 export async function exists(path: string): Promise<boolean> {
@@ -290,14 +295,19 @@ export function familyOf(headers: ReadonlyMap<string, SessionHeader>, rootId: st
   return [...ids].sort();
 }
 
-/** Locate only the confirmed family's directories. No other transcript or attachment is read. */
-export async function planSessionDeletion(home: string, rootId: string, confirmed: ReadonlyMap<string, number>): Promise<DeletionPlan> {
-  const targets = Array.from(confirmed, ([id, createdAt]) => ({ id, createdAt, name: encodeSegment(id) }));
-  const directories: DeletionPlan['directories'] = [];
+async function* sessionProjects(home: string) {
   for (const project of await entries(join(home, 'sessions'))) {
     if (!project.isDirectory()) continue;
     const projectPath = join('sessions', project.name);
     await safePath(join(home, projectPath), { directory: true });
+    yield projectPath;
+  }
+}
+/** Locate only the confirmed family's directories. No other transcript or attachment is read. */
+export async function planSessionDeletion(home: string, rootId: string, confirmed: ReadonlyMap<string, number>): Promise<DeletionPlan> {
+  const targets = Array.from(confirmed, ([id, createdAt]) => ({ id, createdAt, name: encodeSegment(id) }));
+  const directories: DeletionPlan['directories'] = [];
+  for await (const projectPath of sessionProjects(home)) {
     for (const { id, createdAt, name } of targets) {
       // Match the provider's path lookup on both case-sensitive and case-insensitive volumes.
       const path = join(projectPath, name), dir = join(home, path);
@@ -340,6 +350,19 @@ export async function listRequests(home: string): Promise<DeletionRequest[]> {
   }
   return out;
 }
+/** A different stored length proves change without reading the transcript body. */
+async function transcriptDigest(path: string, expectedSize: number): Promise<string | undefined> {
+  await safePath(path);
+  await using file = await fs.open(path, constants.O_RDONLY | constants.O_NOFOLLOW | constants.O_NONBLOCK);
+  const info = await file.stat();
+  if (!info.isFile()) throw new LocalizedError('error.unexpectedFile', { path });
+  if (info.size !== expectedSize) return undefined;
+  const input = file.createReadStream();
+  const hash = createHash('sha256');
+  for await (const chunk of input) hash.update(chunk);
+  if (input.bytesRead !== expectedSize) throw new LocalizedError('error.sessionChanged');
+  return hash.digest('hex');
+}
 /** The caller holds every target writer lock through journal publication and cleanup. */
 export async function captureDeletionRequest(home: string, header: SessionHeader, plan: DeletionPlan, stat: (id: string) => Promise<SessionStat | undefined>): Promise<DeletionRequest> {
   await safePath(home, { directory: true });
@@ -352,16 +375,10 @@ export async function captureDeletionRequest(home: string, header: SessionHeader
       throw new LocalizedError('error.sessionChanged');
     const source = stored.location.path, leaf = basename(source);
     if (!LOG.test(leaf) || source !== join(home, row.path, leaf)) throw new LocalizedError('error.invalidPlanPath');
-    await safePath(source);
-    await using file = await fs.open(source, constants.O_RDONLY | constants.O_NOFOLLOW | constants.O_NONBLOCK);
-    const info = await file.stat();
-    if (!info.isFile()) throw new LocalizedError('error.unexpectedFile', { path: source });
-    if (!info.size || info.size !== stored.sizeBytes) throw new LocalizedError('error.sessionChanged');
-    const input = file.createReadStream();
-    const hash = createHash('sha256');
-    for await (const chunk of input) hash.update(chunk);
-    if (input.bytesRead !== stored.sizeBytes) throw new LocalizedError('error.sessionChanged');
-    directories.push({ ...row, transcript: { path: leaf, sizeBytes: input.bytesRead, sha256: hash.digest('hex') } });
+    if (!stored.sizeBytes) throw new LocalizedError('error.sessionChanged');
+    const sha256 = await transcriptDigest(source, stored.sizeBytes);
+    if (!sha256) throw new LocalizedError('error.sessionChanged');
+    directories.push({ ...row, transcript: { path: leaf, sizeBytes: stored.sizeBytes, sha256 } });
   }
   return { schema: 1, dshVersion: SUPPORTED_DSH, sessionId: header.id,
     createdAt: header.createdAt, queuedAt: new Date().toISOString(), plan: { ids: plan.ids, directories } };
@@ -378,7 +395,9 @@ async function privateInventory(home: string, ids: ReadonlySet<string>) {
   const projections = join(home, 'storages/session_projcache/sessions');
   const names = [...ids].map(id => encodeSegment(id) + '.json');
   for (const entry of await entries(projections)) if (names.some(name => entry.name === name || entry.name.startsWith(name + '.bak.'))) {
-    const path = join(projections, entry.name); await safePath(path); remove.push(path);
+    const path = join(projections, entry.name); await safePath(path);
+    if (!entry.isFile()) throw new LocalizedError('error.unexpectedFile', { path });
+    remove.push(path);
   }
   const workspacePath = join(home, 'storages/workspace.json');
   const workspace = await readJSON<WorkspaceData | undefined>(workspacePath);
@@ -409,26 +428,93 @@ async function privateInventory(home: string, ids: ReadonlySet<string>) {
   }
   return { rewrite, remove };
 }
+async function targetHeader(path: string, row: SessionDirectory) {
+  const header = await readLog(path);
+  if (header.id !== row.id || header.createdAt !== row.createdAt) throw new LocalizedError('error.identityChangedDuringRecovery', { path });
+  return header;
+}
 async function validateTargetDirectories(home: string, plan: DeletionPlan) {
   for (const row of plan.directories) {
     const dir = join(home, row.path);
     await safePath(dir, { missing: true });
-    for (const file of await filesUnder(dir)) if (LOG.test(basename(file))) {
-      const header = await readLog(file);
-      if (header.id !== row.id || header.createdAt !== row.createdAt) throw new LocalizedError('error.identityChangedDuringRecovery');
-    }
+    for (const file of await filesUnder(dir)) if (LOG.test(basename(file))) await targetHeader(file, row);
   }
 }
+async function sameDirectory(actual: string, expected: string) {
+  if (actual === expected) return true;
+  if (!await exists(expected)) return false;
+  await safePath(expected, { directory: true });
+  return await fs.realpath(actual) === await fs.realpath(expected);
+}
+/** rc.5 selects the highest canonical generation and refuses mixed encodings. */
+async function offlineTranscript(dir: string, row: SessionDirectory): Promise<string | undefined> {
+  let latest: { version: number; name: string } | undefined;
+  for (const entry of await entries(dir)) {
+    const path = join(dir, entry.name);
+    await safePath(path);
+    if (!entry.isFile()) throw new LocalizedError('error.unexpectedEntry', { path });
+    const generation = LOG.exec(entry.name);
+    if (!generation) {
+      // The writer lease and rc.5's unpublished create/migration files belong to this directory.
+      if (entry.name === 'session.lock' || /^session(?:\.v[1-9]\d*)?\.jsonl(?:\.zstd)?\.[a-f0-9]{12}\.tmp$/.test(entry.name)
+        || /^session\.migration\.[a-f0-9]{16}\.jsonl(?:\.zstd)?\.tmp$/.test(entry.name)) continue;
+      throw new LocalizedError('error.unexpectedEntry', { path });
+    }
+    const header = await targetHeader(path, row);
+    const project = dirname(dir);
+    if ((header.cwd !== undefined && (typeof header.cwd !== 'string' || !header.cwd))
+      || !await sameDirectory(project, join(dirname(project), projectKey(header.cwd))))
+      throw new LocalizedError('error.directorySessionMismatch', { path });
+    if (header.version !== Number(generation[1] ?? 0)
+      || (latest && latest.name.endsWith('.zstd') !== entry.name.endsWith('.zstd')))
+      throw new LocalizedError('error.unclassifiedBackup', { path });
+    if (!latest || header.version > latest.version) latest = { version: header.version, name: entry.name };
+  }
+  return latest?.name;
+}
+async function familyChanged(home: string, plan: DeletionRequest['plan']): Promise<boolean> {
+  const seen = new Set<string>();
+  let changed = false;
+  for (const row of plan.directories) await safePath(join(home, row.path), { missing: true, directory: true });
+  for await (const project of sessionProjects(home)) for (const row of plan.directories) {
+    const dir = join(home, project, basename(row.path));
+    // findLog also refuses flat artifacts for the requested ID in any project.
+    for (const suffix of ['.jsonl', '.jsonl.zstd']) if (await exists(dir + suffix))
+      throw new LocalizedError('error.unclassifiedBackup', { path: dir + suffix });
+    if (!await exists(dir)) continue;
+    const leaf = await offlineTranscript(dir, row);
+    const recorded = await sameDirectory(dir, join(home, row.path));
+    if (!leaf) {
+      if (!recorded) throw new LocalizedError('error.directorySessionMismatch', { path: dir });
+      continue;
+    }
+    if (seen.has(row.id)) throw new LocalizedError('error.duplicateSession', { id: row.id });
+    seen.add(row.id);
+    if (!recorded || leaf !== row.transcript.path) changed = true;
+    else if (!changed) changed = await transcriptDigest(join(dir, leaf), row.transcript.sizeBytes) !== row.transcript.sha256;
+  }
+  return changed;
+}
 /** Sweep confirmed session data under the caller's live maintenance or exclusive offline writer protections. */
-export async function sweep(home: string, { failAfter, hooks }: { failAfter?: number; hooks?: SweepHooks } = {}) {
+export async function sweep(home: string, { failAfter, hooks, onResolved }: {
+  failAfter?: number; hooks?: SweepHooks; onResolved?: (id: string, outcome: 'completed' | 'abandoned') => void;
+} = {}) {
   await safePath(home, { directory: true });
   let operations = 0;
   const checkpoint = () => { if (failAfter !== undefined && ++operations >= failAfter) throw new LocalizedError('error.injectedInterruption'); };
   const completed: Result[] = [];
-  for (const request of (await listRequests(home)).filter(r => !hooks?.onlySessionId || r.sessionId === hooks.onlySessionId)) {
+  for (const request of (await listRequests(home)).filter(r => !hooks || r.sessionId === hooks.onlySessionId)) {
     const plan = request.plan; const ids = new Set(plan.ids);
-    await validateTargetDirectories(home, plan);
+    if (hooks) await validateTargetDirectories(home, plan);
+    else if (await familyChanged(home, plan)) {
+      await removeOwned(requestPath(home, request.sessionId));
+      onResolved?.(request.sessionId, 'abandoned');
+      continue;
+    }
     const work = await privateInventory(home, ids);
+    const receiptPath = join(stateDir(home), 'receipt.json');
+    const receipt = await readJSON<Receipt>(receiptPath, { schema: 1, revision: '', deletedIdHashes: [] });
+    receipt.deletedIdHashes = [...new Set([...receipt.deletedIdHashes, ...plan.ids.map(digest)])];
     checkpoint();
     for (const edit of work.rewrite) {
       if (hooks?.applyEdit) await hooks.applyEdit(edit, ids); else await atomicJSON(edit.path, edit.data);
@@ -440,15 +526,13 @@ export async function sweep(home: string, { failAfter, hooks }: { failAfter?: nu
     if (audit.remove.length || audit.rewrite.length) throw new LocalizedError('error.privateMetadataAudit');
     for (const row of plan.directories) if (await exists(join(home, row.path))) throw new LocalizedError('error.deletedSessionAudit');
     // Do not prune the shared project directory: another conversation may be creating its first log.
-    const receiptPath = join(stateDir(home), 'receipt.json');
-    const receipt = await readJSON<Receipt>(receiptPath, { schema: 1, revision: '', deletedIdHashes: [] });
-    receipt.deletedIdHashes = [...new Set([...receipt.deletedIdHashes, ...plan.ids.map(digest)])];
     receipt.revision = randomBytes(16).toString('hex');
     receipt.lastCompletedAt = new Date().toISOString(); receipt.lastResult = { sessions: ids.size };
     await atomicJSON(receiptPath, receipt);
     hooks?.receiptCommitted?.(receipt); checkpoint();
     await removeOwned(requestPath(home, request.sessionId)); checkpoint();
     completed.push(receipt.lastResult);
+    onResolved?.(request.sessionId, 'completed');
   }
   // Only our request temporaries can be stale here. Never touch active storage or attachment writers.
   await cleanAtomicTemps(join(stateDir(home), 'pending'));

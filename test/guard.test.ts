@@ -2,7 +2,7 @@ import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import fs from 'node:fs/promises';
 import { basename, dirname, join, toNamespacedPath } from 'node:path';
-import { spawn } from 'node:child_process';
+import { spawn, spawnSync } from 'node:child_process';
 import { once } from 'node:events';
 import { runGuard } from '../lib/guard.js';
 import { tryLock, sameHomeHosts } from '../lib/locks.js';
@@ -18,15 +18,51 @@ async function identity(child: ChildProcess): Promise<string> { const value = aw
 function finished(child: ChildProcess): Promise<{ code: number | null; signal: NodeJS.Signals | null }> {
   return new Promise(resolve => child.once('exit', (code, signal) => resolve({ code, signal })));
 }
+const guardCli = (...args: string[]) => spawnSync(process.execPath, ['lib/guard.js', ...args], { encoding: 'utf8' });
+
+void test('guard CLI reports abandonment, an empty queue and invalid invocation', async () => {
+  const f = await fixture(false);
+  try {
+    await f.queue();
+    const { location } = await f.stat(f.ids.child);
+    await fs.appendFile(location.path, '\n');
+    const abandoned = guardCli(f.home);
+    assert.equal(abandoned.status, 0, abandoned.stderr);
+    assert.match(abandoned.stdout, /abandoned for session-main/);
+    assert.deepEqual(await listRequests(f.home), []);
+    assert.equal(await exists(location.path), true);
+    assert.equal(await exists(join(stateDir(f.home), 'receipt.json')), false);
+    const empty = guardCli(f.home);
+    assert.equal(empty.status, 0, empty.stderr); assert.match(empty.stdout, /Nothing pending/);
+    const invalid = guardCli();
+    assert.equal(invalid.status, 1); assert.match(invalid.stderr, /Usage:/);
+  } finally { await f.cleanup(); }
+});
+
+void test('guard CLI reports a completed request even when a later identity conflict makes it exit 1', async () => {
+  const f = await fixture(false);
+  try {
+    await f.queue(f.ids.other); await f.queue(f.ids.fork);
+    const [first, second] = await listRequests(f.home);
+    await f.session(second.sessionId, { createdAt: second.createdAt + 1 });
+    const result = guardCli(f.home);
+    assert.equal(result.status, 1); assert.match(result.stderr, /identity changed/);
+    assert.equal(result.stdout.trim(), `Deletion completed for ${first.sessionId}.`);
+    assert.deepEqual(await listRequests(f.home), [second]);
+    assert.equal(await exists(join(f.home, first.plan.directories[0].path)), false);
+    assert.equal(await exists((await f.stat(second.sessionId)).location.path), true);
+  } finally { await f.cleanup(); }
+});
+
 void test('kernel writer lock defers all cleanup and preserves pending request', async () => {
   const f=await fixture(); let lock;
   try {
     await f.queue();
-    lock=await tryLock(join(f.home,'sessions/project',f.ids.main,'session.lock'));
+    lock=await tryLock(join(f.sessionProject,f.ids.main,'session.lock'));
     assert.ok(lock);
     const guard=spawn(process.execPath,['lib/guard.js',f.home],{stdio:'ignore'});
     assert.equal((await finished(guard)).code,1);
-    assert.equal(await exists(join(f.home,'sessions/project',f.ids.main)),true);
+    assert.equal(await exists(join(f.sessionProject,f.ids.main)),true);
     assert.equal((await listRequests(f.home)).length,1);
     await lock.close();lock=undefined;
     const installed=join(f.base,'installed-plugin');
@@ -34,7 +70,7 @@ void test('kernel writer lock defers all cleanup and preserves pending request',
     const retry=spawn(process.execPath,[join(installed,'lib/guard.js'),f.home],{stdio:'ignore'});
     assert.equal((await finished(retry)).code,0);
     assert.deepEqual(await listRequests(f.home),[]);
-    assert.equal(await exists(join(f.home,'sessions/project',f.ids.main)),false);
+    assert.equal(await exists(join(f.sessionProject,f.ids.main)),false);
   } finally {await lock?.close();await f.cleanup();}
 });
 
@@ -48,7 +84,7 @@ void test('a competing offline run neither deletes data nor overwrites the activ
     await assert.rejects(runGuard(f.home),/Another cleanup/);
     assert.deepEqual(await readJSON(statusPath),{state:'owner-active'});
     assert.equal((await listRequests(f.home)).length,1);
-    assert.equal(await exists(join(f.home,'sessions/project',f.ids.main)),true);
+    assert.equal(await exists(join(f.sessionProject,f.ids.main)),true);
   } finally {await lock?.close();await f.cleanup();}
 });
 
@@ -73,8 +109,9 @@ for (const desktop of [false, true]) void test(`an empty recovery queue refuses 
     await f.write(temp, 'uncommitted');
     assert.deepEqual(await listRequests(f.home), []);
     assert.ok((await sameHomeHosts(f.home)).includes(pid(host)));
-    await assert.rejects(runGuard(f.home), /Another DSH process/);
-    assert.equal(await exists(join(f.home, 'sessions/project', f.ids.main)), true);
+    const refused = guardCli(f.home);
+    assert.equal(refused.status, 1); assert.match(refused.stderr, /Another DSH process/);
+    assert.equal(await exists(join(f.sessionProject, f.ids.main)), true);
     assert.equal(await exists(temp), true, 'refused recovery must not sweep temporary files');
     assert.equal(await exists(join(stateDir(f.home), 'status.json')), false);
   } finally {
@@ -188,7 +225,7 @@ void test('a Node tool receiving a DSH entry path as data is not a second host',
 void test('closing an old lock repeatedly cannot release its successor', async () => {
   const f = await fixture(); let successor, contender;
   try {
-    const path = join(f.home, 'sessions/project', f.ids.main, 'session.lock');
+    const path = join(f.sessionProject, f.ids.main, 'session.lock');
     const previous = await tryLock(path);
     assert.ok(previous);
     await previous.close();

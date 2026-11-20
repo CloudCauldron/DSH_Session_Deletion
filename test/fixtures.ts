@@ -21,11 +21,12 @@ export async function fixture(compressed = true) {
   const ids = { main: 'session-main', child: 'session-child', grand: 'session-grand', fork: 'session-fork', other: 'session-other' };
   const write = async (path: string, value: string | Buffer) => { await fs.mkdir(join(path, '..'), { recursive: true, mode: 0o700 }); await fs.writeFile(path, value, { mode: 0o600 }); };
   const headers: Record<string, SessionHeader> = {};
+  const sessionProject = join(home, 'sessions/--project--');
   const logName = compressed ? 'session.v4.jsonl.zstd' : 'session.v4.jsonl';
   async function session(id: string, extra: Partial<SessionHeader> = {}, refs: unknown[] = []) {
     const header: SessionHeader = { type: 'session', version: 4, id, createdAt: 1234, cwd: '/project', isSeeded: false, ...extra };
     headers[id] = header;
-    const path = join(home, 'sessions', 'project', encodeSegment(id), logName);
+    const path = join(sessionProject, encodeSegment(id), logName);
     // Real persistence uses concatenated independent Zstandard frames.
     const lines = [header, { type: 'user/message', seq: 0, data: { content: refs } }].map(record => JSON.stringify(record) + '\n');
     await write(path, compressed ? Buffer.concat(lines.map(line => zstdCompressSync(line))) : lines.join(''));
@@ -58,14 +59,14 @@ export async function fixture(compressed = true) {
   })) }));
   const projectFile = join(base, 'project-file.txt'); await write(projectFile, 'user project must survive');
   async function stat(id: string) {
-    const path = join(home, 'sessions/project', encodeSegment(id), logName);
+    const path = join(sessionProject, encodeSegment(id), logName);
     return { header: headers[id], sizeBytes: (await fs.stat(path)).size, location: { kind: 'jsonl', path } };
   }
   function plan(id = ids.main) {
     const members = familyOf(new Map(Object.entries(headers)), id);
     return planSessionDeletion(home, id, new Map(members.map(member => [member, headers[member].createdAt])));
   }
-  return { base, home, temporary, ids, headers, exclusive, shared, spillRoot, spill, sharedSpill, write, session, projectFile, stat, plan,
+  return { base, home, temporary, ids, headers, exclusive, shared, spillRoot, spill, sharedSpill, write, session, sessionProject, projectFile, stat, plan,
     queue: async (id = ids.main) => {
       await enqueue(home, await captureDeletionRequest(home, headers[id], await plan(id), stat));
     },

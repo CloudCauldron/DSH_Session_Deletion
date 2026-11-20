@@ -168,7 +168,7 @@ for (const phase of ['agent work', 'writer drain']) void test(`the shared deadli
     cleanup.resolve(); await unloading;
     assert.equal(s.runtime.isLocked(s.root.id), false); assert.equal(s.agents.has(s.root.id), phase === 'agent work');
     assert.deepEqual(await listRequests(s.f.home), []);
-    assert.equal(await exists(join(s.f.home, 'sessions/project', s.root.id)), true, 'late completion never enters enqueue or sweep');
+    assert.equal(await exists(join(s.f.sessionProject, s.root.id)), true, 'late completion never enters enqueue or sweep');
     assert.equal(s.listeners(), 0);
   } finally { cleanup.resolve(); await s.drained(); await s.f.cleanup(); }
 });
@@ -280,9 +280,9 @@ void test('a request rename committed before a post-rename error preserves the j
 
 for (const failure of ['writer', 'missing', 'identity', 'path', 'size', 'journal'] as const) void test(`${failure} failure before publication preserves every transcript and projection`, async () => {
   const s = await stoppingFixture(), open = fs.open;
-  const competingWriter = failure === 'writer' && await tryLock(join(s.f.home, 'sessions/project', s.f.ids.grand, 'session.lock'));
+  const competingWriter = failure === 'writer' && await tryLock(join(s.f.sessionProject, s.f.ids.grand, 'session.lock'));
   try {
-    const paths = s.ids.flatMap(id => [join(s.f.home, 'sessions/project', id, 'session.v4.jsonl.zstd'),
+    const paths = s.ids.flatMap(id => [join(s.f.sessionProject, id, 'session.v4.jsonl.zstd'),
       join(s.f.home, 'storages/session_projcache/sessions', id + '.json')]);
     const contents = () => Promise.all(paths.map(path => fs.readFile(path)));
     const before = await contents();
@@ -292,7 +292,7 @@ for (const failure of ['writer', 'missing', 'identity', 'path', 'size', 'journal
       const stored = await s.f.stat(id);
       if (id !== s.root.id || s.agents.has(id)) return stored;
       for (const target of s.ids) {
-        const lock = await tryLock(join(s.f.home, 'sessions/project', target, 'session.lock'));
+        const lock = await tryLock(join(s.f.sessionProject, target, 'session.lock'));
         if (lock) { await lock.close(); assert.fail('Every family writer must be excluded during transcript capture'); }
       }
       if (failure === 'missing') return { header: stored.header };

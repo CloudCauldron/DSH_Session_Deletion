@@ -3,10 +3,10 @@ import assert from 'node:assert/strict';
 import fs from 'node:fs/promises';
 import { readdirSync } from 'node:fs';
 import { createHash, hash, randomBytes } from 'node:crypto';
-import { basename, join } from 'node:path';
+import { basename, dirname, join } from 'node:path';
 import { zstdCompressSync, constants } from 'node:zlib';
 import { syncBuiltinESMExports } from 'node:module';
-import { scanSessions, sweep, collectGarbage, garbageSize, exists, digest, encodeSegment, listRequests, readJSON, stateDir, captureDeletionRequest, atomicJSON, safePath, readLog, SUPPORTED_DSH, scheduledSession } from '../lib/core.js';
+import { scanSessions, sweep, collectGarbage, garbageSize, exists, digest, encodeSegment, listRequests, readJSON, stateDir, captureDeletionRequest, enqueue, atomicJSON, safePath, readLog, SUPPORTED_DSH, scheduledSession } from '../lib/core.js';
 import type { Receipt, DeletionRequest } from '../lib/core.js';
 import { birth } from '../lib/platform/index.js';
 import { fixture, trackContentHashes } from './fixtures.ts';
@@ -20,7 +20,7 @@ void test('compressed logs retain every frame across blocks, checksums and input
     metadata.writeUInt32LE(0x184d2a50); metadata.writeUInt32LE(metadata.length - 8, 4);
     const event = JSON.stringify({ content: randomBytes(2 * 1024 * 1024).toString('base64'), attachmentId: 'sha256:' + f.exclusive }) + '\n';
     const frame = zstdCompressSync(event, { params: { [constants.ZSTD_c_checksumFlag]: 1 } });
-    const path = join(f.home, 'sessions/project', f.ids.other, 'session.v4.jsonl.zstd');
+    const path = join(f.sessionProject, f.ids.other, 'session.v4.jsonl.zstd');
     await fs.writeFile(path, Buffer.concat([header, rle, metadata, frame]));
     const refs = new Set<string>();
     await readLog(path, refs);
@@ -69,7 +69,7 @@ void test('unsupported host versions cannot authorize a deletion', async () => {
     const request = (await listRequests(f.home))[0];
     await atomicJSON(join(stateDir(f.home), 'pending', digest(f.ids.main) + '.json'), { ...request, dshVersion: 'unsupported' });
     await assert.rejects(sweep(f.home), /Invalid deletion request/);
-    assert.equal(await exists(join(f.home, 'sessions/project', f.ids.main)), true);
+    assert.equal(await exists(join(f.sessionProject, f.ids.main)), true);
   } finally { await f.cleanup(); }
 });
 
@@ -174,6 +174,8 @@ for (let step = 1; step <= 11; step++) void test(`private deletion interruption 
     await sweep(f.home);
     assert.equal((await scanSessions(f.home)).size, 2);
     assert.equal((await listRequests(f.home)).length, 0);
+    const receipt = await readJSON<Receipt>(join(stateDir(f.home), 'receipt.json'));
+    assert.deepEqual(receipt.deletedIdHashes.sort(), [f.ids.main, f.ids.child, f.ids.grand].map(digest).sort());
     assert.deepEqual(await fileSnapshot(join(f.home, 'attachments')), before);
   } finally { await f.cleanup(); }
 });
@@ -181,10 +183,10 @@ for (let step = 1; step <= 11; step++) void test(`private deletion interruption 
 void test('unrelated corrupt logs and opaque attachment storage do not block private deletion', async () => {
   const f = await fixture();
   try {
-    await fs.writeFile(join(f.home, 'sessions/project', f.ids.other, 'session.v4.jsonl.zstd'), 'corrupt');
+    await fs.writeFile(join(f.sessionProject, f.ids.other, 'session.v4.jsonl.zstd'), 'corrupt');
     await f.write(join(f.home, 'storages/unrelated.bin'), 'opaque');
     await f.queue(); await sweep(f.home);
-    assert.equal(await exists(join(f.home, 'sessions/project', f.ids.main)), false);
+    assert.equal(await exists(join(f.sessionProject, f.ids.main)), false);
     assert.equal(await exists(attachment(f, f.exclusive)), true);
   } finally { await f.cleanup(); }
 });
@@ -193,13 +195,134 @@ void test('target symlink or changed lifecycle refuses private deletion', async 
   const f = await fixture();
   try {
     await f.queue();
-    const link = join(f.home, 'sessions/project', f.ids.main, 'external');
+    const link = join(f.sessionProject, f.ids.main, 'external');
     await fs.symlink(f.base, link, 'junction');
     await assert.rejects(sweep(f.home), /symlink/);
     await fs.unlink(link);
     await f.session(f.ids.main, { createdAt: 999 });
     await assert.rejects(sweep(f.home), /identity changed/);
     assert.equal(await fs.readFile(f.projectFile, 'utf8'), 'user project must survive');
+  } finally { await f.cleanup(); }
+});
+
+void test('an equal-length change in the last child abandons the whole request and preserves every survivor', async () => {
+  const f = await fixture(false);
+  try {
+    await f.queue();
+    const [request] = await listRequests(f.home);
+    const rows = request.plan.directories;
+    rows.sort((a, b) => Number(a.id === f.ids.grand) - Number(b.id === f.ids.grand));
+    await atomicJSON(join(stateDir(f.home), 'pending', digest(f.ids.main) + '.json'), request);
+    await fs.rm(join(f.sessionProject, f.ids.child), { recursive: true });
+    const last = await f.stat(f.ids.grand);
+    const original = await fs.readFile(last.location.path, 'utf8');
+    const changed = original.replace('user/message', 'user/updated');
+    assert.notEqual(original, changed); assert.equal(changed.length, original.length);
+    await f.write(last.location.path, changed);
+    const sessions = join(f.home, 'sessions'), storages = join(f.home, 'storages');
+    const before = { sessions: await fileSnapshot(sessions), storages: await fileSnapshot(storages) };
+    const receipt = join(stateDir(f.home), 'receipt.json');
+    await atomicJSON(receipt, { schema: 1, revision: 'prior', deletedIdHashes: [digest('prior')] });
+    const previous = await fs.readFile(receipt);
+    const outcomes: string[] = [];
+    assert.deepEqual(await sweep(f.home, { onResolved: (id, outcome) => outcomes.push(id + ' ' + outcome) }), []);
+    assert.deepEqual(outcomes, [f.ids.main + ' abandoned']);
+    assert.deepEqual(await listRequests(f.home), []);
+    await sweep(f.home);
+    assert.deepEqual(await fs.readFile(receipt), previous);
+    assert.deepEqual({ sessions: await fileSnapshot(sessions), storages: await fileSnapshot(storages) }, before);
+  } finally { await f.cleanup(); }
+});
+
+for (const replacement of ['lower', 'higher', 'encoding', 'project'] as const)
+void test('offline recovery recognizes a replacement transcript: ' + replacement, async t => {
+  const f = await fixture(false);
+  try {
+    const { header, location } = await f.stat(f.ids.other);
+    const historical = join(dirname(location.path), 'session.jsonl');
+    await f.write(historical, JSON.stringify({ ...header, version: 0 }) + '\n');
+    // Only a historical capture can acquire a higher generation after confirmation.
+    if (replacement === 'higher') {
+      await fs.unlink(location.path);
+      const request = await captureDeletionRequest(f.home, header, await f.plan(header.id), async () => ({
+        header, location: { kind: 'jsonl', path: historical }, sizeBytes: (await fs.stat(historical)).size,
+      }));
+      await enqueue(f.home, request);
+      await f.session(header.id);
+    } else {
+      await f.queue(header.id);
+      if (replacement !== 'lower') await fs.unlink(historical);
+      if (replacement === 'encoding') await f.write(location.path + '.zstd', zstdCompressSync(await fs.readFile(location.path)));
+      if (replacement === 'project') {
+        const project = join(f.home, 'sessions/--other-~6D4B~8BD5--');
+        await f.write(location.path, JSON.stringify({ ...header, cwd: '/other/测试' }) + '\n');
+        await fs.mkdir(project);
+        await fs.rename(dirname(location.path), join(project, header.id));
+        await f.write(join(dirname(location.path), 'session.lock'), '');
+      } else await fs.unlink(location.path);
+    }
+    const count = trackContentHashes(t);
+    assert.deepEqual(await sweep(f.home), []);
+    assert.equal(count(), 0);
+    assert.deepEqual(await listRequests(f.home), []);
+    assert.equal(await exists(join(stateDir(f.home), 'receipt.json')), false);
+    assert.equal(await exists(join(f.home, 'storages/session_projcache/sessions', header.id + '.json')), true);
+  } finally { await f.cleanup(); }
+});
+
+void test('offline recovery hashes only surviving authorities and keeps a newly linked child', async t => {
+  const f = await fixture();
+  try {
+    await f.queue();
+    const main = await f.stat(f.ids.main);
+    await f.write(main.location.path.replace('.v4.', '.v3.'), zstdCompressSync(JSON.stringify({ ...main.header, version: 3 }) + '\n'));
+    const child = (await f.stat(f.ids.child)).location.path;
+    await fs.unlink(child);
+    await f.write(child + '.123456abcdef.tmp', 'unfinished materialization');
+    await f.write(join(dirname(child), 'session.migration.0123456789abcdef.jsonl.zstd.tmp'), 'unfinished migration');
+    await f.session('new-child', { parentSession: f.ids.main, origin: 'subagent' });
+    const count = trackContentHashes(t);
+    assert.deepEqual(await sweep(f.home), [{ sessions: 3 }]);
+    assert.equal(count(), 2);
+    assert.equal(await exists((await f.stat('new-child')).location.path), true);
+    assert.deepEqual(await listRequests(f.home), []);
+    const receipt = await readJSON<Receipt>(join(stateDir(f.home), 'receipt.json'));
+    assert.deepEqual(receipt.deletedIdHashes.sort(), [f.ids.main, f.ids.child, f.ids.grand].map(digest).sort());
+  } finally { await f.cleanup(); }
+});
+
+for (const conflict of ['none', 'unreadable', 'identity', 'wrong project', 'mixed encodings', 'unknown artifact', 'unidentified directory', 'duplicate log', 'flat log'] as const)
+void test('a length change skips further hashes while the guard checks for conflicts: ' + conflict, async t => {
+  const f = await fixture(false);
+  try {
+    await f.queue();
+    const [request] = await listRequests(f.home);
+    const first = request.plan.directories[0], last = request.plan.directories.at(-1)!;
+    await fs.appendFile(join(f.home, first.path, first.transcript.path), '\n');
+    const path = join(f.home, last.path, last.transcript.path);
+    if (conflict === 'unreadable') await f.write(path, 'broken header');
+    if (conflict === 'identity') await f.session(last.id, { createdAt: last.createdAt + 1 });
+    if (conflict === 'wrong project') await f.session(last.id, { cwd: '/elsewhere' });
+    if (conflict === 'mixed encodings') await f.write(path + '.zstd', zstdCompressSync(await fs.readFile(path)));
+    if (conflict === 'unknown artifact') await f.write(path + '.bak', 'unclassified');
+    if (conflict === 'unidentified directory') await f.write(join(f.home, 'sessions/shadow', last.id, 'session.lock'), '');
+    if (conflict === 'duplicate log') await f.write(join(f.home, 'sessions/--shadow--', last.id, last.transcript.path),
+      JSON.stringify({ ...f.headers[last.id], cwd: '/shadow' }) + '\n');
+    if (conflict === 'flat log') await f.write(join(f.sessionProject, last.id + '.jsonl'), '{}');
+    const count = trackContentHashes(t);
+    if (conflict === 'none') {
+      assert.deepEqual(await sweep(f.home), []);
+      assert.deepEqual(await listRequests(f.home), []);
+    } else {
+      await assert.rejects(sweep(f.home), /Cannot read session log|identity changed|identity mismatch|Unclassified backup|Unexpected filesystem entry|Duplicate session/);
+      assert.deepEqual(await listRequests(f.home), [request]);
+    }
+    assert.equal(count(), 0);
+    for (const row of request.plan.directories) {
+      assert.equal(await exists(join(f.home, row.path, row.transcript.path)), true);
+      assert.equal(await exists(join(f.home, 'storages/session_projcache/sessions', row.id + '.json')), true);
+    }
+    assert.equal(await exists(join(stateDir(f.home), 'receipt.json')), false);
   } finally { await f.cleanup(); }
 });
 
@@ -375,7 +498,7 @@ for (const backup of ['session-other/session.v4.jsonl~', 'SESSION.V4.JSONL.BAK']
     try {
       const hash = digest('backup-only image'), image = attachment(f, hash);
       await f.write(image, 'image bytes');
-      await f.write(join(f.home, 'sessions/project', backup), JSON.stringify(f.headers[f.ids.other]) + '\n'
+      await f.write(join(f.sessionProject, backup), JSON.stringify(f.headers[f.ids.other]) + '\n'
         + JSON.stringify({ attachmentId: 'sha256:' + hash }) + '\n');
       await assert.rejects(garbageSize(f.home), /Unclassified backup log/);
       await assert.rejects(collectGarbage(f.home), /Unclassified backup log/);
@@ -387,7 +510,7 @@ for (const backup of ['session-other/session.v4.jsonl~', 'SESSION.V4.JSONL.BAK']
 for (const mode of ['corrupt', 'torn', 'backup-only', 'symlink', 'referenced-symlink', 'opaque']) void test(`GC ${mode} preflight failure deletes nothing`, async () => {
   const f = await fixture();
   try {
-    const log = join(f.home, 'sessions/project', f.ids.other, 'session.v4.jsonl.zstd');
+    const log = join(f.sessionProject, f.ids.other, 'session.v4.jsonl.zstd');
     if (mode === 'corrupt') await fs.writeFile(log, 'corrupt');
     if (mode === 'backup-only') await fs.rename(log, log + '.bak');
     if (mode === 'torn') await fs.appendFile(log, zstdCompressSync('{"tail":true}\n').subarray(0, 7));

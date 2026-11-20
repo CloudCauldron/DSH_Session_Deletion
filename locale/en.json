@@ -111,7 +111,7 @@
 
     "error.confirmDeletion": "Explicit confirmation is required for permanent deletion.",
     "error.deletionAlreadyQueued": "A deletion request already exists",
-    "error.identityChangedDuringRecovery": "Session identity changed during recovery",
+    "error.identityChangedDuringRecovery": "Session identity changed during recovery at {path}",
     "error.injectedInterruption": "Injected interruption",
     "error.invalidDeletionRequest": "Invalid deletion request",
     "error.invalidPlanIds": "Invalid deletion plan identities",
