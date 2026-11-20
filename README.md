@@ -24,6 +24,8 @@
 
 ## **3 - User Guide**
 
+When deleting a session or using **Free Up Space**, keep only one DSH instance running against that data directory until the operation finishes.
+
 ### **3.1 - Deleting a Session**
 
 1. In the left session list, click the `…` menu on the right side of the target session item.

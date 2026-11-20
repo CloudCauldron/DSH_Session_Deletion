@@ -58,7 +58,7 @@ interface Jobs {
         owner?: string;
     }): unknown;
     list(owner: string): Job[];
-    kill(id: string, owner: string, reason: string): unknown;
+    kill(id: string, owner: string, reason: string): 'requested' | 'already-finished';
     events: {
         subscribe(filter: {
             owners: 'all';

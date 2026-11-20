@@ -1,6 +1,8 @@
 import {test}from'node:test';
 import assert from'node:assert/strict';
 import fs from 'node:fs/promises';
+import { spawn, type ChildProcess } from 'node:child_process';
+import { once } from 'node:events';
 import { syncBuiltinESMExports } from 'node:module';
 import { join } from 'node:path';
 import{setTimeout as delay}from'node:timers/promises';
@@ -8,7 +10,7 @@ import{PublicationBarrier}from'../lib/runtime.js';
 import { makeRuntime } from './runtime-fixture.ts';
 import type { RuntimeContext } from '../lib/runtime.js';
 import { fixture, trackContentHashes } from './fixtures.ts';
-import { familyOf, listRequests, stateDir } from '../lib/core.js';
+import { exists, familyOf, listRequests, stateDir } from '../lib/core.js';
 
 void test('upload coordination covers importer replacement and preserves synchronous prompt bindings', async t => {
  const f = await fixture(); let dispose: (() => void | Promise<void>) | undefined, maintenance: Promise<unknown> | undefined;
@@ -114,6 +116,41 @@ void test('GC snapshots retain staged upload references', async () => {
  assert(snapshot);
  assert.deepEqual(snapshot.events, ['live event']);
  assert.deepEqual(snapshot.staged, [attachment]);
+});
+
+void test('GC preserves an attachment claimed by a second host during the reference scan', async () => {
+ const f = await fixture(false), readdir = fs.readdir;
+ let host: ChildProcess | undefined;
+ try {
+  const runtime = makeRuntime({
+   dshHomePath: () => f.home, sessions: { list: () => [] }, fileUploads: { stagedFiles: new WeakMap() },
+   attachments: { requestInflight: new Map() }, sessionPersistence: { async flush() {} },
+  });
+  const hash = 'a'.repeat(64), objects = join(f.home, 'attachments/v1/objects'), object = join(objects, 'aa', hash);
+  await f.write(object, 'attachment');
+  const log = (await f.stat(f.ids.other)).location.path;
+  const entry = join(f.base, '@deepseek-ai/dsh/lib/bin.js');
+  await f.write(entry, "require('node:fs').appendFileSync(process.argv[2], process.argv[3] + '\\n'); process.send('ready'); setInterval(() => {}, 1000)");
+  const reference = JSON.stringify({ type: 'user/message', data: { content: 'sha256:' + hash } });
+  fs.readdir = (async (...args: Parameters<typeof readdir>) => {
+   if (args[0] === objects && !host) {
+    // The mark phase has finished reading the session logs.
+    host = spawn(process.execPath, [entry, log, reference], { env: { ...process.env, DSH_HOME: f.home }, stdio: ['ignore', 'ignore', 'ignore', 'ipc'] });
+    await once(host, 'message');
+   }
+   return readdir(...args);
+  }) as typeof readdir;
+  syncBuiltinESMExports();
+  await assert.rejects(runtime.gc(), /Another DSH process/);
+  assert.equal(await fs.readFile(object, 'utf8'), 'attachment');
+  assert((await fs.readFile(log, 'utf8')).includes(reference));
+  assert(await exists(join(f.home, 'cache/attachments/request-images/ab/cache')));
+  assert.equal(await exists(join(stateDir(f.home), 'gc.json')), false);
+ } finally {
+  fs.readdir = readdir; syncBuiltinESMExports();
+  if (host) { const done = once(host, 'exit'); host.kill(); await done; }
+  await f.cleanup();
+ }
 });
 
 for (const change of ['staged', 'session/event', 'transient-session', 'publication', 'maintenance', 'read-failure']) void test(`size preview rejects ${change} changes and releases its subscriptions`, async () => {

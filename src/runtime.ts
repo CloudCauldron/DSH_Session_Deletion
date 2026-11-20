@@ -38,7 +38,7 @@ interface Job { id: string; owner?: string; status: string }
 interface Jobs {
   start(spec: { owner?: string }): unknown;
   list(owner: string): Job[];
-  kill(id: string, owner: string, reason: string): unknown;
+  kill(id: string, owner: string, reason: string): 'requested' | 'already-finished';
   events: { subscribe(filter: { owners: 'all' }, listener: (event: { type: string; job?: Job }) => void): () => void };
 }
 interface Activation {
@@ -520,7 +520,16 @@ export class DeletionRuntime {
         run(() => agent.whenIdle());
       }
     }
-    for (const job of jobs.values()) run(() => this.ctx.jobs.kill(job.id, job.owner!, 'session deleted'));
+    for (const id of waiting) {
+      try {
+        const result = this.ctx.jobs.kill(id, jobs.get(id)!.owner!, 'session deleted');
+        if (result === 'already-finished' && waiting.has(id)) throw new DeletionRefused('activity.unconfirmed');
+      } catch (error) {
+        // A refused cancellation starts no teardown and owes no settlement event.
+        waiting.delete(id);
+        failures.push(error);
+      }
+    }
     for (const terminal of terminals) run(() => this.terminals!.kill(terminal.agent, terminal.id, 'session deleted'));
     if (!waiting.size) jobsFinished();
     const stopping = Promise.allSettled(tasks).then(results => {
@@ -645,7 +654,7 @@ export class DeletionRuntime {
         if (this.unwrap(this.ctx.attachments).requestInflight.size) throw new DeletionRefused('error.imageCacheBusy');
         await this.ctx.sessionPersistence.flush();
         await Promise.all([...this.cacheWrites.values()].flatMap(writes => [...writes]));
-        return collectGarbage(this.home, await this.gcSources());
+        return collectGarbage(this.home, { ...await this.gcSources(), assertSoleHost: () => this.assertSoleHost() });
       });
     });
   }

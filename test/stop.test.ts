@@ -59,7 +59,7 @@ async function stoppingFixture() {
     sessionQuery: { listSessions: async () => Object.values(f.headers).map(header => ({ header, persisted: true })) },
     workspaceRegistry: { archivedSessionIds: [], archiveSession: async () => { assert.fail('deletion must not archive'); } },
     jobs: {
-      start() {}, list: () => [...jobs.values()], kill() {},
+      start() {}, list: () => [...jobs.values()], kill: () => 'requested',
       events: { subscribe(_filter, listener) { jobListeners.add(listener); return () => { jobListeners.delete(listener); }; } },
     },
     on: ((name: string, listener: Listener) => {
@@ -205,13 +205,38 @@ for (const proof of [true, false, undefined]) void test(`job resource-release ac
     const other = { id: 'other-job', status: 'running' };
     s.jobs.set(job.id, job); s.jobs.set(other.id, other);
     const killed: string[] = [];
-    s.runtime.ctx.jobs.kill = id => { killed.push(id); s.settleJob(job, proof); };
+    s.runtime.ctx.jobs.kill = id => { killed.push(id); s.settleJob(job, proof); return 'requested'; };
     if (proof === true) assert.deepEqual(await s.remove(), { deleted: 3 });
     else {
       await assert.rejects(s.remove(), /Unable to confirm/);
       assert(s.agents.has(s.root.id)); assert.deepEqual(await listRequests(s.f.home), []);
     }
     assert.deepEqual(killed, [job.id]); assert.equal(other.status, 'running'); assert.equal(s.listeners(), 0);
+  } finally { await s.f.cleanup(); }
+});
+
+for (const outcome of ['refused', 'already-finished'] as const) void test(`plugin unload drains sibling jobs after an unconfirmed ${outcome} cancellation`, async () => {
+  const s = await stoppingFixture();
+  const refused = { id: 'refused', owner: s.root.id, status: 'running' };
+  const sibling = { id: 'sibling', owner: s.root.id, status: 'running' };
+  try {
+    s.jobs.set(refused.id, refused); s.jobs.set(sibling.id, sibling);
+    const requested = deferred();
+    s.runtime.ctx.jobs.kill = id => {
+      if (id === sibling.id) { requested.resolve(); return 'requested'; }
+      if (outcome === 'refused') throw Error('producer refused cancellation');
+      return 'already-finished';
+    };
+    const removing = assert.rejects(s.remove(), outcome === 'refused' ? /producer refused cancellation/ : /Unable to confirm/);
+    await requested.promise;
+    const unloading = s.runtime.closeAdmission();
+    assert.ok(unloading);
+    await new Promise(setImmediate);
+    assert(s.runtime.isLocked(s.root.id));
+    s.settleJob(sibling, true);
+    await Promise.all([removing, unloading]);
+    assert.equal(s.runtime.locked.size, 0); assert.equal(s.listeners(), 0);
+    assert(s.agents.has(s.root.id)); assert.deepEqual(await listRequests(s.f.home), []);
   } finally { await s.f.cleanup(); }
 });
 

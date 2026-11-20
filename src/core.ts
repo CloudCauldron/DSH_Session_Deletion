@@ -673,9 +673,12 @@ export async function garbageSize(home: string, sources: GcSources = {}): Promis
 }
 
 /** Explicit, globally quiescent mark/sweep. Interrupted GC is rescanned, never replayed from a stale manifest. */
-export async function collectGarbage(home: string, { failAfter, ...sources }: GcSources & { failAfter?: number } = {}): Promise<GcResult> {
+export async function collectGarbage(home: string, { failAfter, assertSoleHost, ...sources }: GcSources & {
+  failAfter?: number; assertSoleHost?: () => Promise<void>;
+} = {}): Promise<GcResult> {
   // Complete preflight before the first destructive operation; never reuse a size preview.
   const { candidates, garbage, cache, cacheFiles, uploadPath, upload, index, stale } = await scanGarbage(home, sources);
+  await assertSoleHost?.();
   let operations = 0;
   const checkpoint = () => { if (failAfter !== undefined && ++operations >= failAfter) throw new LocalizedError('error.injectedGcInterruption'); };
   if (stale.length) {
