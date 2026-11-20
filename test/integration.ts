@@ -113,7 +113,11 @@ try{
  browser=await chromium.launch({executablePath:process.env.CHROME_PATH||(process.platform==='win32'?join(process.env.PROGRAMFILES!,'Google/Chrome/Application/chrome.exe'):'/opt/google/chrome/chrome'),headless:true,args:['--no-sandbox']});
  // Native UI selectors below use Simplified Chinese, independent of the host locale.
  const context=await browser.newContext({locale:'zh-CN',viewport:{width:1440,height:1000}});
- const page=await context.newPage();page.on('pageerror',e=>errors.push(e.message));
+ context.on('weberror',event=>{
+  const error=event.error();
+  errors.push((error.stack??error.message).replace(/token=[^\s&]+/g,'token=[redacted]'));
+ });
+ const page=await context.newPage();
  let receiptRequests=0;page.on('request',request=>{if(new URL(request.url()).pathname==='/session-deletion/api/receipt')receiptRequests++});
  await page.goto(url);await page.waitForTimeout(2000);
  const welcome=page.getByRole('button',{name:'继续',exact:true});if(await welcome.count())await welcome.click();
@@ -217,11 +221,11 @@ try{
  const busyGc=await context.request.post(`http://127.0.0.1:${port}/session-deletion/api/gc`,{headers:{'X-DSH-Session-Deletion':'1'},data:{confirmation:'COLLECT_ORPHAN_ATTACHMENTS'}});
  assert.equal(busyGc.status(),409,'GC requires every agent to be idle');
  await page.waitForTimeout(1200);
- const otherPage=await context.newPage();otherPage.on('pageerror',e=>errors.push(e.message));await otherPage.goto(`http://127.0.0.1:${port}/`);await otherPage.waitForTimeout(1200);
+ const otherPage=await context.newPage();await otherPage.goto(`http://127.0.0.1:${port}/`);await otherPage.waitForTimeout(1200);
  const otherWelcome=otherPage.getByRole('dialog').filter({hasText:'开始使用'});if(await otherWelcome.count())await otherWelcome.locator('button').first().click();
  await otherPage.addLocatorHandler(otherPage.getByRole('dialog',{name:'开始使用'}),async dialog=>{const close=dialog.locator('button').first();if(await close.isEnabled())await close.click()},{noWaitAfter:true});
  await otherPage.getByText(/^(未命名|Offline deletion integration fixture)$/).first().click();
- const independentPage=await context.newPage();independentPage.on('pageerror',e=>errors.push(e.message));
+ const independentPage=await context.newPage();
  await independentPage.goto(`http://127.0.0.1:${port}/`);await independentPage.waitForTimeout(1200);
  await independentPage.addLocatorHandler(independentPage.getByRole('dialog',{name:'开始使用'}),async dialog=>{const close=dialog.locator('button').first();if(await close.isEnabled())await close.click()},{noWaitAfter:true});
  await independentPage.getByText('Draft owner fixture',{exact:true}).first().click();
@@ -495,11 +499,17 @@ try{
   if(kind==='component'&&!await detail.isVisible())await card.getByRole('button',{name:/^查看/}).click();
   const controls=kind==='package'?card:detail.locator('[data-plugin-rows]');
   await controls.getByRole('switch',{checked:!enabled}).click();
+  return controls.getByRole('switch',{checked:enabled,disabled:false});
  }
  const waitForPlugin=(enabled:boolean)=>waitForHost(async()=>{
   const response=await getApi('status');
   return enabled ? response.ok() && (await response.json()).ok===true : response.status()===404;
  },`plugin did not become ${enabled?'available':'unavailable'}`);
+ async function switchPlugin(kind:'package'|'component',enabled:boolean){
+  const applied=await clickPluginSwitch(kind,enabled);
+  await applied.waitFor({timeout:60000});
+  await waitForPlugin(enabled);
+ }
  const survivor=page.locator(`[data-row-key="session:${preserved.id}"]`);
  const visibleSessions=()=>page.locator('[data-row-key^="session:"]').evaluateAll(rows=>rows.map(row=>row.getAttribute('data-row-key')).sort());
  await survivor.click();
@@ -525,8 +535,7 @@ try{
    await survivor.click();
    await transcript.waitFor();
    const expected=await visibleSessions();
-   await clickPluginSwitch(kind,enabled);
-   await waitForPlugin(enabled);
+   await switchPlugin(kind,enabled);
    if(enabled){
     assert.ok(disabledSession);
     const state=await controls('state',{id:disabledSession});
@@ -785,8 +794,7 @@ try{
  assert.equal(await exists(filtered.path),false);
  assert.equal(await hasFilteredMember(),false);
  assert.equal((await listRequests(home)).length,0);
- await clickPluginSwitch('package',true);
- await waitForPlugin(true);
+ await switchPlugin('package',true);
  assert.ok((await receipt()).deletedIdHashes.includes(createHash('sha256').update(filtered.id).digest('hex')));
  assert.deepEqual(errors,[]);
  console.log('INTEGRATION PASS: active native turns, cold-resumed and external subagents, jobs, schedules, preparation UI locks, private deletion, isolated publication, GC, recovery, and live zh/en metadata');
