@@ -2,6 +2,7 @@ import * as fs from 'node:fs/promises';
 import { readFileSync, realpathSync } from 'node:fs';
 import { join, resolve } from 'node:path';
 import { userInfo } from 'node:os';
+import { LocalizedError } from './locale/errors.js';
 import { safePath } from './core.js';
 import { processes, tryLock as lock, usesLockFiles, homeVariable, resolvePath, type Lock } from './platform/index.js';
 
@@ -17,16 +18,16 @@ function isDshEntry(entry: string): boolean {
   return false;
 }
 
-function isDshHost(args: readonly string[], cwd: string): boolean {
+function dshEntryIndex(args: readonly string[], cwd: string): number {
   for (const [index, arg] of args.entries()) {
-    if (/^(?:-e|-p|--eval|--print)(?:=|$)/.test(arg)) return false;
+    if (/^(?:-e|-p|--eval|--print)(?:=|$)/.test(arg)) return -1;
     if (arg.startsWith('-')) continue;
     const entry = resolve(cwd, arg);
-    if (isDshEntry(entry)) return true;
+    if (isDshEntry(entry)) return index;
     if (index > 0) {
       try {
         const actual = realpathSync.native(entry);
-        if (actual !== entry && isDshEntry(actual)) return true;
+        if (actual !== entry && isDshEntry(actual)) return index;
       } catch (error) {
         // A loader or preload specifier need not be a path in the target cwd.
         if (!['ENOENT', 'ENOTDIR', 'EINVAL', 'ENAMETOOLONG'].includes((error as NodeJS.ErrnoException).code ?? '')) throw error;
@@ -38,15 +39,19 @@ function isDshHost(args: readonly string[], cwd: string): boolean {
     if (previous && (!previous.startsWith('-') || previous === '--' || previous.includes('=') || previous === '--expose-internals'
       || previous.startsWith('--no-') || process.allowedNodeEnvironmentFlags.has('--no-' + previous.slice(2)))) break;
   }
-  return false;
+  return -1;
 }
 
 export async function sameHomeHosts(home: string, excludePid?: number): Promise<number[]> {
   const actual = await fs.realpath(home);
-  const hosts = await processes(excludePid, ['node', 'nodejs', 'dsh', 'electron', 'dsh-desktop', 'deepseek-harness', 'deepseek harness'], isDshHost);
+  const hosts = await processes(excludePid, ['node', 'nodejs', 'dsh', 'electron', 'dsh-desktop', 'deepseek-harness', 'deepseek harness'], dshEntryIndex);
   const found: number[] = [];
   for (const host of hosts) {
-    const env = (name: string) => host.env.find(row => row.startsWith(name + '='))?.slice(name.length + 1);
+    const env = (name: string) => {
+      const value = host.env.find(row => row.startsWith(name + '='))?.slice(name.length + 1);
+      if (value === undefined && host.envFile) throw new LocalizedError('error.hostHomeUnknown', { pid: host.pid });
+      return value;
+    };
     const configured = env('DSH_HOME');
     let target = configured?.trim() ? configured : join(env(homeVariable) || userInfo().homedir, '.dsh');
     if (target === '~' || /^~[\\/]/.test(target)) target = join(env(homeVariable) || userInfo().homedir, target.slice(2));

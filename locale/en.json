@@ -35,6 +35,7 @@
     "activity.globalAgentBusy": "An AI agent is still running or awaiting input; wait until all are idle before cleaning up attachments",
     "activity.chatImport": "A DeepSeek chat import is saving sessions and attachments.",
     "activity.maintenance": "Background session maintenance has not finished yet",
+    "activity.untrackedUploads": "A session was already open when upload tracking started. Restart DSH before cleaning up attachments.",
     "activity.missingHandle": "Missing full lifecycle handle; please restart DSH",
     "activity.nativeBusy": "Official archive still has active tasks: {kind}",
     "activity.nativeBusyUnknown": "Official archive still has active tasks: background task",
@@ -78,6 +79,7 @@
     "error.processIdentityUnreadable": "Cannot read process identity",
     "error.processParameters": "Cannot query process parameters",
     "error.processWait": "{api} failed (Win32 {error})",
+    "error.hostHomeUnknown": "Cannot determine the DSH home of process {pid} from its launch environment.",
     "error.sameUserInspection": "Cannot inspect a same-user process; cleanup deferred",
     "error.win32Operation": "{operation} failed (Win32 {code})",
 

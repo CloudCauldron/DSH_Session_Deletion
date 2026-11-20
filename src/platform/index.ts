@@ -1,6 +1,6 @@
 import { LocalizedError } from '../locale/errors.js';
 export interface Lock { close(): Promise<void> }
-export interface ProcessInfo { pid: number; cwd: string; env: string[] }
+export interface ProcessInfo { pid: number; cwd: string; env: string[]; envFile?: boolean }
 
 if (!['linux', 'win32'].includes(process.platform)) throw new LocalizedError('error.unsupportedPlatform');
 

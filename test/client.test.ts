@@ -333,7 +333,7 @@ void test('deletion copy and API errors follow locale changes, use English for m
     assert(buttons().every(button => button.props.disabled)); assert.equal(closeButton.disabled, true);
     await tick(); assert(buttons().every(button => button.props.disabled), 'failed status reads cannot release unknown server work');
     missingPreview = true; statusFailed = false; await tick(); assert(buttons().every(button => button.props.disabled));
-    deletionRunning = false; pending = [{ sessionId: id, queuedAt: 'fixture' }];
+    deletionRunning = false; pending = [{ sessionId: 'another-root', queuedAt: 'fixture' }];
     await tick();
     assert.deepEqual(buttons().map(button => button.props.disabled), [false, true], 'the pending request can be dismissed even when its target has no preview');
     assert.equal(closeButton.disabled, false);
@@ -352,6 +352,9 @@ void test('deletion copy and API errors follow locale changes, use English for m
     assert(buttons().every(button => !button.props.disabled));
     assert.equal(lateDelete(), false, 'the delayed request cannot consume the replacement token');
     beforeAcceptance = false;
+    pending = [{ sessionId: 'another-root', queuedAt: 'fixture' }]; await tick();
+    assert.equal(buttons().at(-1)!.props.disabled, true);
+    pending = []; await tick();
     (buttons().at(-1)!.props.onClick as () => void)(); await new Promise(setImmediate);
     resolveDelete(); await new Promise(setImmediate); assert.equal(modal(), undefined);
 

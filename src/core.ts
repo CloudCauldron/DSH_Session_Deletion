@@ -390,7 +390,7 @@ async function validateTargetDirectories(home: string, plan: DeletionPlan) {
     }
   }
 }
-/** Caller holds lifecycle and target writer locks. This function never scans or deletes attachments. */
+/** Sweep confirmed session data under the caller's live maintenance or exclusive offline writer protections. */
 export async function sweep(home: string, { failAfter, hooks }: { failAfter?: number; hooks?: SweepHooks } = {}) {
   await safePath(home, { directory: true });
   let operations = 0;

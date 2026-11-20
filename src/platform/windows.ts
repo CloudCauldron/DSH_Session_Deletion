@@ -122,7 +122,7 @@ export async function mkdir(path: string): Promise<string | undefined> {
 /** Read the target's own cwd/environment, rather than infer DSH_HOME from ours.
  * PEB/RTL_USER_PROCESS_PARAMETERS are Windows ABI structures; failed inspection
  * defers cleanup. Both native 64-bit and WOW64 Node processes are recognized. */
-function parameters(handle: number | bigint, matches: (args: readonly string[], cwd: string) => boolean): Omit<ProcessInfo, 'pid'> | undefined {
+function parameters(handle: number | bigint, entryIndex: (args: readonly string[], cwd: string) => number): Omit<ProcessInfo, 'pid'> | undefined {
   const pointerSize = koffi.sizeof('uintptr_t');
   const basic = Buffer.alloc(6 * pointerSize), wow64 = Buffer.alloc(8);
   if (query(handle, 0, basic, basic.length, null) < 0 || (pointerSize === 8 && query(handle, 26, wow64, wow64.length, null) < 0))
@@ -142,7 +142,7 @@ function parameters(handle: number | bigint, matches: (args: readonly string[], 
   const count = [0];
   const argv = parseArgs(string(narrow ? 0x40 : 0x70), count);
   check(argv, 'CommandLineToArgvW');
-  try { if (!matches(koffi.decode(argv, 'char16_t *', count[0]), cwd)) return; }
+  try { if (entryIndex(koffi.decode(argv, 'char16_t *', count[0]), cwd) < 0) return; }
   finally { check(!free(argv), 'LocalFree'); }
   let environment = '', cursor = pointer(params, narrow ? 0x48 : 0x80);
   while (!environment.includes('\0\0')) {
@@ -157,7 +157,7 @@ function parameters(handle: number | bigint, matches: (args: readonly string[], 
   });
   return { cwd, env };
 }
-export async function processes(excludePid: number | undefined, executables: readonly string[], matches: (args: readonly string[], cwd: string) => boolean): Promise<ProcessInfo[]> {
+export async function processes(excludePid: number | undefined, executables: readonly string[], entryIndex: (args: readonly string[], cwd: string) => number): Promise<ProcessInfo[]> {
   const found: ProcessInfo[] = [];
   const list = snapshot(2 /* TH32CS_SNAPPROCESS */, 0);
   if (list === -1 || list === -1n) check(false, 'CreateToolhelp32Snapshot');
@@ -172,7 +172,7 @@ export async function processes(excludePid: number | undefined, executables: rea
       try {
         const owner = user(handle);
         if (!equalSid(koffi.decode(owner, 'void *'), koffi.decode(currentUser, 'void *'))) continue;
-        const info = parameters(handle, matches);
+        const info = parameters(handle, entryIndex);
         if (info) found.push({ pid: row.pid, ...info });
       } catch (e) {
         // A terminating process can lose its PEB just before its handle signals.

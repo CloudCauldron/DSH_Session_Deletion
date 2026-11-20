@@ -206,7 +206,7 @@ async function mountClient(ctx: DeletionClientContext, require: (name: string) =
     }
     if (!active) return;
     if (own === generation && !wasSubmitting && !submitting && dialog?.busy && dialog.error && status.deletionRunning === false
-      && (dialog.preview || status.pending.some(item => item.sessionId === dialog!.id))) dialog = { ...dialog, busy: false };
+      && (dialog.preview || status.pending.length)) dialog = { ...dialog, busy: false };
     publish();
     try {
       if (!receipt || receipt.revision !== status.receipt.revision) receipt = await api<DeletionReceipt>('receipt');

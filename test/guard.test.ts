@@ -125,7 +125,9 @@ void test('DSH processes using another home do not block cleanup', async () => {
   const script = join(f.base, '@deepseek-ai/dsh/lib/bin.js'), otherHome = join(f.base, 'another-home');
   await f.write(script, 'setInterval(() => {}, 1000)');
   await fs.mkdir(otherHome);
-  const host = spawn(process.execPath, [script], { env: { ...process.env, DSH_HOME: otherHome }, stdio: 'ignore' });
+  const envFile = join(f.base, 'boot.env');
+  await f.write(envFile, 'DSH_HOME=' + f.home + '\n');
+  const host = spawn(process.execPath, ['--env-file-if-exists=' + envFile, script], { env: { ...process.env, DSH_HOME: otherHome }, stdio: 'ignore' });
   const done = finished(host);
   try {
     await once(host, 'spawn');

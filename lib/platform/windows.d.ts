@@ -8,4 +8,4 @@ export declare function birth(pid: number): Promise<string | undefined>;
 export declare function tryLock(path: string, _create?: boolean, machineWide?: boolean): Promise<Lock | undefined>;
 export declare function rename(from: string, to: string): Promise<void>;
 export declare function mkdir(path: string): Promise<string | undefined>;
-export declare function processes(excludePid: number | undefined, executables: readonly string[], matches: (args: readonly string[], cwd: string) => boolean): Promise<ProcessInfo[]>;
+export declare function processes(excludePid: number | undefined, executables: readonly string[], entryIndex: (args: readonly string[], cwd: string) => number): Promise<ProcessInfo[]>;

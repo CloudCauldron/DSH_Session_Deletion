@@ -209,6 +209,7 @@ export declare class DeletionRuntime {
     readonly locked: Set<string>;
     readonly barrier: PublicationBarrier;
     private handles;
+    private preexistingAgents;
     private operations;
     private deleted;
     private importer?;

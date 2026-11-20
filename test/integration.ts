@@ -3,6 +3,7 @@ import * as fs from 'node:fs/promises';
 import { join, resolve } from 'node:path';
 import { tmpdir } from 'node:os';
 import { spawn } from 'node:child_process';
+import { once } from 'node:events';
 import { request as httpRequest } from 'node:http';
 import { randomUUID, createHash } from 'node:crypto';
 import { zstdCompressSync } from 'node:zlib';
@@ -510,6 +511,20 @@ try{
   await page.keyboard.press('Escape');
  }
  await page.goto('about:blank');await stop();
+ // Linux exposes the exec-time environment. Run this ambiguous-host case outside
+ // the parallel unit workers, since it must defer maintenance in every home.
+ const hostDir=join(base,'@deepseek-ai/dsh/lib'), entry=join(hostDir,'bin.js');
+ await fs.mkdir(hostDir,{recursive:true});
+ await fs.writeFile(entry,'console.log(process.env.DSH_HOME); setInterval(() => {}, 1000)');
+ await fs.writeFile(join(base,'boot.env'),'DSH_HOME='+home+'\n');
+ const launchEnv={...process.env};delete launchEnv.DSH_HOME;
+ const envHost=spawn(process.execPath,['--env-file','boot.env',entry],{cwd:base,env:launchEnv,stdio:['ignore','pipe','pipe']});
+ const envExited=once(envHost,'exit');
+ try{
+  const [resolvedHome]=await once(envHost.stdout,'data');assert.equal(String(resolvedHome).trim(),home);
+  await assert.rejects(runGuard(home),process.platform==='linux'?/launch environment/:/Another DSH process/);
+  assert.equal((await listRequests(home)).length,1);
+ }finally{envHost.kill();await envExited}
  await runGuard(home);
  await fs.rmdir(oldWorkspace);await fs.writeFile(oldWorkspace,'former workspace directory');
  const again=await start();await page.goto(again);await page.waitForTimeout(2000);

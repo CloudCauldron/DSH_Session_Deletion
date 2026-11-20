@@ -35,6 +35,7 @@
     "activity.globalAgentBusy": "仍有 AI 在工作或等待交互，请全部空闲后再清理附件",
     "activity.chatImport": "DeepSeek 对话导入正在保存会话和附件。",
     "activity.maintenance": "会话后台维护尚未结束",
+    "activity.untrackedUploads": "有会话在插件开始跟踪上传前就已加载。请重启 DSH 后再清理附件。",
     "activity.missingHandle": "缺少完整生命周期句柄，请重启 DSH",
     "activity.nativeBusy": "官方归档状态仍有活动：{kind}",
     "activity.nativeBusyUnknown": "官方归档状态仍有活动：后台任务",
@@ -78,6 +79,7 @@
     "error.processIdentityUnreadable": "无法读取进程标识。",
     "error.processParameters": "无法查询进程参数。",
     "error.processWait": "{api} 失败，Win32 错误码为 {error}。",
+    "error.hostHomeUnknown": "无法从启动环境确定进程 {pid} 使用的 DSH 数据目录。",
     "error.sameUserInspection": "无法检查同一用户的进程，清理已推迟。",
     "error.win32Operation": "{operation} 失败，Win32 错误码为 {code}。",
 

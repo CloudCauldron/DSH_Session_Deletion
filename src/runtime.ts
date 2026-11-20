@@ -149,6 +149,7 @@ export class DeletionRuntime {
   readonly locked = new Set<string>();
   readonly barrier = new PublicationBarrier();
   private handles = new Map<string, Handle>();
+  private preexistingAgents = new WeakSet<Agent>();
   private operations = new Map<string, Set<Operation>>();
   private deleted = new Set<string>();
   private importer?: RuntimeContext['deepseekChatImport'];
@@ -285,7 +286,11 @@ export class DeletionRuntime {
       return disposer;
     });
     if (registry.factory?.target) this.captureFactory(registry.factory.target);
-    for (const agent of registry.list()) this.trackAgent(agent);
+    for (const agent of registry.list()) {
+      // A native upload started before this mount may still stage bytes for this exact owner.
+      this.preexistingAgents.add(agent);
+      this.trackAgent(agent);
+    }
     const manager = this.manager();
     this.patch(manager, 'assertAdmitting', original => function (agent) {
       const member = agent as Agent;
@@ -354,7 +359,7 @@ export class DeletionRuntime {
     });
     this.ctx.on('agent/disposed', ({ agent }: { agent: Agent }) => {
       runtime.handles.delete(agent.id);
-      // Do not retain a deleted transcript through adapter restoration closures.
+      for (const restore of runtime.agentRestorers.get(agent)?.reverse() ?? []) restore();
       runtime.agentRestorers.delete(agent);
     });
     this.ctx.on('agent/pre-step', async ({ agent }: { agent: Agent }, next: () => Promise<unknown>) =>
@@ -553,6 +558,7 @@ export class DeletionRuntime {
       if (agent) {
         if (agent.status !== 'idle') reasons.push(message(global ? 'activity.globalAgentBusy' : 'activity.targetAgentBusy'));
         if (agent.inbox?.nextTurn?.length || agent.inbox?.nextStep?.length) reasons.push(message('activity.queuedInput'));
+        if (global && this.preexistingAgents.has(agent)) reasons.push(message('activity.untrackedUploads'));
         if (targets.has(id) && !this.handles.has(id)) reasons.push(message('activity.missingHandle'));
         const idle = await Promise.race([agent.whenIdle().then(() => true), delay(0).then(() => false)]);
         if (!idle) reasons.push(message('activity.maintenance'));
@@ -626,23 +632,25 @@ export class DeletionRuntime {
     } finally { for (const dispose of subscriptions) dispose(); }
   }
   gc(): Promise<GcResult> {
-    return this.runMaintenance('gc', () => this.barrier.exclusive(async () => {
-      await this.assertSoleHost();
+    return this.runMaintenance('gc', async () => {
       if ((await listRequests(this.home)).length) throw new DeletionRefused('error.pendingDeletion');
-      const activity = await this.quiescence([], true);
-      if (activity.busy) throw new DeletionRefused(activity.reasons);
-      // A canceled image caller can finish before its shared compression work.
-      if (this.unwrap(this.ctx.attachments).requestInflight.size) throw new DeletionRefused('error.imageCacheBusy');
-      await this.ctx.sessionPersistence.flush();
-      await Promise.all([...this.cacheWrites.values()].flatMap(writes => [...writes]));
-      return collectGarbage(this.home, await this.gcSources());
-    }));
+      return this.barrier.exclusive(async () => {
+        await this.assertSoleHost();
+        const activity = await this.quiescence([], true);
+        if (activity.busy) throw new DeletionRefused(activity.reasons);
+        // A canceled image caller can finish before its shared compression work.
+        if (this.unwrap(this.ctx.attachments).requestInflight.size) throw new DeletionRefused('error.imageCacheBusy');
+        await this.ctx.sessionPersistence.flush();
+        await Promise.all([...this.cacheWrites.values()].flatMap(writes => [...writes]));
+        return collectGarbage(this.home, await this.gcSources());
+      });
+    });
   }
   private async removeOne(id: string, createdAt: number, expectedIds: readonly string[]): Promise<{ deleted: number }> {
     const deadline = performance.now() + this.stopTimeoutMs;
+    if ((await this.until(listRequests(this.home), deadline)).length) throw new DeletionRefused('error.pendingCleanup');
     // A preview can see an imported log before its workspace attachment settles.
     if (this.importer?.active) await this.until(this.importer.active.settled, deadline);
-    if ((await this.until(listRequests(this.home), deadline)).length) throw new DeletionRefused('error.pendingCleanup');
     const headers = await this.until(this.headers(), deadline); const root = headers.get(id);
     if (!root || root.createdAt !== createdAt) throw new DeletionRefused('error.sessionChanged');
     if (root.origin === 'subagent' || (root.delegationDepth ?? 0) > 0) throw new DeletionRefused('error.mainSessionRequired');

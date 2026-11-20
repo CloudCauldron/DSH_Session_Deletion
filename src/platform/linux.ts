@@ -48,7 +48,7 @@ export async function birth(pid: number): Promise<string | undefined> {
     return fields[0] === 'Z' ? undefined : fields[19];
   } catch (e) { if (['ENOENT', 'ESRCH'].includes((e as NodeJS.ErrnoException).code || '')) return; throw e; }
 }
-export async function processes(excludePid: number | undefined, executables: readonly string[], matches: (args: readonly string[], cwd: string) => boolean): Promise<ProcessInfo[]> {
+export async function processes(excludePid: number | undefined, executables: readonly string[], entryIndex: (args: readonly string[], cwd: string) => number): Promise<ProcessInfo[]> {
   const found: ProcessInfo[] = [];
   for (const pidText of await fs.readdir('/proc')) {
     const pid = Number(pidText);
@@ -59,9 +59,12 @@ export async function processes(excludePid: number | undefined, executables: rea
       const args = (await fs.readFile(join(p, 'cmdline'), 'utf8')).split('\0').filter(Boolean);
       if (!args.length || !executables.includes(basename(args[0]).toLowerCase())) continue;
       const cwd = await fs.readlink(join(p, 'cwd'));
-      if (!matches(args, cwd)) continue;
+      const entry = entryIndex(args, cwd);
+      if (entry < 0) continue;
       const env = (await fs.readFile(join(p, 'environ'), 'utf8')).split('\0');
-      found.push({ pid, cwd, env });
+      // /proc exposes the exec-time environment, before Node applies its env files.
+      const envFile = args.slice(1, entry).some(arg => /^--env-file(?:-if-exists)?(?:=|$)/.test(arg));
+      found.push({ pid, cwd, env, envFile });
     } catch (e) {
       if (['ENOENT', 'ESRCH'].includes((e as NodeJS.ErrnoException).code || '') && !(await birth(pid))) continue;
       throw new LocalizedError('error.sameUserInspection', undefined, { cause: e });

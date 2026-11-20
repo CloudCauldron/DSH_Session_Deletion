@@ -22,17 +22,31 @@ void test('upload coordination covers importer replacement and preserves synchro
   };
   const attachments: Record<string, unknown> & Pick<RuntimeContext['attachments'], 'root' | 'cacheRoot'> = { root: join(f.home, 'attachments/v1'), cacheRoot: join(f.home, 'cache/attachments'), requestInflight: new Map() };
   for (const name of ['saveImage', 'saveImages', 'saveFile', 'saveFileStream', 'readImageRequest']) attachments[name] = async () => {};
+  const nativeSend = () => {};
+  const owner = { id: f.ids.main, session: { id: f.ids.main, header: f.headers[f.ids.main] }, status: 'idle', send: nativeSend, cancel() {}, whenIdle: async () => {} };
+  let resident: typeof owner | undefined = owner;
+  let detachAgent!: (event: { agent: typeof owner }) => void;
   let bindImporter!: (ctx: RuntimeContext) => void;
   const runtime = makeRuntime({
    dshHomePath: () => f.home, attachments, fileUploads: uploads,
-   sessions: { list: () => [] }, sessionPersistence: { name: 'session-persistence-jsonl', root: join(f.home, 'sessions'), async flush() { flushing.resolve(); await release.promise; } },
+   sessions: { list: () => resident ? [resident.session] : [] }, sessionPersistence: { name: 'session-persistence-jsonl', root: join(f.home, 'sessions'), async flush() { flushing.resolve(); await release.promise; } },
    workspaceRegistry: { pinSession() {}, async archiveSession() {}, async unarchiveSession() {} },
-   agents: { list: () => [], requireFactory: () => ({ target: {} }), setFactory() {} }, sessionProjectionCache: { table: new Map<string, unknown>(), put() {} },
+   agents: { list: () => resident ? [resident] : [], get: () => resident, requireFactory: () => ({ target: {} }), setFactory() {} }, sessionProjectionCache: { table: new Map<string, unknown>(), put() {} },
    sessionController: Object.fromEntries(['prompt', 'attachment', 'updateQueue', 'fork', 'rename', 'selectModel', 'create', 'resolveAgent', 'state', 'page', 'projections', 'list'].map(name => [name, () => {}])),
    schedule: { create: async () => {}, edit: async () => {}, catalog: async () => [] },
-   on() { return () => {}; }, inject(names, bind) { if (names.includes('deepseekChatImport')) bindImporter = bind; }, effect(callback) { dispose = callback(); },
+   waterfall: async () => [],
+   on(name, listener) { if (name === 'agent/disposed') detachAgent = listener as typeof detachAgent; return () => {}; },
+   inject(names, bind) { if (names.includes('deepseekChatImport')) bindImporter = bind; }, effect(callback) { dispose = callback(); },
   });
   await runtime.initialize();
+  assert.notEqual(owner.send, nativeSend);
+  await assert.rejects(runtime.gc(), /upload tracking/);
+  assert.equal(await fs.readFile(join(f.home, 'attachments/v1/objects', f.exclusive.slice(0, 2), f.exclusive), 'utf8'), 'image');
+  detachAgent({ agent: owner });
+  assert.equal(owner.send, nativeSend);
+  resident = { ...owner };
+  assert.equal((await runtime.quiescence([], true)).busy, false, 'a later agent with the same ID is eligible without a deletion handle');
+  resident = undefined;
   let settle!: () => void;
   const outgoing = { active: { settled: new Promise<void>(done => { settle = done; }) }, claim() {} };
   bindImporter({ ...runtime.ctx, deepseekChatImport: outgoing });
