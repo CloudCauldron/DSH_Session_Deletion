@@ -6,7 +6,7 @@ import { createRequire } from 'node:module';
 import { realpath } from 'node:fs/promises';
 import { join, relative, resolve } from 'node:path';
 import { setTimeout as delay } from 'node:timers/promises';
-import { SUPPORTED_DSH, captureDeletionRequest, digest, enqueue, exists, familyOf, listRequests, readReceipt, readSchedule, requestPath, sweep, planSessionDeletion, collectGarbage, garbageSize, scheduledSession,
+import { SUPPORTED_DSH, captureDeletionRequest, digest, enqueue, familyOf, listRequests, readReceipt, readSchedule, sweep, planSessionDeletion, collectGarbage, garbageSize, scheduledSession,
   type UploadIndex, type LiveSnapshot, type Receipt, type SessionHeader, type SessionStat, type GcResult, type ScheduleTask } from './core.js';
 import { tryLock, sameHomeHosts } from './locks.js';
 import type { Lock } from './platform/index.js';
@@ -254,9 +254,6 @@ export class DeletionRuntime {
     this.deleted = new Set(receipt.deletedIdHashes);
     this.receiptRevision = receipt.revision;
   }
-  private async loadReceipt(): Promise<void> {
-    this.installReceipt(await readReceipt(this.home));
-  }
   closeAdmission(): Promise<void> | undefined {
     this.disposed = true;
     return this.maintenance?.settled;
@@ -266,7 +263,7 @@ export class DeletionRuntime {
     if (persistence.name !== 'session-persistence-jsonl' || resolve(persistence.root) !== join(this.home, 'sessions')) {
       throw new LocalizedError('error.defaultSessionRoot');
     }
-    await this.loadReceipt();
+    this.installReceipt(await readReceipt(this.home));
     const runtime = this;
     if (this.ctx.attachments.root !== join(this.home, 'attachments', 'v1')
       || this.ctx.attachments.cacheRoot !== join(this.home, 'cache', 'attachments')) throw new LocalizedError('error.attachmentStorage');
@@ -677,7 +674,6 @@ export class DeletionRuntime {
     await this.checkScheduleDelivery(ids, deadline);
     await this.until(this.assertSoleHost(), deadline);
     if (performance.now() >= deadline) throw new DeletionRefused('error.stopTimeout');
-    let enqueueAttempted = false; let committed = false;
     const writerLocks: Lock[] = [];
     try {
       const stopped = this.stop(root, headers, ids, deadline);
@@ -715,7 +711,6 @@ export class DeletionRuntime {
       if (this.manager() !== stopped.manager || this.activations(root, ids, stopped.manager).length) throw new DeletionRefused('activity.unconfirmed');
       // Another host can open the shared workspace and schedule tables while large logs are read.
       await this.assertSoleHost();
-      enqueueAttempted = true;
       await enqueue(this.home, request);
       for (const member of ids) {
         const writes = this.cacheWrites.get(member);
@@ -724,7 +719,7 @@ export class DeletionRuntime {
       }
       const result = await sweep(this.home, { hooks: {
         onlySessionId: id,
-        receiptCommitted: receipt => { this.installReceipt(receipt); committed = true; },
+        receiptCommitted: receipt => this.installReceipt(receipt),
         applyEdit: async (edit, targets) => {
           const path = relative(this.home, edit.path);
           if (path === join('storages', 'workspace.json')) {
@@ -744,30 +739,23 @@ export class DeletionRuntime {
       } });
       return { deleted: result.reduce((n, value) => n + value.sessions, 0) };
     } finally {
-      await Promise.all(writerLocks.map(lock => lock.close()));
-      const finish = async () => {
-        // rename may commit a request even when the subsequent directory fsync fails.
-        if (committed || (enqueueAttempted && await exists(requestPath(this.home, id)))) {
-          // Install every tombstone before notifying fallible downstream listeners.
-          if (!committed) await this.loadReceipt();
-          const completed = ids.filter(member => this.deleted.has(digest(member)));
-          const registry = this.unwrap(this.ctx.workspaceRegistry);
-          for (const member of completed) {
-            for (const key of ['headers', 'sessionPaths', 'missingSessionPaths', 'invalidSessionPaths'] as const) registry[key]?.delete(member);
-            this.unwrap(this.ctx.sessionPersistence).coldLogMemo?.delete(member);
-            this.unwrap(this.ctx.sessionQuery)._observations?.cache?.delete(member);
-            try { this.ctx.emit('api-session/removed', member); }
-            catch (error) { this.ctx.logger.warn('Session removal notification failed', error); }
-          }
+      try { await Promise.all(writerLocks.map(lock => lock.close())); }
+      finally {
+        const unlock = () => { for (const member of ids) this.locked.delete(member); };
+        if (this.stopping) {
+          this.stopping = this.stopping.then(unlock, unlock).finally(() => { this.stopping = undefined; });
+        } else unlock();
+      }
+      if (this.deleted.has(digest(id))) {
+        const registry = this.unwrap(this.ctx.workspaceRegistry);
+        for (const member of ids) {
+          for (const key of ['headers', 'sessionPaths', 'missingSessionPaths', 'invalidSessionPaths'] as const) registry[key]?.delete(member);
+          this.unwrap(this.ctx.sessionPersistence).coldLogMemo?.delete(member);
+          this.unwrap(this.ctx.sessionQuery)._observations?.cache?.delete(member);
+          try { this.ctx.emit('api-session/removed', member); }
+          catch (error) { this.ctx.logger.warn('Session removal notification failed', error); }
         }
-        // The journal blocks new maintenance. Only a receipt keeps a settled session locked.
-        for (const member of ids) this.locked.delete(member);
-      };
-      if (this.stopping) {
-        this.stopping = this.stopping.then(finish, finish)
-          .catch(error => { this.ctx.logger.warn('Session stop finalization failed', error); })
-          .finally(() => { this.stopping = undefined; });
-      } else await finish();
+      }
     }
   }
 }

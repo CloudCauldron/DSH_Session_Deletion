@@ -301,7 +301,7 @@ void test('submissions queued behind GC do not make its global idle check fail',
  assert.equal(published, true);
 });
 
-for (const failure of ['receipt-read', 'receipt-cleanup']) void test(`deletion publishes tombstones despite ${failure} failure`, async () => {
+for (const failure of ['receipt-read', 'receipt-cleanup', 'cache-invalidation'] as const) void test(`settled deletion releases admission and honors the published receipt on ${failure} failure`, async () => {
  const f = await fixture();
  const readFile = fs.readFile, rm = fs.rm;
  try {
@@ -319,31 +319,41 @@ for (const failure of ['receipt-read', 'receipt-cleanup']) void test(`deletion p
   runtime.headers = async () => headers;
   runtime.quiescence = async () => ({ busy: false, reasons: [] });
   const path = join(stateDir(f.home), 'receipt.json');
+  assert.deepEqual(await runtime.remove(f.ids.other, new Map([[f.ids.other, f.headers[f.ids.other].createdAt]])), { deleted: 1 });
+  const previous = JSON.parse(await readFile(path, 'utf8'));
+  if (failure === 'cache-invalidation') runtime.ctx.sessionPersistence.coldLogMemo = { delete() { throw new Error('Injected cache failure'); } };
   let receiptReads = 0;
   fs.readFile = (async (...args: Parameters<typeof readFile>) => {
    const file = args[0];
    if (file === path) {
     receiptReads++;
-    if (failure === 'receipt-read') throw Object.assign(new Error('Injected receipt read failure'), { code: 'EIO' });
+    if (failure === 'receipt-read' || receiptReads > 1) throw Object.assign(new Error('Injected receipt read failure'), { code: 'EIO' });
    }
    return readFile(...args);
   }) as typeof readFile;
   fs.rm = async function (file, ...args) {
    await rm.call(this, file, ...args);
-   if (failure === 'receipt-cleanup' && String(file).includes('.session-deletion-write-') && await readFile(path, 'utf8').catch(() => ''))
+   if (failure === 'receipt-cleanup' && String(file).startsWith(join(stateDir(f.home), '.session-deletion-write-')))
     throw Object.assign(new Error('Injected post-rename failure'), { code: 'EIO' });
   };
   syncBuiltinESMExports();
   const ids = familyOf(headers, f.ids.main);
   const removal = runtime.remove(f.ids.main, new Map(ids.map(id => [id, f.headers[id].createdAt])));
-  if (failure === 'receipt-read') assert.deepEqual(await removal, { deleted: 3 });
-  else await assert.rejects(removal, /Injected post-rename failure/);
+  const reason = { 'receipt-read': /Injected receipt read failure/, 'receipt-cleanup': /Injected post-rename failure/, 'cache-invalidation': /Injected cache failure/ };
+  await assert.rejects(removal, reason[failure]);
   const persisted = JSON.parse(await readFile(path, 'utf8'));
-  assert.equal(persisted.deletedIdHashes.length, 3);
+  assert.equal(receiptReads, 1);
+  assert.equal(runtime.locked.size, 0);
+  assert.ok(runtime.isLocked(f.ids.other));
   assert.deepEqual(runtime.receipt, { revision: persisted.revision, deletedIdHashes: persisted.deletedIdHashes });
-  assert.ok(ids.every(id => runtime.isLocked(id)));
-  assert.equal(receiptReads, failure === 'receipt-read' ? 0 : 1);
-  assert.equal((await listRequests(f.home)).length, failure === 'receipt-read' ? 0 : 1);
+  if (failure === 'receipt-read') {
+   assert.deepEqual(persisted, previous);
+   for (const id of ids) assert.equal((await runtime.operation([id], () => f.stat(id))).header.id, id);
+  } else {
+   assert.equal(persisted.deletedIdHashes.length, previous.deletedIdHashes.length + ids.length);
+   assert.ok(ids.every(id => runtime.isLocked(id)));
+  }
+  assert.equal((await listRequests(f.home)).length, failure === 'cache-invalidation' ? 0 : 1);
  } finally {
   fs.readFile = readFile; fs.rm = rm; syncBuiltinESMExports();
   await f.cleanup();

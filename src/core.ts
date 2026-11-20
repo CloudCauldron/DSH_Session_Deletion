@@ -132,7 +132,7 @@ export async function privateDir(path: string) {
   await safePath(path, { directory: true });
   await secureDir(path, firstCreated);
 }
-export async function atomicJSON(path: string, data: unknown) {
+export async function atomicJSON<T>(path: string, data: T, onPublished?: (data: T) => void) {
   await safePath(path, { missing: true });
   await privateDir(dirname(path));
   const started = await birth(process.pid);
@@ -144,7 +144,8 @@ export async function atomicJSON(path: string, data: unknown) {
     await h.writeFile(JSON.stringify(data) + '\n');
     await h.sync(); await h.close(); h = undefined;
     await rename(temp, path);
-    await syncDir(dirname(path));
+    // A successful rename is visible even if directory sync or temporary cleanup fails.
+    try { onPublished?.(data); } finally { await syncDir(dirname(path)); }
   } finally { if (h) await h.close(); await fs.rm(temp, { force: true }); }
 }
 export async function readJSON<T>(path: string, fallback?: T): Promise<T> {
@@ -586,8 +587,7 @@ export async function sweep(home: string, { failAfter, hooks, checkWriters, asse
     // Do not prune the shared project directory: another conversation may be creating its first log.
     receipt.revision = randomBytes(16).toString('hex');
     receipt.lastCompletedAt = new Date().toISOString(); receipt.lastResult = { sessions: ids.size };
-    await atomicJSON(receiptPath, receipt);
-    hooks?.receiptCommitted?.(receipt); checkpoint();
+    await atomicJSON(receiptPath, receipt, hooks?.receiptCommitted); checkpoint();
     await removeOwned(requestPath(home, request.sessionId)); checkpoint();
     completed.push(receipt.lastResult);
     onResolved?.(request.sessionId, 'completed');

@@ -244,7 +244,6 @@ export declare class DeletionRuntime {
     private trackAgent;
     private captureFactory;
     private installReceipt;
-    private loadReceipt;
     closeAdmission(): Promise<void> | undefined;
     initialize(): Promise<void>;
     headers(): Promise<Map<string, SessionHeader>>;
