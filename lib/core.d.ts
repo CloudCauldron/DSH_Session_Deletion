@@ -148,11 +148,12 @@ export declare function listRequests(home: string): Promise<DeletionRequest[]>;
 export declare function captureDeletionRequest(home: string, header: SessionHeader, plan: DeletionPlan, stat: (id: string) => Promise<SessionStat | undefined>): Promise<DeletionRequest>;
 export declare function enqueue(home: string, request: DeletionRequest): Promise<void>;
 /** Sweep confirmed session data under the caller's live maintenance or exclusive offline writer protections. */
-export declare function sweep(home: string, { failAfter, hooks, assertOffline, onResolved }?: {
+export declare function sweep(home: string, { failAfter, hooks, checkWriters, assertOffline, onResolved }?: {
     failAfter?: number;
     hooks?: SweepHooks;
     assertOffline?: () => Promise<void>;
     onResolved?: (id: string, outcome: 'completed' | 'abandoned') => void;
+    checkWriters?: (requests: readonly DeletionRequest[]) => Promise<void>;
 }): Promise<Result[]>;
 /** Read-only estimate using the same reference checks as the actual collection. */
 export declare function garbageSize(home: string, sources?: GcSources): Promise<number>;

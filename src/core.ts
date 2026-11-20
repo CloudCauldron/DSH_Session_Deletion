@@ -549,14 +549,17 @@ async function familyChanged(home: string, plan: DeletionRequest['plan']): Promi
   return changed;
 }
 /** Sweep confirmed session data under the caller's live maintenance or exclusive offline writer protections. */
-export async function sweep(home: string, { failAfter, hooks, assertOffline, onResolved }: {
+export async function sweep(home: string, { failAfter, hooks, checkWriters, assertOffline, onResolved }: {
   failAfter?: number; hooks?: SweepHooks; assertOffline?: () => Promise<void>; onResolved?: (id: string, outcome: 'completed' | 'abandoned') => void;
+  checkWriters?: (requests: readonly DeletionRequest[]) => Promise<void>;
 } = {}) {
   await safePath(home, { directory: true });
   let operations = 0;
   const checkpoint = () => { if (failAfter !== undefined && ++operations >= failAfter) throw new LocalizedError('error.injectedInterruption'); };
   const completed: Result[] = [];
-  for (const request of (await listRequests(home)).filter(r => !hooks || r.sessionId === hooks.onlySessionId)) {
+  const requests = (await listRequests(home)).filter(r => !hooks || r.sessionId === hooks.onlySessionId);
+  if (requests.length) await checkWriters?.(requests);
+  for (const request of requests) {
     const plan = request.plan; const ids = new Set(plan.ids);
     if (hooks) await validateTargetDirectories(home, plan);
     else if (await familyChanged(home, plan)) {

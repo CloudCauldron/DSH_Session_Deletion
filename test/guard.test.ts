@@ -79,6 +79,58 @@ void test('kernel writer lock defers all cleanup and preserves pending request',
   } finally {await lock?.close();await f.cleanup();}
 });
 
+void test('offline recovery checks unrelated writers and fits a large history under the descriptor limit', { skip: process.platform !== 'linux' }, async () => {
+  const f = await fixture(false);
+  try {
+    for (let n = 0; n < 80; n++) await f.session('old-session-' + n);
+    await f.queue(f.ids.main);
+    const limited = () => spawnSync('sh', ['-c', 'ulimit -n 64 && exec "$@"', 'guard', process.execPath, 'lib/guard.js', f.home], { encoding: 'utf8' });
+    const unrelated = await tryLock(join(f.sessionProject, 'old-session-79', 'session.lock'));
+    assert.ok(unrelated);
+    try {
+      const busy = limited();
+      assert.equal(busy.status, 1, busy.stderr);
+      assert.match(busy.stderr, /live writer/);
+      assert.equal((await listRequests(f.home)).length, 1);
+    } finally { await unrelated.close(); }
+    const result = limited();
+    assert.equal(result.status, 0, result.stderr);
+    assert.match(result.stdout, /completed for session-main/);
+    assert.deepEqual(await listRequests(f.home), []);
+    assert.ok(await exists((await f.stat('old-session-79')).location.path));
+  } finally { await f.cleanup(); }
+});
+
+void test('recovery retains target and replacement writer locks throughout the family comparison', async () => {
+  const f = await fixture(false);
+  const lstat = fs.lstat;
+  try {
+    await f.queue();
+    const { header, location } = await f.stat(f.ids.grand);
+    const dir = join(f.home, 'sessions/--replacement--', header.id);
+    await fs.mkdir(dirname(dir));
+    await fs.rename(dirname(location.path), dir);
+    await f.write(join(dir, basename(location.path)), JSON.stringify({ ...header, cwd: '/replacement' }) + '\n');
+    const survivor = (await f.stat(f.ids.child)).location.path;
+    let checked = false;
+    fs.lstat = (async (...args: Parameters<typeof lstat>) => {
+      if (!checked && args[0] === survivor) {
+        for (const target of [dirname(survivor), dir]) {
+          const lock = await tryLock(join(target, 'session.lock'));
+          try { assert.equal(lock, undefined); } finally { await lock?.close(); }
+        }
+        checked = true;
+      }
+      return lstat(...args);
+    }) as typeof lstat;
+    syncBuiltinESMExports();
+    const outcomes: string[] = [];
+    await runGuard(f.home, line => outcomes.push(line));
+    assert.equal(checked, true);
+    assert.deepEqual(outcomes, ['Deletion abandoned for ' + f.ids.main + '.']);
+  } finally { fs.lstat = lstat; syncBuiltinESMExports(); await f.cleanup(); }
+});
+
 void test('a competing offline run neither deletes data nor overwrites the active owner status', async () => {
   const f=await fixture();let lock;
   try {

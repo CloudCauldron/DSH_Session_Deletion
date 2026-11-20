@@ -1,7 +1,7 @@
 /** Explicit, one-shot recovery with the DSH home offline. */
 import * as fs from 'node:fs/promises';
-import { join, resolve, toNamespacedPath } from 'node:path';
-import { atomicJSON, cleanAtomicTemps, exists, privateDir, safePath, stateDir, sweep } from './core.js';
+import { basename, join, resolve, toNamespacedPath } from 'node:path';
+import { atomicJSON, cleanAtomicTemps, exists, privateDir, safePath, stateDir, sweep, type DeletionRequest } from './core.js';
 import { sameHomeHosts, tryLock } from './locks.js';
 import { usesLockFiles, type Lock } from './platform/index.js';
 import { LocalizedError } from './locale/errors.js';
@@ -14,34 +14,44 @@ async function assertOffline(home: string) {
 
 async function offline(home: string, report?: (line: string) => void): Promise<void> {
   const state = stateDir(home);
-  const pending = join(state, 'pending');
-  const hasPending = await exists(pending) && (await fs.readdir(pending)).length > 0;
   const handles: Lock[] = [];
-  try {
+  async function checkWriters(requests: readonly DeletionRequest[]) {
     const root = join(home, 'sessions');
+    if (!await exists(root)) return;
+    await safePath(root, { directory: true });
+    const targets = new Set(requests.flatMap(request => request.plan.directories.map(row => basename(row.path))));
     const writerHomes = [home];
-    if (hasPending && process.platform === 'win32') {
+    if (process.platform === 'win32') {
       // rc.5 names its writer semaphore from the path string, including a supplied namespace prefix.
       const canonical = await fs.realpath(home);
       for (const spelling of [canonical, toNamespacedPath(canonical)]) {
         if (!writerHomes.some(path => path.toLowerCase() === spelling.toLowerCase())) writerHomes.push(spelling);
       }
     }
-    if (hasPending && await exists(root)) for (const project of await fs.readdir(root, { withFileTypes: true })) {
-      if (!project.isDirectory()) continue;
-      for (const session of await fs.readdir(join(root, project.name), { withFileTypes: true })) {
-        if (!session.isDirectory()) continue;
-        for (const writerHome of writerHomes) {
-          const path = join(writerHome, 'sessions', project.name, session.name, 'session.lock');
-          if (usesLockFiles && !(await exists(path))) continue;
-          const lock = await tryLock(path);
-          if (!lock) throw new LocalizedError('error.activeWriterCleanup');
-          handles.push(lock);
-        }
+    async function checkWriter(project: string, session: string, hold: boolean) {
+      for (const writerHome of writerHomes) {
+        const path = join(writerHome, 'sessions', project, session, 'session.lock');
+        if (usesLockFiles && !await exists(path)) continue;
+        const lock = await tryLock(path);
+        if (!lock) throw new LocalizedError('error.activeWriterCleanup');
+        if (hold) handles.push(lock);
+        else await lock.close();
       }
     }
+    for (const project of await fs.readdir(root, { withFileTypes: true })) {
+      if (!project.isDirectory()) continue;
+      const dir = join(root, project.name);
+      // Check exclusive offline use without retaining a descriptor for every old session.
+      for (const session of await fs.readdir(dir, { withFileTypes: true }))
+        if (session.isDirectory()) await checkWriter(project.name, session.name, false);
+      // Look up each confirmed name as rc.5 does, including replacements in another project.
+      for (const target of targets)
+        if (await exists(join(dir, target))) await checkWriter(project.name, target, true);
+    }
+  }
+  try {
     let resolved = 0;
-    await sweep(home, { assertOffline: () => assertOffline(home), onResolved(id, outcome) {
+    await sweep(home, { checkWriters, assertOffline: () => assertOffline(home), onResolved(id, outcome) {
       resolved++;
       report?.(`Deletion ${outcome} for ${id}.`);
     } });
