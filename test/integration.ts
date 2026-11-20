@@ -494,10 +494,7 @@ try{
   await card.or(detail).first().waitFor();
   if(kind==='component'&&!await detail.isVisible())await card.getByRole('button',{name:/^查看/}).click();
   const controls=kind==='package'?card:detail.locator('[data-plugin-rows]');
-  await Promise.all([
-   enabled && page.waitForResponse(r=>new URL(r.url()).pathname==='/session-deletion/api/receipt' && r.ok(),{timeout:60000}),
-   controls.getByRole('switch',{checked:!enabled}).click(),
-  ]);
+  await controls.getByRole('switch',{checked:!enabled}).click();
  }
  const waitForPlugin=(enabled:boolean)=>waitForHost(async()=>{
   const response=await getApi('status');
@@ -515,10 +512,14 @@ try{
   },previous,{timeout:10000});
   const id=await selection.jsonValue();assert.ok(id);return id;
  }
- for(const kind of ['package','package','component','component'] as const){
-  // DSH can reuse a workspace's existing blank. This workspace has no sessions to reuse.
+ async function emptyWorkspace(){
   const workspace=await fs.mkdtemp(join(base,'toggle-'));
   assert.equal((await controls('create-workspace',{cwd:workspace})).status(),200);
+  return workspace;
+ }
+ for(const kind of ['package','package','component','component'] as const){
+  // DSH can reuse an existing blank. Give each switch state a workspace with no sessions.
+  const disabledWorkspace=await emptyWorkspace(), enabledWorkspace=await emptyWorkspace();
   let disabledSession: string | undefined;
   for(const enabled of [false,true]){
    await survivor.click();
@@ -535,10 +536,15 @@ try{
    }
    await survivor.click();
    await transcript.waitFor();
-   await survivor.click({button:'right'});
-   await page.getByRole('menuitem',{name:'重命名',exact:true}).waitFor();
    const action=page.getByRole('menuitem',{name:'删除会话',exact:true});
-   await action.waitFor({state:enabled?'visible':'hidden'});
+   // DSH captures the registered providers when it opens a context menu.
+   await waitForHost(async()=>{
+    await survivor.click({button:'right'});
+    await page.getByRole('menuitem',{name:'重命名',exact:true}).waitFor();
+    if(await action.isVisible()===enabled)return true;
+    await page.keyboard.press('Escape');
+    return false;
+   },'the session menu did not reflect the plugin switch');
    assert.equal(await action.count(),Number(enabled));
    if(enabled)assert.ok(await action.isDisabled(),'the pending journal still blocks new deletions');
    await page.keyboard.press('Escape');
@@ -550,21 +556,25 @@ try{
     assert.equal(await gc.count(),Number(enabled));
     await page.keyboard.press('Escape');
    }
+   await page.getByRole('button',{name:'新建会话',exact:true}).filter({hasText:'新会话'}).click();
+   const blank=await nextSession(preserved.id);
+   const workspace=enabled?enabledWorkspace:disabledWorkspace;
+   const label=basename(workspace);
+   await page.getByText(label,{exact:true}).hover();
+   await page.getByRole('button',{name:`在“${label}”中新建会话`,exact:true}).click();
+   const created=await nextSession(blank);
+   assert.ok(await exists(join(home,'sessions',projectKey(workspace),encodeSegment(created))));
+   if(!enabled)disabledSession=created;
+   await page.getByRole('button',{name:'添加工作区',exact:true}).click();
+   const picker=page.getByRole('dialog',{name:'选择工作区目录'});
+   await picker.getByRole('button',{name:'打开',exact:true,disabled:false}).waitFor();
+   await picker.getByRole('button',{name:'取消',exact:true}).click();
+   await survivor.click();
+   await transcript.waitFor();
    await page.reload();
    await survivor.click();
    await transcript.waitFor();
    assert.deepEqual(await visibleSessions(),expected);
-   await page.getByRole('button',{name:'新建会话',exact:true}).filter({hasText:'新会话'}).click();
-   const blank=await nextSession(preserved.id);
-   await page.getByRole('button',{name:'添加工作区',exact:true}).click();
-   await page.getByRole('dialog',{name:'选择工作区目录'}).getByRole('button',{name:'取消'}).click();
-   if(!enabled){
-    const label=basename(workspace);
-    await page.getByText(label,{exact:true}).hover();
-    await page.getByRole('button',{name:`在“${label}”中新建会话`,exact:true}).click();
-    disabledSession=await nextSession(blank);
-    assert.ok(await exists(join(home,'sessions',projectKey(workspace),encodeSegment(disabledSession))));
-   }
   }
  }
  await page.goto('about:blank');await stop();
