@@ -4,11 +4,11 @@
   <a href="README_CN.md">中文</a> | <a href="README.md">English</a>
 </p>
 
-<span style="margin-left:2em;">​</span>An extension plugin for **[DeepSeek Harness (DSH)](https://github.com/deepseek-ai/deepseek-harness)** that provides permanent session deletion and orphaned attachment garbage collection.
+<span style="margin-left:2em;">&#8203;</span>An extension plugin for **[DeepSeek Harness (DSH)](https://github.com/deepseek-ai/deepseek-harness)** that provides permanent session deletion and orphaned attachment garbage collection.
 
 ## **1 - Overview**
 
-<span style="margin-left:2em;">​</span>Out of the box, DeepSeek Harness `0.2.2-rc.5` only supports session archiving. As daily usage and multi-agent collaboration grow, historical sessions, subagent records, and associated file and image attachments remain on the local disk indefinitely. `dsh-session-deletion` fills this gap by bringing two key maintenance capabilities to DSH:
+<span style="margin-left:2em;">&#8203;</span>Out of the box, DeepSeek Harness `0.2.2-rc.5` only supports session archiving. As daily usage and multi-agent collaboration grow, historical sessions, subagent records, and associated file and image attachments remain on the local disk indefinitely. `dsh-session-deletion` fills this gap by bringing two key maintenance capabilities to DSH:
 
 - **Session Deletion**: Removes the logs and projection caches of the target session and its subagents, and cleans up session associations and related configurations in the workspace.
 - **Orphaned Attachment and Cache Cleanup (GC)**: Reclaims unreferenced local attachments and regenerable image caches when DSH is idle.
@@ -47,7 +47,7 @@ Content already inherited or copied by other sessions, server-side files, and fi
 
 ### **3.2. Cleaning Up Orphaned Attachments and Cache**
 
-<span style="margin-left:2em;">​</span>The plugin separates the reclamation of orphaned attachments and caches into a standalone cleanup feature rather than performing it alongside session deletion, primarily to ensure data safety during multi-session concurrency and resource sharing:
+<span style="margin-left:2em;">&#8203;</span>The plugin separates the reclamation of orphaned attachments and caches into a standalone cleanup feature rather than performing it alongside session deletion, primarily to ensure data safety during multi-session concurrency and resource sharing:
 
 - **Attachments May Be Shared Across Multiple Sessions**: DSH stores local attachments by content hash value. The same file may be jointly referenced by forked sessions, inherited history, or other sessions, making it impossible to determine whether it can be deleted based solely on the owning session.
 - **Preventing Accidental Deletion from Concurrent Writes**: While a single session is being deleted, other sessions might be referencing the same attachment or holding staged uploads not yet written to logs. While DeepSeek chat import is active, both the size estimate and cleanup are unavailable. An unrecognized JSONL backup also stops both operations so its attachments can be reviewed.
@@ -112,7 +112,7 @@ When upgrading, let the previous version finish pending deletions and stop DSH b
 
 ### **5.2 - Uninstalling the Plugin**
 
-<span style="margin-left:2em;">​</span>To remove the plugin, run the following command and restart DSH:
+<span style="margin-left:2em;">&#8203;</span>To remove the plugin, run the following command and restart DSH:
 
 ```bash
 dsh plugin --profile web remove dsh-session-deletion
@@ -122,7 +122,7 @@ After any pending recovery deletions have finished and DSH is stopped, you can o
 
 ## **6 - Development and Testing**
 
-<span style="margin-left:2em;">​</span>All source code and tests are written in TypeScript. Builds still use TypeScript 7 via the `@typescript/native` alias, while the `typescript` alias provides the TypeScript 6 compatibility API solely for ESLint, following [Microsoft's side-by-side instructions](https://devblogs.microsoft.com/typescript/announcing-typescript-7-0/#running-side-by-side-with-typescript-60).
+<span style="margin-left:2em;">&#8203;</span>All source code and tests are written in TypeScript. Builds still use TypeScript 7 via the `@typescript/native` alias, while the `typescript` alias provides the TypeScript 6 compatibility API solely for ESLint, following [Microsoft's side-by-side instructions](https://devblogs.microsoft.com/typescript/announcing-typescript-7-0/#running-side-by-side-with-typescript-60).
 
 The browser suite uses Chrome and a local rc.5 CLI. On Windows, set `DSH_CLI` to the absolute path of the installed `@deepseek-ai/dsh/lib/bin.js`. Set `CHROME_PATH` if Chrome is installed outside its default location.
 

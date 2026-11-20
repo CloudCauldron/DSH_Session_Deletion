@@ -4,11 +4,11 @@
   <a href="README_CN.md">中文</a> | <a href="README.md">English</a>
 </p>
 
-<span style="margin-left:2em;">​</span>为 **[DeepSeek Harness (DSH)](https://github.com/deepseek-ai/deepseek-harness)** 提供会话永久删除与孤立附件垃圾回收能力的扩展插件。
+<span style="margin-left:2em;">&#8203;</span>为 **[DeepSeek Harness (DSH)](https://github.com/deepseek-ai/deepseek-harness)** 提供会话永久删除与孤立附件垃圾回收能力的扩展插件。
 
 ## **1 - 项目简介**
 
-<span style="margin-left:2em;">​</span>DeepSeek Harness `0.2.2-rc.5` 原生仅提供会话归档功能。随着日常使用与多智能体协作的增多，历史会话、子代理记录以及关联的文件和图片附件会长期滞留在本地磁盘中。`dsh-session-deletion` 弥补了这一空缺，为 DSH 带来了两项关键的维护能力：
+<span style="margin-left:2em;">&#8203;</span>DeepSeek Harness `0.2.2-rc.5` 原生仅提供会话归档功能。随着日常使用与多智能体协作的增多，历史会话、子代理记录以及关联的文件和图片附件会长期滞留在本地磁盘中。`dsh-session-deletion` 弥补了这一空缺，为 DSH 带来了两项关键的维护能力：
 
 - **会话删除**：移除目标会话及其子代理的日志与投影缓存，清理工作区中的会话关联及相关配置。
 - **残留附件与缓存清理 (GC)**：在 DSH 空闲时回收无引用的本地附件和可重新生成的图片缓存。
@@ -47,7 +47,7 @@
 
 ### **3.2. 清理残留附件与缓存**
 
-<span style="margin-left:2em;">​</span>插件将残留附件与缓存的回收独立为单独的清理功能，而非在删除会话时顺带清理，主要是为了保障多会话并发与资源共享时的数据安全：
+<span style="margin-left:2em;">&#8203;</span>插件将残留附件与缓存的回收独立为单独的清理功能，而非在删除会话时顺带清理，主要是为了保障多会话并发与资源共享时的数据安全：
 
 - **附件可能被多会话共享**：DSH 的本地附件按内容散列值（Hash Value）存储，同一份文件可能被分叉会话、继承的历史记录或其他会话共同引用，无法仅凭所属会话直接判断是否可删。
 - **防止并发写入引发误删**：删除单个会话时，其他会话可能正在引用同一附件，或存在尚未写入日志的暂存上传。导入 DeepSeek 聊天记录期间，体积估算和清理均不可用。遇到无法识别的 JSONL 备份时，估算和清理也会停止，保留附件供核查。
@@ -112,7 +112,7 @@
 
 ### **5.2 - 卸载插件**
 
-<span style="margin-left:2em;">​</span>如需移除插件，运行以下命令并重启 DSH：
+<span style="margin-left:2em;">&#8203;</span>如需移除插件，运行以下命令并重启 DSH：
 
 ```bash
 dsh plugin --profile web remove dsh-session-deletion
@@ -122,7 +122,7 @@ dsh plugin --profile web remove dsh-session-deletion
 
 ## **6 - 开发与测试**
 
-<span style="margin-left:2em;">​</span>源码与全部测试均使用 TypeScript，构建通过 `@typescript/native` 别名使用 TypeScript 7，`typescript` 别名仅为 ESLint 提供 TypeScript 6 兼容 API，参照 [Microsoft 的并行使用说明](https://devblogs.microsoft.com/typescript/announcing-typescript-7-0/#running-side-by-side-with-typescript-60)。
+<span style="margin-left:2em;">&#8203;</span>源码与全部测试均使用 TypeScript，构建通过 `@typescript/native` 别名使用 TypeScript 7，`typescript` 别名仅为 ESLint 提供 TypeScript 6 兼容 API，参照 [Microsoft 的并行使用说明](https://devblogs.microsoft.com/typescript/announcing-typescript-7-0/#running-side-by-side-with-typescript-60)。
 
 浏览器测试使用 Chrome 和本机的 rc.5 CLI。在 Windows 上，请将 `DSH_CLI` 设为已安装的 `@deepseek-ai/dsh/lib/bin.js` 的绝对路径。若 Chrome 安装在非默认位置，请设置 `CHROME_PATH`。
 
