@@ -1,6 +1,6 @@
 /** Explicit, one-shot recovery with the DSH home offline. */
 import * as fs from 'node:fs/promises';
-import { join, resolve } from 'node:path';
+import { join, resolve, toNamespacedPath } from 'node:path';
 import { atomicJSON, cleanAtomicTemps, exists, privateDir, safePath, stateDir, sweep } from './core.js';
 import { sameHomeHosts, tryLock } from './locks.js';
 import { usesLockFiles, type Lock } from './platform/index.js';
@@ -15,15 +15,25 @@ async function offline(home: string, report?: (line: string) => void): Promise<v
   const handles: Lock[] = [];
   try {
     const root = join(home, 'sessions');
+    const writerHomes = [home];
+    if (hasPending && process.platform === 'win32') {
+      // rc.5 names its writer semaphore from the path string, including a supplied namespace prefix.
+      const canonical = await fs.realpath(home);
+      for (const spelling of [canonical, toNamespacedPath(canonical)]) {
+        if (!writerHomes.some(path => path.toLowerCase() === spelling.toLowerCase())) writerHomes.push(spelling);
+      }
+    }
     if (hasPending && await exists(root)) for (const project of await fs.readdir(root, { withFileTypes: true })) {
       if (!project.isDirectory()) continue;
       for (const session of await fs.readdir(join(root, project.name), { withFileTypes: true })) {
         if (!session.isDirectory()) continue;
-        const path = join(root, project.name, session.name, 'session.lock');
-        if (usesLockFiles && !(await exists(path))) continue;
-        const lock = await tryLock(path);
-        if (!lock) throw new LocalizedError('error.activeWriterCleanup');
-        handles.push(lock);
+        for (const writerHome of writerHomes) {
+          const path = join(writerHome, 'sessions', project.name, session.name, 'session.lock');
+          if (usesLockFiles && !(await exists(path))) continue;
+          const lock = await tryLock(path);
+          if (!lock) throw new LocalizedError('error.activeWriterCleanup');
+          handles.push(lock);
+        }
       }
     }
     let resolved = 0;

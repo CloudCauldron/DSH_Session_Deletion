@@ -306,3 +306,21 @@ void test('lifecycle ownership spans Windows path aliases', { skip: process.plat
     await assert.rejects(runGuard(toNamespacedPath(f.home)), /Another cleanup/);
   } finally { await lock?.close(); await f.cleanup(); }
 });
+
+void test('offline recovery checks ordinary and namespaced Windows writer semaphores', { skip: process.platform !== 'win32' }, async () => {
+  const f = await fixture();
+  try {
+    await f.queue();
+    const path = join(f.sessionProject, f.ids.main, 'session.lock');
+    for (const [writer, home] of [[path, toNamespacedPath(f.home)], [toNamespacedPath(path), f.home]]) {
+      const lock = await tryLock(writer);
+      assert.ok(lock);
+      try {
+        await assert.rejects(runGuard(home), /live writer/);
+        assert.equal((await listRequests(f.home)).length, 1);
+      } finally { await lock.close(); }
+    }
+    await runGuard(f.home);
+    assert.deepEqual(await listRequests(f.home), []);
+  } finally { await f.cleanup(); }
+});
