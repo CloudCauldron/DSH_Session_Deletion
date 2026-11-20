@@ -24,14 +24,15 @@ void test('upload coordination covers importer replacement and preserves synchro
   for (const name of ['saveImage', 'saveImages', 'saveFile', 'saveFileStream', 'readImageRequest']) attachments[name] = async () => {};
   const nativeSend = () => {};
   const owner = { id: f.ids.main, session: { id: f.ids.main, header: f.headers[f.ids.main] }, status: 'idle', send: nativeSend, cancel() {}, whenIdle: async () => {} };
-  let resident: typeof owner | undefined = owner;
+  const child = { ...owner, id: f.ids.child, session: { id: f.ids.child, header: f.headers[f.ids.child] } };
+  const residents = new Map([[owner.id, owner], [child.id, child]]);
   let detachAgent!: (event: { agent: typeof owner }) => void;
   let bindImporter!: (ctx: RuntimeContext) => void;
   const runtime = makeRuntime({
    dshHomePath: () => f.home, attachments, fileUploads: uploads,
-   sessions: { list: () => resident ? [resident.session] : [] }, sessionPersistence: { name: 'session-persistence-jsonl', root: join(f.home, 'sessions'), async flush() { flushing.resolve(); await release.promise; } },
+   sessions: { list: () => [...residents.values()].map(agent => agent.session) }, sessionPersistence: { name: 'session-persistence-jsonl', root: join(f.home, 'sessions'), async flush() { flushing.resolve(); await release.promise; } },
    workspaceRegistry: { pinSession() {}, async archiveSession() {}, async unarchiveSession() {} },
-   agents: { list: () => resident ? [resident] : [], get: () => resident, requireFactory: () => ({ target: {} }), setFactory() {} }, sessionProjectionCache: { table: new Map<string, unknown>(), put() {} },
+   agents: { list: () => [...residents.values()], get: id => residents.get(id), requireFactory: () => ({ target: {} }), setFactory() {} }, sessionProjectionCache: { table: new Map<string, unknown>(), put() {} },
    sessionController: Object.fromEntries(['prompt', 'attachment', 'updateQueue', 'fork', 'rename', 'selectModel', 'create', 'resolveAgent', 'state', 'page', 'projections', 'list'].map(name => [name, () => {}])),
    schedule: { create: async () => {}, edit: async () => {}, catalog: async () => [] },
    waterfall: async () => [],
@@ -42,11 +43,13 @@ void test('upload coordination covers importer replacement and preserves synchro
   assert.notEqual(owner.send, nativeSend);
   await assert.rejects(runtime.gc(), /upload tracking/);
   assert.equal(await fs.readFile(join(f.home, 'attachments/v1/objects', f.exclusive.slice(0, 2), f.exclusive), 'utf8'), 'image');
+  residents.delete(owner.id);
   detachAgent({ agent: owner });
   assert.equal(owner.send, nativeSend);
-  resident = { ...owner };
+  assert.equal((await runtime.quiescence([], true)).busy, false, 'native subagents cannot own staged uploads');
+  residents.set(owner.id, { ...owner });
   assert.equal((await runtime.quiescence([], true)).busy, false, 'a later agent with the same ID is eligible without a deletion handle');
-  resident = undefined;
+  residents.clear();
   let settle!: () => void;
   const outgoing = { active: { settled: new Promise<void>(done => { settle = done; }) }, claim() {} };
   bindImporter({ ...runtime.ctx, deepseekChatImport: outgoing });
@@ -70,6 +73,9 @@ void test('upload coordination covers importer replacement and preserves synchro
   const upload = uploads.uploadStream({ sessionId: f.ids.main });
   assert.throws(() => uploads.bindPrompt({ id: f.ids.main }, [], 'request'), /Session cleanup is in progress/);
   assert(dispose);
+  const capturedBind = uploads.bindPrompt.bind(uploads);
+  const laterBind: typeof uploads.bindPrompt = (...args) => capturedBind(...args);
+  uploads.bindPrompt = laterBind;
   const unloading = runtime.closeAdmission();
   await new Promise(setImmediate);
   assert.equal(uploadsCalled, 0);
@@ -79,6 +85,9 @@ void test('upload coordination covers importer replacement and preserves synchro
   await maintenance; await upload; await unloading; await dispose(); dispose = undefined;
   assert.equal(uploadsCalled, 1);
   assert.equal(next.claim, nativeClaim, 'provider method is restored after cleanup');
+  runtime.locked.add(f.ids.main);
+  assert.equal(uploads.bindPrompt, laterBind, 'a newer wrapper keeps ownership of the method');
+  assert.equal(uploads.bindPrompt({ id: f.ids.main }, [], 'request'), binding, 'its captured call forwards to the native method after unload');
  } finally { release.resolve(); await maintenance; await dispose?.(); await f.cleanup(); }
 });
 

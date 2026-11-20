@@ -149,7 +149,7 @@ export class DeletionRuntime {
   readonly locked = new Set<string>();
   readonly barrier = new PublicationBarrier();
   private handles = new Map<string, Handle>();
-  private preexistingAgents = new WeakSet<Agent>();
+  private readonly preexistingUploadOwners = new WeakSet<Agent>();
   private operations = new Map<string, Set<Operation>>();
   private deleted = new Set<string>();
   private importer?: RuntimeContext['deepseekChatImport'];
@@ -209,9 +209,12 @@ export class DeletionRuntime {
       return;
     }
     const own = Object.getOwnPropertyDescriptor(target, key);
-    const replacement = wrap(original as Method);
+    let invoke = wrap(original as Method);
+    const replacement: Method = function (...args) { return Reflect.apply(invoke, this, args); };
     target[key] = replacement; names.add(key); this.wrapped.set(target, names);
     restorers.push(() => {
+      // A caller or another wrapper may still hold this function after withdrawal.
+      invoke = original as Method;
       names.delete(key);
       if (target[key] !== replacement) return;
       if (own) Object.defineProperty(target, key, own); else delete target[key];
@@ -288,7 +291,7 @@ export class DeletionRuntime {
     if (registry.factory?.target) this.captureFactory(registry.factory.target);
     for (const agent of registry.list()) {
       // A native upload started before this mount may still stage bytes for this exact owner.
-      this.preexistingAgents.add(agent);
+      if (agent.session.header.origin !== 'subagent') this.preexistingUploadOwners.add(agent);
       this.trackAgent(agent);
     }
     const manager = this.manager();
@@ -558,7 +561,7 @@ export class DeletionRuntime {
       if (agent) {
         if (agent.status !== 'idle') reasons.push(message(global ? 'activity.globalAgentBusy' : 'activity.targetAgentBusy'));
         if (agent.inbox?.nextTurn?.length || agent.inbox?.nextStep?.length) reasons.push(message('activity.queuedInput'));
-        if (global && this.preexistingAgents.has(agent)) reasons.push(message('activity.untrackedUploads'));
+        if (global && this.preexistingUploadOwners.has(agent)) reasons.push(message('activity.untrackedUploads'));
         if (targets.has(id) && !this.handles.has(id)) reasons.push(message('activity.missingHandle'));
         const idle = await Promise.race([agent.whenIdle().then(() => true), delay(0).then(() => false)]);
         if (!idle) reasons.push(message('activity.maintenance'));
