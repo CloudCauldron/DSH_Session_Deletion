@@ -8,7 +8,7 @@ import { join } from 'node:path';
 import { hash } from 'node:crypto';
 import { zstdCompressSync } from 'node:zlib';
 import { setTimeout as delay } from 'node:timers/promises';
-import { fixture } from './fixtures.ts';
+import { fixture, trackContentHashes } from './fixtures.ts';
 import { makeRuntime } from './runtime-fixture.ts';
 import { familyOf, exists, listRequests, stateDir, requestPath } from '../lib/core.js';
 import { tryLock } from '../lib/locks.js';
@@ -110,12 +110,14 @@ async function stoppingFixture() {
   };
 }
 
-void test('idle and active deletion share the same unarchived transaction and stop without a fixed delay', async () => {
+void test('live deletion stops the active root and hashes each confirmed transcript once', async t => {
   const s = await stoppingFixture();
   try {
     const idle = deferred(); s.root.status = 'running'; s.root.whenIdle = () => idle.promise;
     s.root.cancel = () => { s.cancelled.push(s.root.id); s.root.status = 'idle'; idle.resolve(); };
+    const contentHashes = trackContentHashes(t);
     assert.deepEqual(await s.remove(), { deleted: 3 });
+    assert.equal(contentHashes(), s.ids.length);
     assert.deepEqual(s.cancelled, [s.root.id]);
     assert.deepEqual(s.disposed, [s.root.id]);
     assert.equal(s.removed.length, 3); assert.equal(s.listeners(), 0);

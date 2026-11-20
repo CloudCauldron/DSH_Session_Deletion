@@ -1,9 +1,17 @@
 import * as fs from 'node:fs/promises';
+import { Hash } from 'node:crypto';
+import type { TestContext } from 'node:test';
 import { join } from 'node:path';
 import { tmpdir } from 'node:os';
 import { zstdCompressSync } from 'node:zlib';
 import { captureDeletionRequest, digest, encodeSegment, enqueue, planSessionDeletion } from '../lib/core.js';
 import type { SessionHeader } from '../lib/core.js';
+
+export function trackContentHashes(t: TestContext) {
+  const updates = t.mock.method(Hash.prototype, 'update');
+  // Receipt IDs and Windows semaphore names are hashed as strings.
+  return () => new Set(updates.mock.calls.filter(call => Buffer.isBuffer(call.arguments[0])).map(call => call.this)).size;
+}
 
 export async function fixture(compressed = true) {
   const base = await fs.mkdtemp(join(tmpdir(), 'dsh-deletion-测试 空格-'));
