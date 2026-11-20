@@ -27,7 +27,7 @@ export interface GcResult { total: number; objects: number; fileLinks: number; c
 export interface Receipt { schema: 1; revision: string; deletedIdHashes: string[]; lastCompletedAt?: string; lastResult?: Result }
 interface WorkspaceData {
   unit: { name: string; version: number };
-  global: { archivedSessionIds: string[]; pinnedSessionIds: string[] };
+  global?: { archivedSessionIds?: string[]; pinnedSessionIds?: string[] } | null;
   tables: { workspaces: Record<string, { sessionIds: string[] }> };
 }
 export interface ScheduleTask {
@@ -36,7 +36,7 @@ export interface ScheduleTask {
   record?: { id: string };
   pendingDelivery?: { targetSessionId: string };
 }
-interface ScheduleData { unit: { name: string }; tables: { tasks: Record<string, ScheduleTask> } }
+interface ScheduleData { unit: { name: string; version: number }; tables: { tasks: Record<string, ScheduleTask> } }
 interface UploadRecord { scope: string; attachmentId: string; variantId: string; fileId: string }
 interface RemoteCache { formatVersion: number; records: UploadRecord[] }
 export interface UploadIndex {
@@ -61,19 +61,32 @@ export const STATE_NAME = '.dsh-session-deletion';
 export const digest = (value: string) => createHash('sha256').update(value).digest('hex');
 export const stateDir = (home: string) => join(home, STATE_NAME);
 export const requestPath = (home: string, id: string) => join(stateDir(home), 'pending', digest(id) + '.json');
+function isRecord(value: unknown): boolean {
+  return value !== null && typeof value === 'object' && !Array.isArray(value);
+}
+function validTable(tables: Record<string, unknown>, key: string) {
+  return isRecord(tables) && (tables[key] === undefined || isRecord(tables[key]));
+}
 /** DSH's explicit destination wins over the legacy session binding. */
 export function scheduledSession(task: ScheduleTask): string | undefined {
-  if (task.target?.kind === 'new') return undefined;
-  if (task.target) {
-    if (!['session', 'new_once'].includes(task.target.kind)) throw new LocalizedError('error.scheduleDestination');
-    if (task.target.sessionId) return task.target.sessionId;
-    if (task.target.kind !== 'new_once') throw new LocalizedError('error.scheduleDestination');
-  } else if (task.sessionId) return task.sessionId;
-  return task.record ? 'session-schedule-' + digest(task.record.id) : undefined;
+  if (!isRecord(task)) throw new LocalizedError('error.scheduleDestination');
+  const target = task.target;
+  if (target?.kind === 'new' && target.sessionId === undefined) return undefined;
+  if (target !== undefined && !['new_once', 'session'].includes(target?.kind)) throw new LocalizedError('error.scheduleDestination');
+  const id = target === undefined ? task.sessionId : target.sessionId;
+  if (typeof id === 'string' && id) return id;
+  if (id !== undefined || target?.kind === 'session') throw new LocalizedError('error.scheduleDestination');
+  if (task.record === undefined) return undefined; // A live creation request may not have its schedule ID yet.
+  if (typeof task.record?.id !== 'string' || !task.record.id) throw new LocalizedError('error.scheduleDestination');
+  return 'session-schedule-' + digest(task.record.id);
 }
 export async function readSchedule(home: string): Promise<ScheduleData | undefined> {
   const schedule = await readJSON<ScheduleData | undefined>(join(home, 'storages/schedule.json'));
-  if (schedule && (schedule.unit?.name !== 'schedule' || !schedule.tables?.tasks)) throw new LocalizedError('error.scheduleSchema');
+  if (schedule !== undefined) {
+    if (schedule?.unit?.name !== 'schedule' || ![1, 2].includes(schedule.unit.version) || !validTable(schedule.tables, 'tasks'))
+      throw new LocalizedError('error.scheduleSchema');
+    schedule.tables.tasks ??= {};
+  }
   return schedule;
 }
 function escapeSegment(raw: string) {
@@ -94,7 +107,7 @@ export function projectKey(cwd: string | undefined) {
 export async function exists(path: string): Promise<boolean> {
   try { await fs.lstat(path); return true; } catch (e) { if ((e as NodeJS.ErrnoException).code === 'ENOENT') return false; throw e; }
 }
-export async function safePath(path: string, { missing = false, directory = false }: { missing?: boolean; directory?: boolean } = {}) {
+export async function safePath(path: string, { missing = false, directory = false, file = false }: { missing?: boolean; directory?: boolean; file?: boolean } = {}) {
   path = resolve(path);
   let current = parse(path).root;
   const parts = path.slice(current.length).split(sep).filter(Boolean);
@@ -108,6 +121,7 @@ export async function safePath(path: string, { missing = false, directory = fals
     if (i === parts.length - 1) {
       assertOwner(current, st.uid);
       if (directory && !st.isDirectory()) throw new LocalizedError('error.notDirectory', { path: current });
+      if (file && !st.isFile()) throw new LocalizedError('error.unexpectedFile', { path: current });
     }
   }
 }
@@ -135,7 +149,7 @@ export async function atomicJSON(path: string, data: unknown) {
 }
 export async function readJSON<T>(path: string, fallback?: T): Promise<T> {
   try {
-    await safePath(path);
+    await safePath(path, { file: true });
     return JSON.parse(await fs.readFile(path, 'utf8'));
   } catch (error) {
     if ((error as NodeJS.ErrnoException).code === 'ENOENT') return fallback as T;
@@ -416,24 +430,27 @@ async function privateInventory(home: string, ids: ReadonlySet<string>) {
   const rewrite: Edit[] = []; const remove: string[] = [];
   const projections = join(home, 'storages/session_projcache/sessions');
   const names = [...ids].map(id => encodeSegment(id) + '.json');
-  for (const entry of await entries(projections)) if (names.some(name => entry.name === name || entry.name.startsWith(name + '.bak.'))) {
+  for (const entry of await entries(projections)) if (names.some(name => entry.name === name || entry.name === name + '.deleting' || entry.name.startsWith(name + '.bak.'))) {
     const path = join(projections, entry.name); await safePath(path);
     if (!entry.isFile()) throw new LocalizedError('error.unexpectedFile', { path });
     remove.push(path);
   }
   const workspacePath = join(home, 'storages/workspace.json');
   const workspace = await readJSON<WorkspaceData | undefined>(workspacePath);
-  if (workspace) {
-    if (workspace.unit?.name !== 'workspace' || !workspace.global || !workspace.tables?.workspaces) throw new LocalizedError('error.workspaceSchema');
+  if (workspace !== undefined) {
+    if (workspace?.unit?.name !== 'workspace' || workspace.unit.version !== 2 || !validTable(workspace.tables, 'workspaces')
+      || (workspace.global != null && !isRecord(workspace.global))) throw new LocalizedError('error.workspaceSchema');
     let changed = false;
     for (const key of ['archivedSessionIds', 'pinnedSessionIds'] as const) {
-      if (!Array.isArray(workspace.global[key])) throw new LocalizedError('error.workspaceSessionsInvalid');
-      const kept = workspace.global[key].filter(id => !ids.has(id));
-      changed ||= kept.length !== workspace.global[key].length; workspace.global[key] = kept;
+      const members = workspace.global?.[key];
+      if (members === undefined) continue;
+      if (!Array.isArray(members) || !members.every(id => typeof id === 'string')) throw new LocalizedError('error.workspaceSessionsInvalid');
+      const kept = members.filter(id => !ids.has(id));
+      changed ||= kept.length !== members.length; workspace.global![key] = kept;
     }
     const detach: [string, string][] = [];
-    for (const [workspaceId, row] of Object.entries(workspace.tables.workspaces)) {
-      if (!Array.isArray(row.sessionIds)) throw new LocalizedError('error.workspaceSessionsInvalid');
+    for (const [workspaceId, row] of Object.entries(workspace.tables.workspaces ?? {})) {
+      if (!Array.isArray(row?.sessionIds) || !row.sessionIds.every(id => typeof id === 'string')) throw new LocalizedError('error.workspaceSessionsInvalid');
       row.sessionIds = row.sessionIds.filter(id => {
         if (!ids.has(id)) return true;
         detach.push([workspaceId, id]); return false;
@@ -445,7 +462,11 @@ async function privateInventory(home: string, ids: ReadonlySet<string>) {
   const schedule = await readSchedule(home);
   if (schedule) {
     let changed = false;
-    for (const [key, task] of Object.entries(schedule.tables.tasks)) if (ids.has(scheduledSession(task)!)) { delete schedule.tables.tasks[key]; changed = true; }
+    for (const [key, task] of Object.entries(schedule.tables.tasks)) {
+      const destination = scheduledSession(task);
+      if (destination === undefined && task.target?.kind !== 'new') throw new LocalizedError('error.scheduleDestination');
+      if (destination !== undefined && ids.has(destination)) { delete schedule.tables.tasks[key]; changed = true; }
+    }
     if (changed) rewrite.push({ path: schedulePath, data: schedule });
   }
   return { rewrite, remove };

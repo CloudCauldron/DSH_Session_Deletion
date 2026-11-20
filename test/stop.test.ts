@@ -347,7 +347,7 @@ for (const change of ['new child', 'delivery reservation']) void test(`a ${chang
       if (id === s.root.id && !s.agents.has(id)) {
         if (change === 'new child') await s.f.session('late-child', { parentSession: id, origin: 'subagent' });
         else await s.f.write(join(s.f.home, 'storages/schedule.json'), JSON.stringify({
-          unit: { name: 'schedule' }, tables: { tasks: { reminder: { target: { kind: 'new' }, pendingDelivery: { targetSessionId: id } } } },
+          unit: { name: 'schedule', version: 2 }, tables: { tasks: { reminder: { target: { kind: 'new' }, pendingDelivery: { targetSessionId: id } } } },
         }));
       }
       return s.f.stat(id);

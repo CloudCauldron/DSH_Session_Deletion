@@ -95,6 +95,50 @@ void test('schedule cleanup follows explicit destinations and the native legacy 
   } finally { await f.cleanup(); }
 });
 
+void test('offline recovery refuses unclassifiable bookkeeping before removing session data', async () => {
+  const f = await fixture();
+  try {
+    await f.queue();
+    const [request] = await listRequests(f.home);
+    const workspace = join(f.home, 'storages/workspace.json'), schedule = join(f.home, 'storages/schedule.json');
+    const original = await fs.readFile(workspace);
+    for (const data of [null, { unit: { name: 'workspace', version: 3 }, tables: {} }]) {
+      await f.write(workspace, JSON.stringify(data));
+      await assert.rejects(sweep(f.home), /workspace storage schema/);
+    }
+    await f.write(workspace, original);
+    const unit = { name: 'schedule', version: 2 };
+    for (const data of [null, { unit, tables: { tasks: [] } }, { unit, tables: { tasks: { task: { target: null, sessionId: f.ids.child } } } }]) {
+      const saved = JSON.stringify(data);
+      await f.write(schedule, saved);
+      await assert.rejects(sweep(f.home), /schedule schema|schedule destination/);
+      assert.equal(await fs.readFile(schedule, 'utf8'), saved);
+    }
+    await fs.unlink(schedule);
+    await fs.mkdir(schedule);
+    await assert.rejects(sweep(f.home), /Unexpected file/);
+    assert.deepEqual(await fs.readFile(workspace), original);
+    assert.deepEqual(await listRequests(f.home), [request]);
+    for (const row of request.plan.directories) assert.ok(await exists(join(f.home, row.path, row.transcript.path)));
+  } finally { await f.cleanup(); }
+});
+
+void test('offline recovery honors storage defaults and removes only the target’s staged projection', async () => {
+  const f = await fixture();
+  try {
+    await f.queue();
+    const projections = join(f.home, 'storages/session_projcache/sessions');
+    const staged = join(projections, f.ids.main + '.json.deleting'), other = join(projections, f.ids.other + '.json.deleting');
+    await fs.rename(join(projections, f.ids.main + '.json'), staged);
+    await f.write(other, 'unrelated');
+    for (const [name, global] of [['workspace', { initialized: true, workspaceIds: [] }], ['schedule', null]] as const)
+      await f.write(join(f.home, 'storages', name + '.json'), JSON.stringify({ unit: { name, version: 2 }, global, tables: {} }));
+    assert.deepEqual(await sweep(f.home), [{ sessions: 3 }]);
+    assert.equal(await exists(staged), false);
+    assert.equal(await fs.readFile(other, 'utf8'), 'unrelated');
+  } finally { await f.cleanup(); }
+});
+
 void test('atomic writes identify their process owner and preserve the committed file when serialization fails', async () => {
   const f = await fixture();
   try {

@@ -48,9 +48,10 @@ export async function fixture(compressed = true) {
     await write(join(home, 'attachments/v1/files', hash.slice(0,2), hash, 'name.txt'), 'file');
   }
   await write(join(home, 'cache/attachments/request-images/ab/cache'), 'derived image');
-  await write(join(home, 'storages/workspace.json'), JSON.stringify({ unit: { name: 'workspace', version: 1 },
-    global: { archivedSessionIds: [ids.main], pinnedSessionIds: [ids.child, ids.other], initialized: true },
-    tables: { workspaces: { project: { title: 'Project', path: '/project', sessionIds: Object.values(ids), createdAt: 0, updatedAt: 1 } } } }));
+  const stamp = new Date(0).toISOString();
+  await write(join(home, 'storages/workspace.json'), JSON.stringify({ unit: { name: 'workspace', version: 2 },
+    global: { archivedSessionIds: [ids.main], pinnedSessionIds: [ids.child, ids.other], initialized: true, workspaceIds: ['project'] },
+    tables: { workspaces: { project: { title: 'Project', path: '/project', sessionIds: Object.values(ids), createdAt: stamp, updatedAt: stamp } } } }));
   await write(join(home, 'storages/schedule.json'), JSON.stringify({ unit: { name: 'schedule', version: 1 },
     tables: { tasks: { a: { sessionId: ids.main }, b: { sessionId: ids.child }, c: { sessionId: ids.fork } } } }));
   await write(join(home, 'llm-deepseek/files-v3.json'), JSON.stringify({ formatVersion: 3, records: [exclusive, shared].map(hash => ({

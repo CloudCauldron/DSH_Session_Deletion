@@ -74,6 +74,7 @@ export interface ScheduleTask {
 interface ScheduleData {
     unit: {
         name: string;
+        version: number;
     };
     tables: {
         tasks: Record<string, ScheduleTask>;
@@ -123,9 +124,10 @@ export declare function encodeSegment(raw: string): string;
 /** rc.5's JSONL project directory for a stored header's working directory. */
 export declare function projectKey(cwd: string | undefined): string;
 export declare function exists(path: string): Promise<boolean>;
-export declare function safePath(path: string, { missing, directory }?: {
+export declare function safePath(path: string, { missing, directory, file }?: {
     missing?: boolean;
     directory?: boolean;
+    file?: boolean;
 }): Promise<void>;
 export declare function privateDir(path: string): Promise<void>;
 export declare function atomicJSON(path: string, data: unknown): Promise<void>;
