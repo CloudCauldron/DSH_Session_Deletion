@@ -30,6 +30,15 @@
     "gc.success": "Cleaned up {count} orphaned attachment and cache file(s).",
     "gc.title": "Clean up orphaned attachments and cache?",
 
+    "records.count": "Session deletion records: {count}",
+    "records.empty": "No session deletion records",
+    "records.hint": "Anonymous identifiers for deleted sessions help other browsers and desktop clients clear leftover session state.",
+    "records.clear": "Clear",
+    "records.title": "Clear session deletion records?",
+    "records.description": "This will clear the session deletion history ({count} in total). Existing and deleted sessions will be unaffected. If you’ve used DSH in another browser or desktop client, open it once to sync before clearing the records.",
+    "records.busy": "Clearing…",
+    "records.success": "Session deletion records cleared: {count}.",
+
     "recovery.pending": "Session deletion is incomplete",
 
     "activity.globalAgentBusy": "An AI agent is still running or awaiting input; wait until all are idle before cleaning up attachments",
@@ -145,6 +154,8 @@
     "error.workspaceSessionsInvalid": "Invalid workspace session accounting",
 
     "error.cleanupBusy": "Another cleanup is already in progress. Please try again later.",
+    "error.confirmRecords": "Confirm that you want to clear the current session deletion records.",
+    "error.recordsChanged": "The session deletion records have changed. Review the count and confirm again.",
     "error.confirmGc": "Explicit confirmation is required to clean up orphaned attachments and cache.",
     "error.gcPendingSessions": "Attachment and cache scanning is unavailable while a session deletion is incomplete.",
     "error.gcUnclassifiedStorage": "Unclassified storage during GC: {path}",

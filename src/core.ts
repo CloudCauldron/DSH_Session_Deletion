@@ -132,7 +132,7 @@ export async function privateDir(path: string) {
   await safePath(path, { directory: true });
   await secureDir(path, firstCreated);
 }
-export async function atomicJSON<T>(path: string, data: T, onPublished?: (data: T) => void) {
+export async function atomicJSON<T>(path: string, data: T, onPublished?: (data: T) => void, beforePublish?: () => Promise<void>) {
   await safePath(path, { missing: true });
   await privateDir(dirname(path));
   const started = await birth(process.pid);
@@ -143,6 +143,7 @@ export async function atomicJSON<T>(path: string, data: T, onPublished?: (data: 
     h = await fs.open(temp, constants.O_WRONLY | constants.O_CREAT | constants.O_EXCL | constants.O_NOFOLLOW, 0o600);
     await h.writeFile(JSON.stringify(data) + '\n');
     await h.sync(); await h.close(); h = undefined;
+    if (beforePublish) await beforePublish();
     await rename(temp, path);
     // A successful rename is visible even if directory sync or temporary cleanup fails.
     try { onPublished?.(data); } finally { await syncDir(dirname(path)); }
@@ -163,6 +164,9 @@ export async function readReceipt(home: string): Promise<Receipt> {
     || !receipt.deletedIdHashes.every(hash => typeof hash === 'string' && /^[a-f0-9]{64}$/.test(hash)))
     throw new LocalizedError('error.receiptSchema');
   return receipt;
+}
+export function writeReceipt(home: string, receipt: Omit<Receipt, 'revision'>, onPublished?: (receipt: Receipt) => void, beforePublish?: () => Promise<void>) {
+  return atomicJSON(join(stateDir(home), 'receipt.json'), { ...receipt, revision: randomBytes(16).toString('hex') }, onPublished, beforePublish);
 }
 async function entries(path: string) {
   if (!(await exists(path))) return [];
@@ -570,7 +574,6 @@ export async function sweep(home: string, { failAfter, hooks, checkWriters, asse
       continue;
     }
     const work = await privateInventory(home, ids);
-    const receiptPath = join(stateDir(home), 'receipt.json');
     const receipt = await readReceipt(home);
     receipt.deletedIdHashes = [...new Set([...receipt.deletedIdHashes, ...plan.ids.map(digest)])];
     await assertOffline?.();
@@ -585,9 +588,8 @@ export async function sweep(home: string, { failAfter, hooks, checkWriters, asse
     if (audit.remove.length || audit.rewrite.length) throw new LocalizedError('error.privateMetadataAudit');
     for (const row of plan.directories) if (await exists(join(home, row.path))) throw new LocalizedError('error.deletedSessionAudit');
     // Do not prune the shared project directory: another conversation may be creating its first log.
-    receipt.revision = randomBytes(16).toString('hex');
     receipt.lastCompletedAt = new Date().toISOString(); receipt.lastResult = { sessions: ids.size };
-    await atomicJSON(receiptPath, receipt, hooks?.receiptCommitted); checkpoint();
+    await writeReceipt(home, receipt, hooks?.receiptCommitted); checkpoint();
     await removeOwned(requestPath(home, request.sessionId)); checkpoint();
     completed.push(receipt.lastResult);
     onResolved?.(request.sessionId, 'completed');

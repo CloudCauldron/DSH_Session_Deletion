@@ -6,7 +6,7 @@ import { createRequire } from 'node:module';
 import { realpath } from 'node:fs/promises';
 import { join, relative, resolve } from 'node:path';
 import { setTimeout as delay } from 'node:timers/promises';
-import { SUPPORTED_DSH, captureDeletionRequest, digest, enqueue, familyOf, listRequests, readReceipt, readSchedule, sweep, planSessionDeletion, collectGarbage, garbageSize, scheduledSession,
+import { SUPPORTED_DSH, captureDeletionRequest, digest, enqueue, familyOf, listRequests, readReceipt, writeReceipt, readSchedule, sweep, planSessionDeletion, collectGarbage, garbageSize, scheduledSession,
   type UploadIndex, type LiveSnapshot, type Receipt, type SessionHeader, type SessionStat, type GcResult, type ScheduleTask } from './core.js';
 import { tryLock, sameHomeHosts } from './locks.js';
 import { LocalizedError } from './locale/errors.js';
@@ -53,6 +53,7 @@ interface SubagentManager {
   assertAdmitting(agent: Agent): void;
   rootOf(agent: Agent): Agent;
 }
+type MaintenanceKind = 'delete' | 'gc' | 'clearRecords';
 interface Operation { done: Promise<void>; startup: boolean }
 export interface RuntimeContext {
   dshHomePath(): string;
@@ -164,9 +165,10 @@ export class DeletionRuntime {
   private stopTimeoutMs = 30_000;
   private editSchedule!: Schedule['edit'];
   private unarchiveForCleanup!: (id: string) => Promise<void>;
-  private maintenance?: { kind: 'delete' | 'gc'; settled: Promise<void> };
+  private maintenance?: { kind: MaintenanceKind; settled: Promise<void> };
   private disposed = false;
   get gcRunning(): boolean { return this.maintenance?.kind === 'gc'; }
+  get clearingRecords(): boolean { return this.maintenance?.kind === 'clearRecords'; }
   get deletionRunning(): boolean { return this.maintenance?.kind === 'delete'; }
   readonly home: string;
   constructor(readonly ctx: RuntimeContext, private unwrap: <T extends object>(value: T) => T, private UploadIndex: new(path: string) => UploadIndex) {
@@ -596,7 +598,7 @@ export class DeletionRuntime {
     }
     return { snapshots, UploadIndex: this.UploadIndex };
   }
-  private async runMaintenance<T>(kind: 'delete' | 'gc', work: () => Promise<T>): Promise<T> {
+  private async runMaintenance<T>(kind: MaintenanceKind, work: () => Promise<T>): Promise<T> {
     this.assertAvailable(kind);
     const { promise, resolve } = Promise.withResolvers<void>();
     this.maintenance = { kind, settled: promise };
@@ -614,7 +616,7 @@ export class DeletionRuntime {
   private async assertSoleHost(): Promise<void> {
     if ((await sameHomeHosts(this.home, process.pid)).length) throw new DeletionRefused('error.otherHost');
   }
-  private assertAvailable(kind: 'delete' | 'gc'): void {
+  private assertAvailable(kind: MaintenanceKind): void {
     if (this.disposed) throw new DeletionRefused('error.runtimeUnavailable');
     if (this.maintenance) throw new DeletionRefused('error.cleanupBusy');
     if (kind === 'gc' && this.importer?.active) throw new DeletionRefused('activity.chatImport');
@@ -638,6 +640,23 @@ export class DeletionRuntime {
       if (changed || publication !== this.barrier.idleRevision || before !== current()) throw new DeletionRefused('error.sizeChanged');
       return bytes;
     } finally { for (const dispose of subscriptions) dispose(); }
+  }
+  clearRecords(revision: string) {
+    return this.runMaintenance('clearRecords', async () => {
+      if ((await listRequests(this.home)).length) throw new DeletionRefused('error.pendingCleanup');
+      const current = await readReceipt(this.home);
+      if (!current.deletedIdHashes.length || current.revision !== revision) {
+        await this.assertSoleHost();
+        this.installReceipt(current);
+        if (this.deleted.size) throw new DeletionRefused('error.recordsChanged');
+        return { cleared: 0, receipt: this.receiptSummary };
+      }
+      const cleared = new Set(current.deletedIdHashes).size;
+      // A second host can start while a large receipt is read or its replacement is being synced.
+      await writeReceipt(this.home, { schema: 1, deletedIdHashes: [] },
+        receipt => this.installReceipt(receipt), () => this.assertSoleHost());
+      return { cleared, receipt: this.receiptSummary };
+    });
   }
   gc(): Promise<GcResult> {
     return this.runMaintenance('gc', async () => {

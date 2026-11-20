@@ -11,12 +11,12 @@ import type { LocalizedProps } from '../src/locale/shared.js';
 
 type ClientFixture = Partial<Omit<DeletionClientContext, 'slots'>> & { slots: Partial<DeletionClientContext['slots']> };
 interface ClientPlugin { apply(ctx: ClientFixture): void }
-function applyClient(plugin: ClientPlugin, ctx: ClientFixture) {
+function applyClient(plugin: ClientPlugin, ctx: ClientFixture, dispose = async () => {}) {
   const mounted = Promise.withResolvers<void>();
   plugin.apply({ ...ctx, plugin(apply) {
     const child = apply(ctx as DeletionClientContext);
     void child.then(mounted.resolve, mounted.reject);
-    return Object.assign(child, { dispose: async () => {} });
+    return Object.assign(child, { dispose });
   } });
   return mounted.promise;
 }
@@ -55,7 +55,7 @@ void test('the English catalog contains exactly the messages used by the plugin'
     if (!file.endsWith('.ts')) continue;
     const source = await readFile(new URL(file.replaceAll('\\', '/'), root), 'utf8');
     const pattern = file === 'client.ts'
-      ? /['"]((?:error|activity|common|session|delete|gc|recovery)\.\w+)['"]/g
+      ? /['"]((?:error|activity|common|session|delete|gc|records|recovery)\.\w+)['"]/g
       : /['"]((?:error|activity)\.\w+)['"]/g;
     for (const [, key] of source.matchAll(pattern)) keys.add(key);
   }
@@ -263,7 +263,87 @@ void test('receipt sync fetches only on revision changes, retries failures and k
     assert.equal(client.receiptRequests, 3);
     await client.poll();
     assert.equal(client.receiptRequests, 3);
+    client.update({ revision: 'cleared', deletedIdHashes: [] });
+    local.setItem('dsh.conversation.' + first, 'written after cleanup');
+    await client.poll();
+    assert.equal(client.receiptRequests, 4);
+    assert.equal(local.getItem('dsh.conversation.' + first), 'written after cleanup');
   });
+});
+
+for (const held of ['draft hash', 'workspace order hash', 'selection hash', 'status response', 'status 404', 'receipt response']) void test(`clearing records supersedes a pending ${held}`, { timeout: 2000 }, async () => {
+  const id = 'deleted-session', survivor = 'surviving-session';
+  const draftKey = 'dsh.conversation.' + id, viewKey = 'dsh.workspace.view.v5';
+  const view = JSON.stringify({ sessionOrderByAccount: { account: [id, survivor] } });
+  const local = browserStorage({}), session = browserStorage({});
+  if (held === 'draft hash') local.setItem(draftKey, 'draft');
+  if (held === 'workspace order hash') local.setItem(viewKey, view);
+  const pending = Promise.withResolvers<void>(), resume = Promise.withResolvers<void>();
+  let plugin!: ClientPlugin, poll!: () => void, navigations = 0, mounted = false, disposed = false;
+  const pause = async (stage: string) => { if (mounted && stage === held) { pending.resolve(); await resume.promise; } };
+  let receipt: DeletionReceipt = { revision: 'initial', deletedIdHashes: [createHash('sha256').update('earlier deletion').digest('hex')] };
+  const locale = localeFixture();
+  const components: Record<string, (props: LocalizedProps) => MockNode> = {};
+  const react = { createElement, useLayoutEffect() {}, useSyncExternalStore: <T>(_: unknown, read: () => T) => read() };
+  vm.runInNewContext(await readFile(new URL('../lib/client.js', import.meta.url), 'utf8'), {
+    AbortController, TextEncoder, localStorage: local, sessionStorage: session,
+    crypto: { subtle: { async digest(_: string, bytes: Uint8Array) {
+      if (held.endsWith('hash') && Buffer.from(bytes).toString() === (held === 'workspace order hash' ? survivor : id)) await pause(held);
+      return createHash('sha256').update(bytes).digest();
+    } } },
+    window: { __ModuleLoader__: { load(entry: ClientModule) { plugin = entry.factory(name => name === 'react' ? react : { Button: 'button' }); } }, addEventListener() {} },
+    document: { body: {}, head: { append() {} }, querySelectorAll: () => [], createElement: () => ({}) },
+    MutationObserver: class { observe() {} }, setInterval(callback: () => void) { poll = callback; }, clearInterval() {},
+    async fetch(url: string, options: RequestInit) {
+      if (url.endsWith('/locales')) return Response.json({ ok: true, dictionaries });
+      if (url.endsWith('/clear-records')) {
+        assert.equal(JSON.parse(options.body as string).revision, receipt.revision);
+        const cleared = receipt.deletedIdHashes.length;
+        receipt = { revision: 'cleared', deletedIdHashes: [] };
+        return Response.json({ cleared, receipt: { revision: receipt.revision, count: 0 } });
+      }
+      const status = url.endsWith('/status');
+      assert.ok(status || url.endsWith('/receipt'));
+      if (status && mounted && held === 'status 404') {
+        await pause(held);
+        return Response.json({ error: 'Not found' }, { status: 404 });
+      }
+      const response = Response.json(status ? { ok: true, locked: [], archived: [], pending: [],
+        receipt: { revision: receipt.revision, count: receipt.deletedIdHashes.length } } : receipt);
+      await pause(status ? 'status response' : 'receipt response');
+      return response;
+    },
+  });
+  await applyClient(plugin, {
+    locale, fiber: { uid: 1 }, effect(callback) { callback(); },
+    slots: { inject(_, setup) { setup(); }, register({ id }, component) { components[id] = component as (props: LocalizedProps) => MockNode; } },
+    contextMenus: { register: () => () => {} },
+    sessions: { list: { getSnapshot: () => ({ byId: { [id]: { id, running: false, retainedBy: { mainView: 1 } } } }), subscribe: () => () => {} } },
+    uiWorkspace: { startSession() { navigations++; } },
+  }, async () => { disposed = true; });
+  await new Promise(setImmediate);
+  mounted = true;
+  if (!held.startsWith('status')) receipt = { revision: 'updated', deletedIdHashes: [...receipt.deletedIdHashes, createHash('sha256').update(id).digest('hex')] };
+  poll();
+  const render = (name: string) => nodes(components['session-deletion.' + name]({ t: locale.bind('session-deletion') }));
+  const click = (name: string, label: string) => {
+    const button = element(render(name).find(node => isElement(node) && node.type === 'button' && nodes(node.props.children).includes(label)));
+    assert.equal(button.props.disabled, false);
+    (button.props.onClick as () => void)();
+  };
+  try {
+    await pending.promise;
+    click('records', '清理'); click('gc-dialog', '确认清理');
+    await new Promise(setImmediate);
+    assert.ok(render('records').includes('当前无会话删除记录'));
+    session.setItem(draftKey, 'written after clearing');
+  } finally { resume.resolve(); await new Promise(setImmediate); }
+  assert.equal(disposed, false);
+  assert.ok(render('records').includes('当前无会话删除记录'));
+  assert.equal(local.getItem(draftKey), held === 'draft hash' ? 'draft' : null);
+  assert.equal(local.getItem(viewKey), held === 'workspace order hash' ? view : null);
+  assert.equal(session.getItem(draftKey), 'written after clearing');
+  assert.equal(navigations, 0);
 });
 
 void test('deletion copy and API errors follow locale changes, use English for missing translations and allow running sessions', async () => {
@@ -302,7 +382,7 @@ void test('deletion copy and API errors follow locale changes, use English for m
       if (url === 'api/session-deletion/locales') return { ok: true, json: async () => ({ ok: true, dictionaries: translated }) };
       if (url.endsWith('/preview') && previewThrown) throw 0;
       if (url.endsWith('/preview')) {
-        if (missingPreview) return Response.json({ error: 'Session missing' }, { status: 404 });
+        if (missingPreview) return Response.json({ error: 'Session missing', messages: [{ key: 'error.sessionMissing' }] }, { status: 404 });
         if (previewFailed) return Response.json({ error: 'Host fallback', messages: [{ key: 'error.runtimeUnavailable' }], diagnostic: 'system detail\n<&>' }, { status: 409 });
         const token = issuedToken = 'fixture-' + ++nextToken;
         if (losePreview) throw new Error('Replacement response lost');
@@ -431,6 +511,17 @@ void test('deletion copy and API errors follow locale changes, use English for m
     disconnected = completeDespiteDisconnect = missingPreview = true;
     (buttons().at(-1)!.props.onClick as () => void)(); await new Promise(setImmediate);
     assert.equal(modal(), undefined, 'a durable deletion receipt resolves a lost success response even when preview now returns 404');
+
+    missingPreview = disconnected = false;
+    menu.resolve({ sessionId: id, displayTitle: 'Test' })[0].run(); await new Promise(setImmediate);
+    // The delete reply was lost, then a different client cleared the receipt before this tab reconnected.
+    disconnected = missingPreview = true;
+    statusFailed = true;
+    (buttons().at(-1)!.props.onClick as () => void)(); await new Promise(setImmediate);
+    completed = statusFailed = false;
+    await tick();
+    assert.deepEqual(buttons().map(button => button.props.disabled), [false, true], 'a missing session can be dismissed after its deletion record is cleared');
+    (modal()!.props.onClose as () => void)(); assert.equal(modal(), undefined);
   } finally { cleanup?.(); }
 });
 

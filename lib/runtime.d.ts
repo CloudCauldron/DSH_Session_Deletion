@@ -226,6 +226,7 @@ export declare class DeletionRuntime {
     private maintenance?;
     private disposed;
     get gcRunning(): boolean;
+    get clearingRecords(): boolean;
     get deletionRunning(): boolean;
     readonly home: string;
     constructor(ctx: RuntimeContext, unwrap: <T extends object>(value: T) => T, UploadIndex: new (path: string) => UploadIndex);
@@ -265,6 +266,13 @@ export declare class DeletionRuntime {
     private assertSoleHost;
     private assertAvailable;
     garbageSize(): Promise<number>;
+    clearRecords(revision: string): Promise<{
+        cleared: number;
+        receipt: {
+            revision: string;
+            count: number;
+        };
+    }>;
     gc(): Promise<GcResult>;
     private removeOne;
 }

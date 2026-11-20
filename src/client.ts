@@ -11,7 +11,7 @@ export interface DeletionClientContext extends LocaleClientContext {
     getSnapshot(): { active: string; revision: number };
     subscribe(listener: () => void): () => void;
   };
-  slots: { inject(name: string, callback: () => unknown): unknown; register(options: { name: string; id: string; order: number; locale: string; inject?: () => object }, component: unknown): unknown };
+  slots: { inject(name: string, callback: () => unknown): unknown; register(options: { name: string; id: string; key?: string; order?: number; locale: string; inject?: () => object }, component: unknown): unknown };
   contextMenus: { register(options: {
     id: string; target: 'session'; order: number;
     observe(): { getSnapshot(): unknown; subscribe(callback: () => void): () => void }[];
@@ -29,9 +29,9 @@ declare global {
 }
 export interface PendingDeletion { sessionId: string; queuedAt: string }
 interface GcResult { total: number }
-interface GcDialog { busy?: boolean; error?: Failure }
+interface CleanupDialog { kind: 'gc' | 'records'; busy?: boolean; error?: Failure }
 export interface DeletionReceipt { revision: string; deletedIdHashes: string[] }
-interface DeletionStatus { gcRunning?: boolean; deletionRunning?: boolean; pending: PendingDeletion[]; locked: string[]; archived: string[]; ok: boolean; receipt: { revision: string; count: number } }
+interface DeletionStatus { gcRunning?: boolean; clearingRecords?: boolean; deletionRunning?: boolean; pending: PendingDeletion[]; locked: string[]; archived: string[]; ok: boolean; receipt: { revision: string; count: number } }
 export interface DeletionPreview { count: number; token: string; archived: boolean }
 interface DeletionDialog { id: string; title: string; preview?: DeletionPreview; busy?: boolean; error?: Failure }
 
@@ -97,7 +97,7 @@ async function mountClient(ctx: DeletionClientContext, require: (name: string) =
   const ui = require('@deepseek-ai/dsh-client-ui-primitives') as {
     MenuItemButton: import('react').ComponentType<{ children: ElementNode; disabled?: boolean; danger?: boolean; separatorBefore?: boolean; icon?: ElementNode; title?: string; onSelect(): void }>;
     Modal: import('react').ComponentType<{ open: boolean; onClose(): void; closeLabel: string; title: string; description?: ElementNode; footer?: ElementNode; children?: ElementNode; className?: string }>;
-    Button: import('react').ComponentType<import('react').ButtonHTMLAttributes<HTMLButtonElement> & { variant: 'outline' }>;
+    Button: import('react').ComponentType<import('react').ButtonHTMLAttributes<HTMLButtonElement> & { variant: 'outline'; size?: 'sm' }>;
     Toast: import('react').ComponentType<{ text: string; tone?: 'success'; icon?: ElementNode; holdMs?: number; onDone(): void }>;
     IconWarningOutlineRegular: import('react').ComponentType<{ size?: number }>;
     StateDot: import('react').ComponentType<{ state: 'ongoing'; size?: number }>;
@@ -106,9 +106,9 @@ async function mountClient(ctx: DeletionClientContext, require: (name: string) =
   const pluginUiSelector = '.dsh-session-deletion-modal';
   const listeners = new Set<() => void>();
   let dialog: DeletionDialog | undefined;
-  let gcDialog: GcDialog | undefined;
+  let cleanupDialog: CleanupDialog | undefined;
   let status = initial;
-  let receipt: DeletionReceipt | undefined;
+  let receipt: { revision: string; deleted: ReadonlySet<string> } | undefined;
   let toast: { id: number; message: LocalizedMessage } | undefined;
   let toastId = 0;
   let active = true;
@@ -116,11 +116,11 @@ async function mountClient(ctx: DeletionClientContext, require: (name: string) =
   let lastMainId: string | undefined;
   const inputStates = new Map<HTMLElement, { inert: boolean; aria: string | null }>();
   function maintenanceReady(state: DeletionStatus): boolean {
-    return state.ok && !state.gcRunning && !state.deletionRunning && !state.pending.length;
+    return state.ok && !submitting && !cleanupDialog?.busy && !state.clearingRecords && !state.gcRunning && !state.deletionRunning && !state.pending.length;
   }
   function affected(): boolean {
     if (!active) return false;
-    if (gcDialog?.busy || status.gcRunning) return true;
+    if ((cleanupDialog?.kind === 'gc' && cleanupDialog.busy) || status.gcRunning) return true;
     if (submitting && dialog?.id === lastMainId) return true;
     if (!status.deletionRunning) return false;
     if (lastMainId && status.locked.includes(lastMainId)) return true;
@@ -143,27 +143,27 @@ async function mountClient(ctx: DeletionClientContext, require: (name: string) =
     }
   }
   let generation = 0;
-  let snapshot = { dialog, status, gcDialog, toast };
-  const publish = () => { snapshot = { dialog, status, gcDialog, toast }; for (const listener of listeners) listener(); protectInputs(); };
+  let snapshot = { dialog, status, cleanupDialog, toast };
+  const publish = () => { snapshot = { dialog, status, cleanupDialog, toast }; for (const listener of listeners) listener(); protectInputs(); };
   const stateSource = { getSnapshot: () => snapshot, subscribe: (callback: () => void) => { listeners.add(callback); return () => { listeners.delete(callback); }; } };
   const useSnapshot = () => React.useSyncExternalStore(stateSource.subscribe, stateSource.getSnapshot);
   async function hash(value: string): Promise<string> {
     const bytes = await crypto.subtle.digest('SHA-256', new TextEncoder().encode(value));
     return [...new Uint8Array(bytes)].map(v => v.toString(16).padStart(2, '0')).join('');
   }
-  async function cleanBrowserState(hashes: string[]): Promise<void> {
-    if (!hashes.length) return;
-    const deleted = new Set(hashes);
+  async function cleanBrowserState(deleted: ReadonlySet<string>, isCurrent: () => boolean): Promise<void> {
     const matches = async (value: string) => deleted.has(await hash(value));
     for (const storage of [localStorage, sessionStorage]) {
       for (const key of Object.keys(storage)) {
+        if (!isCurrent()) return;
         // The three session-scoped stores plus two navigation stores.
         // Never recursively rewrite arbitrary DSH preferences or other drafts.
         const prefix = ['dsh.conversation.', 'dsh.sidebar-right.v1.', 'dsh.schedule.task-tab.v1.'].find(p => key.startsWith(p));
         if (!prefix && key !== 'dsh.sessions.current' && key !== 'dsh.workspace.view.v5') continue;
         const original = storage.getItem(key); if (original === null) continue;
+        const unchanged = () => isCurrent() && storage.getItem(key) === original;
         if (prefix) {
-          if (await matches(key.slice(prefix.length)) && storage.getItem(key) === original) storage.removeItem(key);
+          if (await matches(key.slice(prefix.length)) && unchanged()) storage.removeItem(key);
           continue;
         }
         try {
@@ -171,7 +171,7 @@ async function mountClient(ctx: DeletionClientContext, require: (name: string) =
           if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed)) continue;
           const data = parsed as Record<string, unknown>;
           if (key === 'dsh.sessions.current') {
-            if (typeof data.sessionId === 'string' && await matches(data.sessionId) && storage.getItem(key) === original) storage.removeItem(key);
+            if (typeof data.sessionId === 'string' && await matches(data.sessionId) && unchanged()) storage.removeItem(key);
             continue;
           }
           const orders = data.sessionOrderByAccount;
@@ -187,7 +187,7 @@ async function mountClient(ctx: DeletionClientContext, require: (name: string) =
             (orders as Record<string, unknown>)[account] = kept;
           }
           // Workspace keys, expansion state and unrelated preferences are not session identities.
-          if (changed && storage.getItem(key) === original) storage.setItem(key, JSON.stringify(data));
+          if (changed && unchanged()) storage.setItem(key, JSON.stringify(data));
         } catch { /* Non-JSON app preferences contain no structured session state. */ }
       }
     }
@@ -198,31 +198,49 @@ async function mountClient(ctx: DeletionClientContext, require: (name: string) =
     // Replacing the existing preview revokes a delete request whose body has
     // not arrived yet. An idle status alone cannot prove that request ended.
     const failed = dialog?.error && !submitting && !dialog.preview && !status.pending.length ? dialog : undefined;
+    let missing = false;
     if (failed) {
       try {
         const preview = await api<DeletionPreview>('preview', { sessionId: failed.id });
         if (own === generation && dialog === failed) dialog = { ...failed, preview };
-      } catch { /* A lost replacement response still leaves the request uncertain. */ }
+      } catch (error) {
+        // The host revokes the previous token even when the deleted session has no receipt left.
+        missing = error instanceof ApiError && error.status === 404 && !!error.failure.messages?.some(item => item.key === 'error.sessionMissing');
+      }
     }
-    try { status = initial ?? await api<DeletionStatus>('status', undefined, signal); }
+    const previousReceipt = receipt;
+    try {
+      const next = initial ?? await api<DeletionStatus>('status', undefined, signal);
+      if (receipt !== previousReceipt) return; // A clear response superseded this poll.
+      status = next;
+    }
     catch (error) {
+      if (receipt !== previousReceipt) return;
       if (!signal.aborted && status.ok) { status = { ...status, ok: false }; publish(); }
       throw error;
     }
     if (!active || signal.aborted) return;
     if (own === generation && !wasSubmitting && !submitting && dialog?.busy && dialog.error && status.deletionRunning === false
-      && (dialog.preview || status.pending.length)) dialog = { ...dialog, busy: false };
+      && (dialog.preview || missing || status.pending.length)) dialog = { ...dialog, busy: false };
+    if (cleanupDialog?.kind === 'records' && status.receipt.count === 0 && !cleanupDialog.busy && !cleanupDialog.error) cleanupDialog = undefined;
     publish();
     try {
-      if (!receipt || receipt.revision !== status.receipt.revision) receipt = await api<DeletionReceipt>('receipt', undefined, signal);
-      if (!active || signal.aborted) return;
+      if (!receipt || receipt.revision !== status.receipt.revision) {
+        const next = await api<DeletionReceipt>('receipt', undefined, signal);
+        if (receipt !== previousReceipt) return;
+        receipt = { revision: next.revision, deleted: new Set(next.deletedIdHashes) };
+      }
+      const currentReceipt = receipt;
+      const isCurrent = () => active && !signal.aborted && receipt === currentReceipt;
+      if (!currentReceipt.deleted.size || !isCurrent()) return;
       // Keep applying cached tombstones: an old tab may write a deleted session's state back later.
-      await cleanBrowserState(receipt.deletedIdHashes);
+      const { deleted } = currentReceipt;
+      await cleanBrowserState(deleted, isCurrent);
       const current = dialog;
-      if (current?.error && !submitting && receipt.deletedIdHashes.includes(await hash(current.id))
-        && dialog === current && !submitting && active && !signal.aborted) completeDeletion(current.title);
+      if (current?.error && !submitting && deleted.has(await hash(current.id))
+        && dialog === current && !submitting && isCurrent()) completeDeletion(current.title);
       const selected = lastMainId;
-      if (selected && receipt.deletedIdHashes.includes(await hash(selected)) && selected === lastMainId && active && !signal.aborted) {
+      if (selected && deleted.has(await hash(selected)) && selected === lastMainId && isCurrent()) {
         lastMainId = undefined; ctx.uiWorkspace.startSession();
       }
     } catch { /* A disconnected host is expected during shutdown. */ }
@@ -284,32 +302,58 @@ async function mountClient(ctx: DeletionClientContext, require: (name: string) =
       // Phosphor Broom (MIT): its 16-unit outline renders at DSH's regular 1px weight at 16px.
       icon: h('svg', { width: 16, height: 16, viewBox: '0 0 256 256', fill: 'currentColor', 'aria-hidden': true, focusable: false },
         h('path', { d: 'M235.5 216.81c-22.56-11-35.5-34.58-35.5-64.8v-17.28a15.94 15.94 0 0 0-10.09-14.87L165 110a8 8 0 0 1-4.48-10.34l21.32-53a28 28 0 0 0-16.1-37a28.14 28.14 0 0 0-35.82 16a.6.6 0 0 0 0 .12L108.9 79a8 8 0 0 1-10.37 4.49L73.11 73.14a15.89 15.89 0 0 0-17.37 3.66C34.68 98.45 24 123.75 24 152a111.45 111.45 0 0 0 31.18 77.53A8 8 0 0 0 61 232h171a8 8 0 0 0 3.5-15.19M67.14 88l25.41 10.3a24 24 0 0 0 31.23-13.45l21-53c2.56-6.11 9.47-9.27 15.43-7a12 12 0 0 1 6.88 15.92l-21.4 52.99a24 24 0 0 0 13.43 31.14l24.88 9.83V153L55.77 101.71A109 109 0 0 1 67.14 88m48 128a87.53 87.53 0 0 1-24.34-42a8 8 0 0 0-15.49 4a105.2 105.2 0 0 0 18.36 38H64.44A95.54 95.54 0 0 1 40 152a85.9 85.9 0 0 1 7.73-36.29l137.8 55.12c3 18 10.56 33.48 21.89 45.16Z' })),
-      onSelect: () => { onDismiss(); gcDialog = {}; publish(); }, children: h(React.Fragment, null, before, size, after) });
+      onSelect: () => { onDismiss(); cleanupDialog = { kind: 'gc' }; publish(); }, children: h(React.Fragment, null, before, size, after) });
   }
-  async function collect(): Promise<void> {
-    if (gcDialog?.busy || !maintenanceReady(status)) return;
-    gcDialog = { busy: true }; toast = undefined; publish();
+  function RecordSettings({ t }: LocalizedProps): ElementNode {
+    const { status } = useSnapshot();
+    const { count } = status.receipt;
+    return h('div', { style: { display: 'grid', gridTemplateColumns: 'minmax(0, 1fr) max-content', alignItems: 'center', gap: '0.5rem', padding: '12px 0' } },
+      h('div', { style: { lineHeight: 1.5 } },
+        h('div', { style: { fontSize: 13, fontWeight: 500, color: 'var(--dsw-alias-label-primary)' } },
+          count ? t('records.count', { count }) : t('records.empty')),
+        h('div', { style: { marginTop: 6, fontSize: 12, color: 'var(--dsw-alias-label-tertiary)' } }, t('records.hint'))),
+      h(ui.Button, { variant: 'outline', size: 'sm', disabled: !count || !maintenanceReady(status),
+        onClick: () => { cleanupDialog = { kind: 'records' }; publish(); } }, t('records.clear')));
+  }
+  async function confirmCleanup(revision: string): Promise<void> {
+    if (!cleanupDialog || !maintenanceReady(status)) return;
+    const { kind } = cleanupDialog;
+    cleanupDialog = { kind, busy: true }; toast = undefined; publish();
     try {
-      const result = await api<GcResult>('gc', { confirmation: 'COLLECT_ORPHAN_ATTACHMENTS' });
-      gcDialog = undefined;
-      toast = { id: ++toastId, message: { key: 'gc.success', params: { count: result.total } } };
+      if (kind === 'records') {
+        const result = await api<{ cleared: number; receipt: DeletionStatus['receipt'] }>('clear-records', { confirmation: 'CLEAR_DELETION_RECORDS', revision });
+        if (status.receipt.revision === revision || status.receipt.revision === result.receipt.revision) {
+          status = { ...status, receipt: result.receipt };
+          receipt = { revision: result.receipt.revision, deleted: new Set() };
+        }
+        if (result.cleared > 0) toast = { id: ++toastId, message: { key: 'records.success', params: { count: result.cleared } } };
+      } else {
+        const result = await api<GcResult>('gc', { confirmation: 'COLLECT_ORPHAN_ATTACHMENTS' });
+        toast = { id: ++toastId, message: { key: 'gc.success', params: { count: result.total } } };
+      }
+      cleanupDialog = undefined;
     }
-    catch (error) { gcDialog = { error: asFailure(error) }; }
+    catch (error) { cleanupDialog = { kind, error: asFailure(error) }; }
     finally { publish(); await poll(); }
   }
-  function GcOverlay({ t }: LocalizedProps): ElementNode {
-    const state = useSnapshot(); const d = state.gcDialog;
-    const busy = !!d?.busy || !!state.status.gcRunning;
-    useDisabledClose('.dsh-session-deletion-gc', !!d, busy);
+  function CleanupOverlay({ t }: LocalizedProps): ElementNode {
+    const state = useSnapshot(); const d = state.cleanupDialog;
+    const records = d?.kind === 'records';
+    const busy = !!d?.busy || (!records && !!state.status.gcRunning);
+    const className = records ? 'dsh-session-deletion-records' : 'dsh-session-deletion-gc';
+    useDisabledClose('.' + className, !!d, busy);
     if (!d) return null;
-    const dismiss = () => { if (!busy) { gcDialog = undefined; publish(); } };
+    const dismiss = () => { if (!busy) { cleanupDialog = undefined; publish(); } };
+    const { count, revision } = state.status.receipt;
+    const description = records ? t(count ? 'records.description' : 'records.empty', { count }) : t('gc.description');
     return h(ui.Modal, {
-      open: true, onClose: dismiss, closeLabel: t('common.close'), className: 'dsh-session-deletion-modal dsh-session-deletion-gc',
-      title: t('gc.title'),
-      description: h(React.Fragment, null, t('gc.description'), d.error ? errorContent(d.error, t) : null),
+      open: true, onClose: dismiss, closeLabel: t('common.close'), className: 'dsh-session-deletion-modal ' + className,
+      title: t(records ? 'records.title' : 'gc.title'),
+      description: h(React.Fragment, null, description, d.error ? errorContent(d.error, t) : null),
       footer: h(React.Fragment, null,
         h(ui.Button, { variant: 'outline', onClick: dismiss, disabled: busy }, t('common.cancel')),
-        h(ui.Button, { variant: 'outline', onClick: () => { void collect(); }, disabled: busy || !maintenanceReady(state.status) }, t(busy ? 'gc.busy' : 'gc.confirm'))),
+        h(ui.Button, { variant: 'outline', onClick: () => { void confirmCleanup(revision); }, disabled: busy || !maintenanceReady(state.status) || (records && !count) },
+          t(busy ? (records ? 'records.busy' : 'gc.busy') : 'gc.confirm'))),
     });
   }
 
@@ -326,7 +370,7 @@ async function mountClient(ctx: DeletionClientContext, require: (name: string) =
     const state = useSnapshot(); const d = state.dialog;
     const busy = !!d?.busy || submitting || !!state.status.gcRunning || !!state.status.deletionRunning;
     useDisabledClose('.dsh-session-deletion-confirmation', !!d, busy);
-    const gcBusy = !!state.status.gcRunning || !!state.gcDialog?.busy;
+    const gcBusy = !!state.status.gcRunning || (state.cleanupDialog?.kind === 'gc' && state.cleanupDialog.busy);
     const recovering = !gcBusy && state.status.pending.length > 0 && !submitting && state.status.deletionRunning === false;
     const noticeKey = gcBusy ? 'gc.busy'
       : recovering ? 'recovery.pending'
@@ -362,8 +406,9 @@ async function mountClient(ctx: DeletionClientContext, require: (name: string) =
       return [{ id: 'delete', label: t('delete.menu'), disabled, danger: true, separatorBefore: true,
         afterContent: true, icon: { key: 'workspace.delete' }, run: () => { void open(sessionId, displayTitle); } }];
     } }), 'session-deletion menu');
+  ctx.slots.inject('plugins.bundle.config', () => ctx.slots.register({ name: 'plugins.bundle.config', key: 'dsh-session-deletion', id: 'session-deletion.records', locale: namespace }, RecordSettings));
   ctx.slots.inject('sidebar.panellist.actions', () => ctx.slots.register({ name: 'sidebar.panellist.actions', id: 'session-deletion.gc', order: 10000, locale: namespace }, GcMenuItem));
-  ctx.slots.inject('shell.overlay', () => ctx.slots.register({ name: 'shell.overlay', id: 'session-deletion.gc-dialog', order: 560, locale: namespace }, GcOverlay));
+  ctx.slots.inject('shell.overlay', () => ctx.slots.register({ name: 'shell.overlay', id: 'session-deletion.gc-dialog', order: 560, locale: namespace }, CleanupOverlay));
   ctx.slots.inject('shell.overlay', () => ctx.slots.register({ name: 'shell.overlay', id: 'session-deletion.dialog', order: 550, locale: namespace }, Overlay));
   ctx.effect(() => {
     const watchSelection = () => {

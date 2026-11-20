@@ -10,7 +10,7 @@ import{PublicationBarrier}from'../lib/runtime.js';
 import { makeRuntime } from './runtime-fixture.ts';
 import type { RuntimeContext } from '../lib/runtime.js';
 import { fixture, trackContentHashes } from './fixtures.ts';
-import { exists, familyOf, listRequests, stateDir } from '../lib/core.js';
+import { exists, familyOf, listRequests, readReceipt, stateDir, sweep } from '../lib/core.js';
 
 void test('upload coordination covers importer replacement and preserves synchronous prompt bindings', async t => {
  const f = await fixture(); let dispose: (() => void | Promise<void>) | undefined, maintenance: Promise<unknown> | undefined;
@@ -100,6 +100,67 @@ void test('a live-only native session listing cannot authorize deletion', async 
   { header: { id: 'live', createdAt: 1, version: 4 }, persisted: false },
  ] } });
  await assert.rejects(runtime.headers(), /no logs to delete/);
+});
+
+void test('record cleanup clears only confirmed receipt data, publishes a new revision, and is idempotent', async t => {
+ const f = await fixture();
+ t.after(f.cleanup);
+ const runtime = makeRuntime({ dshHomePath: () => f.home });
+ const empty = await runtime.clearRecords('');
+ assert.deepEqual(empty, { cleared: 0, receipt: { revision: '', count: 0 } });
+ assert.equal(await exists(join(stateDir(f.home), 'receipt.json')), false);
+ await f.queue(); await sweep(f.home);
+ const before = await readReceipt(f.home);
+ await assert.rejects(runtime.clearRecords('stale'), /records have changed/);
+ assert.deepEqual(await readReceipt(f.home), before);
+ assert.equal(runtime.isLocked(f.ids.main), true);
+ const clearing = runtime.clearRecords(before.revision);
+ assert.equal(runtime.clearingRecords, true);
+ await Promise.all([runtime.remove(f.ids.other, new Map()), runtime.gc(), runtime.clearRecords(before.revision)]
+  .map(operation => assert.rejects(operation, /Another cleanup is already in progress/)));
+ const result = await clearing;
+ assert.equal(result.cleared, 3);
+ assert.notEqual(result.receipt.revision, before.revision);
+ assert.deepEqual(result.receipt, runtime.receiptSummary);
+ assert.deepEqual(await readReceipt(f.home), { schema: 1, revision: result.receipt.revision, deletedIdHashes: [] });
+ assert.equal(runtime.isLocked(f.ids.main), false);
+ assert.equal(runtime.clearingRecords, false);
+ assert.deepEqual(await runtime.clearRecords(before.revision), { ...result, cleared: 0 });
+ assert.equal(await exists(join(f.sessionProject, f.ids.main)), false);
+ assert.ok(await f.stat(f.ids.other));
+ await f.queue(f.ids.other);
+ await assert.rejects(runtime.clearRecords(result.receipt.revision), /previous session deletion is incomplete/i);
+ assert.equal((await listRequests(f.home)).length, 1);
+ await sweep(f.home);
+ assert.equal((await readReceipt(f.home)).deletedIdHashes.length, 1);
+});
+
+void test('record cleanup preserves history when a second host starts before publication', async () => {
+ const f = await fixture(false), open = fs.open;
+ let host: ChildProcess | undefined;
+ try {
+  const runtime = makeRuntime({ dshHomePath: () => f.home });
+  const path = join(stateDir(f.home), 'receipt.json');
+  const before = { schema: 1, revision: 'before', deletedIdHashes: ['a'.repeat(64)] };
+  await f.write(path, JSON.stringify(before));
+  const entry = join(f.base, '@deepseek-ai/dsh/lib/bin.js');
+  await f.write(entry, "process.send(JSON.parse(require('node:fs').readFileSync(process.argv[2], 'utf8'))); setInterval(() => {}, 1000)");
+  fs.open = (async (...args: Parameters<typeof open>) => {
+   if (String(args[0]).startsWith(join(stateDir(f.home), '.session-deletion-write-')) && !host) {
+    host = spawn(process.execPath, [entry, path], { env: { ...process.env, DSH_HOME: f.home }, stdio: ['ignore', 'ignore', 'ignore', 'ipc'] });
+    const [loaded] = await once(host, 'message');
+    assert.deepEqual(loaded, before);
+   }
+   return open(...args);
+  }) as typeof open;
+  syncBuiltinESMExports();
+  await assert.rejects(runtime.clearRecords(before.revision), /Another DSH process/);
+  assert.deepEqual(await readReceipt(f.home), before);
+ } finally {
+  fs.open = open; syncBuiltinESMExports();
+  if (host) { const done = once(host, 'exit'); host.kill(); await done; }
+  await f.cleanup();
+ }
 });
 
 void test('GC snapshots retain staged upload references', async () => {

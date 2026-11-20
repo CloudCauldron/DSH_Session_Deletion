@@ -17,8 +17,9 @@ void test('the remounted HTTP route serves status and deletion preview without h
   await server;
   const webServer: WebServer = root.get('webServer');
   let dispose!: () => void;
+  let principal = 'owner';
   const ctx: HostContext = {
-    webServer, connection: { fetch: { register: () => async () => {} }, admit: () => ({ peer: { principal: { kind: 'owner' } } }) },
+    webServer, connection: { fetch: { register: () => async () => {} }, admit: () => ({ peer: { principal: { kind: principal } } }) },
     effect(register: () => () => void) { dispose = register(); },
   };
   const f = await fixture();
@@ -33,12 +34,33 @@ void test('the remounted HTTP route serves status and deletion preview without h
   const status = await fetch(api + 'status');
   assert.equal(status.status, 200);
   assert.deepEqual((await status.json()).pending, []);
-  const preview = await fetch(api + 'preview', { method: 'POST', headers: {
-    'Content-Type': 'application/json', 'X-DSH-Session-Deletion': '1',
-  }, body: JSON.stringify({ sessionId: f.ids.main }) });
+  const post = (path: string, data: object, marker = '1') => fetch(api + path, { method: 'POST',
+    headers: { 'Content-Type': 'application/json', 'X-DSH-Session-Deletion': marker }, body: JSON.stringify(data) });
+  const sessionId = f.ids.main;
+  const preview = await post('preview', { sessionId });
   assert.equal(preview.status, 200);
-  assert.equal((await preview.json()).count, 3);
+  const { token, count } = await preview.json();
+  assert.equal(count, 3);
   assert.equal(hashes(), 0);
+  delete f.headers[sessionId];
+  const missing = await post('preview', { sessionId });
+  assert.equal(missing.status, 404);
+  assert.deepEqual((await missing.json()).messages, [{ key: 'error.sessionMissing' }]);
+  const delayed = await post('delete', { sessionId, token, confirmation: 'DELETE_SESSION' });
+  assert.equal(delayed.status, 409);
+  assert.deepEqual((await delayed.json()).messages, [{ key: 'error.previewExpired' }]);
+  const confirmed = { confirmation: 'CLEAR_DELETION_RECORDS', revision: '' };
+  assert.equal((await fetch(api + 'clear-records')).status, 405);
+  assert.equal((await post('clear-records', confirmed, '')).status, 415);
+  for (const data of [{}, { ...confirmed, confirmation: 'DELETE_SESSION' }, { ...confirmed, revision: null }]) {
+    const failure = await post('clear-records', data);
+    assert.equal(failure.status, 400);
+    assert.deepEqual((await failure.json()).messages, [{ key: 'error.confirmRecords' }]);
+  }
+  principal = 'guest';
+  assert.equal((await post('clear-records', confirmed)).status, 403);
+  principal = 'owner';
+  assert.deepEqual(await (await post('clear-records', confirmed)).json(), { ok: true, cleared: 0, receipt: { count: 0, revision: '' } });
   dispose();
   assert.doesNotThrow(() => webServer.register({ kind: 'prefix', path: '/session-deletion/api', handler() {} })());
 });

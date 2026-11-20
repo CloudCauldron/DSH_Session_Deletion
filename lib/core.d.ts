@@ -130,9 +130,10 @@ export declare function safePath(path: string, { missing, directory, file }?: {
     file?: boolean;
 }): Promise<void>;
 export declare function privateDir(path: string): Promise<void>;
-export declare function atomicJSON<T>(path: string, data: T, onPublished?: (data: T) => void): Promise<void>;
+export declare function atomicJSON<T>(path: string, data: T, onPublished?: (data: T) => void, beforePublish?: () => Promise<void>): Promise<void>;
 export declare function readJSON<T>(path: string, fallback?: T): Promise<T>;
 export declare function readReceipt(home: string): Promise<Receipt>;
+export declare function writeReceipt(home: string, receipt: Omit<Receipt, 'revision'>, onPublished?: (receipt: Receipt) => void, beforePublish?: () => Promise<void>): Promise<void>;
 export declare function removeOwned(path: string): Promise<void>;
 export declare function cleanAtomicTemps(directory: string): Promise<void>;
 export declare function readLog(path: string, refs?: Set<string>): Promise<SessionHeader>;

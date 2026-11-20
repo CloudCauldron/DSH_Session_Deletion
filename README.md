@@ -24,7 +24,7 @@
 
 ## **3 - User Guide**
 
-<span style="margin-left:2em;">&#8203;</span>When deleting a session or using **Free Up Space**, keep only one DSH instance running against that data directory until the operation finishes.
+<span style="margin-left:2em;">&#8203;</span>When deleting a session, clearing deletion records, or using **Free Up Space**, keep only one DSH instance running against that data directory until the operation finishes.
 
 ### **3.1 - Deleting a Session**
 
@@ -45,6 +45,8 @@ The scope of deletion and cleanup is as follows:
 
 Content already inherited or copied by other sessions, server-side files, and filesystem snapshots and backups are outside the deletion scope of this plugin.
 
+Open **Plugins → DSH Session Deletion** to see how many anonymous deletion records have accumulated. Open any other browsers or desktop clients you use with DSH so they can sync, then choose **Clear** to remove the records. Sessions and attachments are unaffected.
+
 ### **3.2. Cleaning Up Orphaned Attachments and Cache**
 
 <span style="margin-left:2em;">&#8203;</span>The plugin separates the reclamation of orphaned attachments and caches into a standalone cleanup feature rather than performing it alongside session deletion, primarily to ensure data safety during multi-session concurrency and resource sharing:
@@ -63,7 +65,7 @@ If cleanup is interrupted, run **Free Up Space** again for a fresh scan.
 
 ### **3.3 - Manual Recovery After an Interrupted Session Deletion**
 
-<span style="margin-left:2em;">&#8203;</span>If DSH shows “Session deletion is incomplete”, new deletions and **Free Up Space** are unavailable until you resolve the pending request.
+<span style="margin-left:2em;">&#8203;</span>If DSH shows “Session deletion is incomplete”, new deletions, record cleanup, and **Free Up Space** are unavailable until you resolve the pending request.
 
 > Until DSH upstream provides a plugin hook for its `prepare` startup stage, the only way to recover an interrupted deletion is to run `guard.js` manually with DSH stopped.
 

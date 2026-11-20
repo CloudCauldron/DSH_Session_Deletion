@@ -30,6 +30,15 @@
     "gc.success": "共清理 {count} 项残留附件与缓存文件。",
     "gc.title": "清理残留附件与缓存？",
 
+    "records.count": "已累积 {count} 条会话删除记录",
+    "records.empty": "当前无会话删除记录",
+    "records.hint": "已删除会话的匿名标识，用于同步清理其他浏览器或桌面端的残留状态。",
+    "records.clear": "清理",
+    "records.title": "清理会话删除记录？",
+    "records.description": "将清空已累积的 {count} 条会话删除记录，不会影响现有或已删除的会话；若曾在其他浏览器或桌面端使用过 DSH，建议先打开一次以完成同步，再执行清理。",
+    "records.busy": "正在清理…",
+    "records.success": "已清理 {count} 条会话删除记录。",
+
     "recovery.pending": "会话删除未完成",
 
     "activity.globalAgentBusy": "仍有 AI 在工作或等待交互，请全部空闲后再清理附件",
@@ -145,6 +154,8 @@
     "error.workspaceSessionsInvalid": "工作区会话记录无效。",
 
     "error.cleanupBusy": "另一项清理正在执行，请稍后重试。",
+    "error.confirmRecords": "请明确确认清理当前的会话删除记录。",
+    "error.recordsChanged": "会话删除记录已更新，请核对数量后重新确认。",
     "error.confirmGc": "需要明确确认清理残留附件与缓存。",
     "error.gcPendingSessions": "有会话尚未删除完毕，暂时无法扫描附件和缓存。",
     "error.gcUnclassifiedStorage": "清理时发现无法归类的存储：{path}。",

@@ -10,7 +10,7 @@ import { randomUUID, createHash } from 'node:crypto';
 import { zstdCompressSync } from 'node:zlib';
 import { setTimeout as delay } from 'node:timers/promises';
 import { zipSync, strToU8 } from 'fflate';
-import { chromium, type Browser, type Locator } from 'playwright-core';
+import { chromium, type Browser, type Locator, type Page } from 'playwright-core';
 import type { SessionHeader } from '../lib/core.js';
 import { encodeSegment, exists, projectKey, listRequests, SUPPORTED_DSH } from '../lib/core.js';
 import { runGuard } from '../lib/guard.js';
@@ -141,6 +141,15 @@ try{
  const getApi=(path:string)=>context.request.get(`http://127.0.0.1:${port}/session-deletion/api/${path}`,{maxRetries:1});
  const status=async()=>{const r=await getApi('status');assert.equal(r.status(),200);return r.json()};
  const receipt=async()=>{const r=await getApi('receipt');assert.equal(r.status(),200);return r.json()};
+ async function expectClearRefused(key: string) {
+  const { receipt }=await status();
+  const response=await context.request.post(`http://127.0.0.1:${port}/session-deletion/api/clear-records`,{
+   headers:{'X-DSH-Session-Deletion':'1'},data:{confirmation:'CLEAR_DELETION_RECORDS',revision:receipt.revision},
+  });
+  assert.equal(response.status(),409);
+  assert.deepEqual((await response.json()).messages,[{key}]);
+  assert.deepEqual((await status()).receipt,receipt);
+ }
  const initialStatus=await status();
  assert.equal(initialStatus.ok,true);
  assert.equal(initialStatus.version,SUPPORTED_DSH);
@@ -242,6 +251,15 @@ try{
  await independentPage.goto(`http://127.0.0.1:${port}/`);await independentPage.waitForTimeout(1200);
  await independentPage.addLocatorHandler(independentPage.getByRole('dialog',{name:'开始使用'}),async dialog=>{const close=dialog.locator('button').first();if(await close.isEnabled())await close.click()},{noWaitAfter:true});
  await independentPage.getByText('Draft owner fixture',{exact:true}).first().click();
+ async function openRecordSettings(tab: Page) {
+  await tab.getByRole('button',{name:'插件',exact:true}).click();
+  await tab.locator('[data-plugin-package="dsh-session-deletion"]').getByRole('button',{name:/^查看/}).click();
+  return tab.locator('[data-plugin-detail="dsh-session-deletion"] [data-plugin-config]');
+ }
+ const recordSettings=await openRecordSettings(independentPage);
+ const clearRecords=(disabled:boolean)=>recordSettings.getByRole('button',{name:'清理',exact:true,disabled});
+ await recordSettings.getByText('当前无会话删除记录',{exact:true}).waitFor();
+ await clearRecords(true).waitFor();
  for(const tab of [page,otherPage,independentPage])await tab.evaluate(()=>{const input=document.createElement('textarea');input.id='deletion-lock-probe';document.body.append(input)});
  await page.waitForTimeout(1000);
  await controls('hold-delete',{id});
@@ -281,6 +299,7 @@ try{
  assert.equal(await deleteToast.evaluate(el=>el.parentElement===document.body),true,'native Toast renders through its portal');
  await otherPage.waitForFunction(()=>[...document.querySelectorAll('[role="alert"]')].some(el=>el.textContent==='正在删除会话…'));
  assert.equal((await status()).deletionRunning,true);
+ await expectClearRefused('error.cleanupBusy');
  const pendingNotice='会话删除未完成';
  assert.equal(await otherPage.getByText(pendingNotice,{exact:true}).count(),0,'a pending journal is not an interruption while the server is deleting');
  const deletingDialog=page.getByRole('dialog',{name:/归档并删除此会话|删除此会话/});
@@ -310,6 +329,8 @@ try{
  assert.notEqual(deletedReceipt.revision,initialReceipt.revision);
  assert.deepEqual(deletedReceipt.deletedIdHashes,[createHash('sha256').update(id).digest('hex')]);
  assert.deepEqual((await status()).receipt,{revision:deletedReceipt.revision,count:1});
+ await recordSettings.getByText('已累积 1 条会话删除记录',{exact:true}).waitFor();
+ await clearRecords(false).waitFor(); // The unrelated active session still allows record cleanup.
  await page.waitForFunction(()=>!document.querySelector<HTMLElement>('#deletion-lock-probe')?.inert);
  await page.evaluate(id=>localStorage.setItem('dsh.conversation.'+id,JSON.stringify({draft:'late stale-tab write'})),id);
  await page.waitForFunction(id=>localStorage.getItem('dsh.conversation.'+id)===null,id);
@@ -359,6 +380,8 @@ try{
  await page.getByRole('button',{name:'确认清理',exact:true}).click();
  for(let i=0;i<100;i++){if((await (await controls('gc-held')).json()).held)break;await delay(50)}
  assert.equal((await (await controls('gc-held')).json()).held,true);
+ await clearRecords(true).waitFor();
+ await expectClearRefused('error.cleanupBusy');
  const importArchive=(workspace:string,data:Buffer)=>context.request.post(`http://127.0.0.1:${port}/api/deepseek-chat-import/archive?workspaceId=${workspace}`,{
   headers:{'Content-Type':'application/octet-stream'},data,
  });
@@ -482,6 +505,8 @@ try{
  assert.equal((await interrupting).status(),500);
  assert.equal((await status()).deletionRunning,false);
  assert.equal((await status()).pending.length,1);
+ await clearRecords(true).waitFor();
+ await expectClearRefused('error.pendingCleanup');
  const recoveryToast=page.getByRole('alert').filter({hasText:pendingNotice});
  await recoveryToast.waitFor();
  assert.equal(await recoveryToast.locator('svg').count(),1,'recovery uses the native warning icon');
@@ -631,6 +656,74 @@ try{
  assert.equal(scheduleAfterRecovery.tables.tasks[raceTask.taskId].target.sessionId,raceDestination.id,'a concurrently retargeted reminder survives both failure and recovery');
  assert.equal(await page.evaluate(id=>localStorage.getItem('dsh.conversation.'+id),id),null);
  assert.equal(await page.getByText('Offline deletion integration fixture',{exact:true}).count(),0);
+ async function recordTab() {
+  const tab=await context.newPage();
+  await tab.goto(again);
+  await tab.addLocatorHandler(tab.getByRole('dialog',{name:'开始使用'}),dialog=>dialog.locator('button').first().click());
+  const detail=await openRecordSettings(tab);
+  return {tab,detail,clear:detail.getByRole('button',{name:'清理',exact:true}),dialog:tab.getByRole('dialog',{name:'清理会话删除记录？',exact:true})};
+ }
+ const {tab:recordPage,detail:settingsDetail,clear,dialog:confirmation}=await recordTab();
+ const count=(await status()).receipt.count;
+ await settingsDetail.getByText(`已累积 ${count} 条会话删除记录`,{exact:true}).waitFor();
+ await settingsDetail.getByText('已删除会话的匿名标识，用于同步清理其他浏览器或桌面端的残留状态。',{exact:true}).waitFor();
+ await recordPage.setViewportSize({width:360,height:740});
+ const buttonLayout=await clear.evaluate(button=>{
+  const label=document.createRange();label.selectNodeContents(button);
+  return {height:button.getBoundingClientRect().height,lines:label.getClientRects().length};
+ });
+ assert.deepEqual(buttonLayout,{height:28,lines:1},'the native small button keeps its label on one line at narrow widths');
+ await recordPage.setViewportSize({width:1440,height:1000});
+ await clear.click();
+ await confirmation.getByText(`将清空已累积的 ${count} 条会话删除记录，不会影响现有或已删除的会话；若曾在其他浏览器或桌面端使用过 DSH，建议先打开一次以完成同步，再执行清理。`,{exact:true}).waitFor();
+ assert.deepEqual(await dialogAppearance(confirmation),gcAppearance);
+ await confirmation.getByRole('button',{name:'取消',exact:true}).click();
+ assert.equal((await status()).receipt.count,count);
+ await clear.click();
+ const confirmClear=confirmation.getByRole('button',{name:'确认清理',exact:true});
+ const peer=spawn(process.execPath,[entry],{env,stdio:['ignore','pipe','pipe']});
+ const peerExited=once(peer,'exit');
+ try {
+  await once(peer.stdout,'data');
+  await confirmClear.click();
+  assert.equal(await confirmation.getByRole('alert').innerText(),'另一个 DSH 进程正在使用相同目录，请先关闭它。');
+  assert.equal((await status()).receipt.count,count);
+ } finally {peer.kill();await peerExited}
+ const waiting=await recordTab(), late=await recordTab();
+ await waiting.clear.click();await late.clear.click();
+ await waiting.dialog.waitFor();
+ // Deliver the stale confirmation after another client observes the cleared receipt.
+ const synced=page.waitForResponse('**/session-deletion/api/receipt');
+ await late.tab.route('**/session-deletion/api/clear-records',async route=>{await synced;await route.continue()},{times:1});
+ const lateReply=late.tab.waitForResponse('**/session-deletion/api/clear-records');
+ await late.dialog.getByRole('button',{name:'确认清理',exact:true}).click();
+ await late.dialog.getByRole('button',{name:'正在清理…',disabled:true}).waitFor();
+ const submit=Promise.withResolvers<void>();
+ await recordPage.route('**/session-deletion/api/clear-records',async route=>{await submit.promise;await route.continue()},{times:1});
+ try {
+  await confirmClear.click();
+  await confirmation.getByRole('button',{name:'正在清理…',disabled:true}).waitFor();
+  assert.equal(await confirmation.getByRole('button',{disabled:true}).count(),3);
+  await recordPage.keyboard.press('Escape');
+  assert.ok(await confirmation.isVisible());
+ } finally {submit.resolve()}
+ await confirmation.waitFor({state:'hidden'});
+ await settingsDetail.getByText('当前无会话删除记录',{exact:true}).waitFor();
+ assert.ok(await clear.isDisabled());
+ const clearedToast=recordPage.getByRole('alert').filter({hasText:`已清理 ${count} 条会话删除记录。`});
+ await clearedToast.waitFor();
+ assert.equal(await clearedToast.locator(':scope > :first-child svg').count(),1);
+ assert.deepEqual((await receipt()).deletedIdHashes,[]);
+ assert.equal(await exists(log),false);
+ assert.ok(await exists(preserved.path));
+ assert.deepEqual((await (await synced).json()).deletedIdHashes,[]);
+ await waiting.dialog.waitFor({state:'hidden'});
+ await waiting.detail.getByText('当前无会话删除记录',{exact:true}).waitFor();
+ assert.equal((await (await lateReply).json()).cleared,0);
+ await late.dialog.waitFor({state:'hidden'});
+ await late.detail.getByText('当前无会话删除记录',{exact:true}).waitFor();
+ assert.equal(await late.tab.getByRole('alert').filter({hasText:'已清理 0 条会话删除记录。'}).count(),0);
+ await Promise.all([recordPage.close(),waiting.tab.close(),late.tab.close()]);
  // The native inventory lists one external entry and resolves its shipped locale metadata.
  const zhDescription='DSH 会话的即时删除与残留附件的清理。';
  const enDescription='Immediate session deletion and orphan attachment cleanup for DSH.';
@@ -807,7 +900,7 @@ try{
  await switchPlugin('package',true);
  assert.ok((await receipt()).deletedIdHashes.includes(createHash('sha256').update(filtered.id).digest('hex')));
  assert.deepEqual(errors,[]);
- console.log('INTEGRATION PASS: active native turns, cold-resumed and external subagents, jobs, schedules, preparation UI locks, private deletion, isolated publication, GC, recovery, and live zh/en metadata');
+ console.log('INTEGRATION PASS: active native turns, cold-resumed and external subagents, jobs, schedules, preparation UI locks, private deletion, isolated publication, GC, deletion record cleanup, recovery, and live zh/en metadata');
 }catch(e){
  if(browser){const pages=browser.contexts().flatMap(c=>c.pages());if(pages[0]){await fs.mkdir('test-results',{recursive:true});await pages[0].screenshot({path:'test-results/failure.png'});console.error((await pages[0].locator('body').innerText()).slice(0,6000));}}
  console.error('Browser errors:',errors);

@@ -18,7 +18,8 @@ export interface DeletionClientContext extends LocaleClientContext {
         register(options: {
             name: string;
             id: string;
-            order: number;
+            key?: string;
+            order?: number;
             locale: string;
             inject?: () => object;
         }, component: unknown): unknown;
