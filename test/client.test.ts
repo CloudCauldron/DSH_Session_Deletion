@@ -2,6 +2,8 @@ import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { readFile, readdir } from 'node:fs/promises';
 import { createHash } from 'node:crypto';
+import { createRequire } from 'node:module';
+import { pathToFileURL } from 'node:url';
 import vm from 'node:vm';
 
 import type { DeletionClientContext, DeletionPreview, DeletionReceipt, PendingDeletion } from '../src/client.js';
@@ -78,6 +80,69 @@ function localeFixture() {
   };
 }
 
+for (const held of ['status', 'locales', 'receipt', 'selection hash']) void test(`Cordis unload during initial ${held} releases the client without navigation`, { timeout: 2000 }, async () => {
+  const require = createRequire(import.meta.resolve('@deepseek-ai/dsh-client-connection'));
+  const { Context } = await import(pathToFileURL(require.resolve('@deepseek-ai/cordis')).href);
+  const root = new Context();
+  let menus = 0, navigations = 0, timerCleared = false;
+  root.provide('contextMenus', { register() { menus++; return () => { menus--; }; } });
+  root.provide('locale', localeFixture());
+  root.provide('slots', { inject() {} });
+  const id = 'selected-session';
+  root.provide('sessions', { list: { getSnapshot: () => ({ byId: { [id]: { id, retainedBy: { mainView: 1 } } } }), subscribe: () => () => {} } });
+  root.provide('uiWorkspace', { startSession() { navigations++; } });
+
+  const requested = Promise.withResolvers<void>(), reply = Promise.withResolvers<void>();
+  let pending: AbortSignal | null | undefined;
+  let plugin!: ClientPlugin;
+  vm.runInNewContext(await readFile(new URL('../lib/client.js', import.meta.url), 'utf8'), {
+    AbortController, TextEncoder, localStorage: {}, sessionStorage: {},
+    crypto: { subtle: { async digest(_: string, bytes: Uint8Array) {
+      requested.resolve();
+      await reply.promise;
+      return createHash('sha256').update(bytes).digest();
+    } } },
+    window: {
+      __ModuleLoader__: { load(definition: ClientModule) { plugin = definition.factory(() => ({ createElement })); } },
+      addEventListener() {}, removeEventListener() {},
+    },
+    document: { body: {}, head: { append() {} }, querySelectorAll: () => [], createElement: () => ({ remove() {} }) },
+    MutationObserver: class { observe() {} disconnect() {} },
+    setInterval() { return 1; }, clearInterval() { timerCleared = true; },
+    async fetch(url: string, options: RequestInit) {
+      pending = options.signal;
+      if (url.endsWith('/' + held)) {
+        pending?.addEventListener('abort', () => reply.reject(pending?.reason), { once: true });
+        requested.resolve();
+        await reply.promise;
+      }
+      if (url.endsWith('/receipt')) return Response.json({ revision: '', deletedIdHashes: [createHash('sha256').update(id).digest('hex')] });
+      return Response.json(url.endsWith('/locales') ? { ok: true, dictionaries }
+        : { ok: true, pending: [], locked: [], archived: [], receipt: { revision: '', count: 1 } });
+    },
+  });
+  const scope = root.plugin(plugin);
+  await requested.promise;
+  assert.equal(menus, held === 'receipt' || held === 'selection hash' ? 1 : 0);
+  let unloaded = false;
+  const disposal = scope.dispose().then(() => { unloaded = true; });
+  try {
+    await new Promise(setImmediate);
+    assert.equal(pending?.aborted, true);
+    if (held === 'selection hash') {
+      reply.resolve(); // WebCrypto finishes after the parent has already unloaded its timer.
+      await new Promise(setImmediate);
+    }
+    assert.equal(unloaded, true);
+    assert.equal(navigations, 0);
+    assert.equal(timerCleared, true);
+    assert.equal(menus, 0);
+  } finally {
+    reply.resolve();
+    await disposal;
+  }
+});
+
 // Run the shipped browser entry point. No helper is extracted or reimplemented:
 // a successful refresh must finish its actual cleanup before startSession fires.
 function browserStorage(values: Record<string, string>) {
@@ -100,7 +165,7 @@ async function refreshClient(localStorage: ReturnType<typeof browserStorage>, se
   let receipt = { revision: 'first', deletedIdHashes: [createHash('sha256').update(deletedId).digest('hex')] };
   const finished = new Promise<void>(resolve => { finish = resolve; });
   const sandbox = {
-    TextEncoder,
+    AbortController, TextEncoder,
     crypto: { subtle: { digest: async (_: string, bytes: Uint8Array) => createHash('sha256').update(bytes).digest() } },
     localStorage,
     sessionStorage,
@@ -227,7 +292,7 @@ void test('deletion copy and API errors follow locale changes, use English for m
     useSyncExternalStore: <T>(_: unknown, read: () => T) => read(), useLayoutEffect(callback: () => void) { callback(); },
   };
   const sandbox = {
-    TextEncoder,
+    AbortController, TextEncoder,
     crypto: { subtle: { digest: async (_: string, bytes: Uint8Array) => createHash('sha256').update(bytes).digest() } },
     localStorage: browserStorage({}), sessionStorage: browserStorage({}),
     window: { __ModuleLoader__: { load(definition: ClientModule) { plugin = definition.factory(name => name === 'react' ? react : ui); } }, addEventListener() {}, removeEventListener() {} },
@@ -382,6 +447,7 @@ void test('GC menu shows a native spinner, formats binary units and reports fail
     useEffect: (callback: () => () => void) => { mount = callback; },
   };
   vm.runInNewContext(await readFile(new URL('../lib/client.js', import.meta.url), 'utf8'), {
+    AbortController,
     window: { __ModuleLoader__: { load(definition: ClientModule) { plugin = definition.factory(name => name === 'react' ? react : ui); } } },
     fetch: async (url: string) => {
       if (url === 'api/session-deletion/locales') return { ok: true, json: async () => ({ ok: true, dictionaries }) };

@@ -6,14 +6,14 @@ export interface LocaleClientContext {
   locale: { register(namespace: string, dictionaries: Dictionaries): () => void };
 }
 
-export async function registerClientLocale(ctx: LocaleClientContext, namespace: string, id = namespace): Promise<void> {
-  const response = await fetch(catalogUrl(id), { cache: 'no-store', redirect: 'error' });
-  if (ctx.fiber.uid === null) return;
+export async function registerClientLocale(ctx: LocaleClientContext, namespace: string, signal: AbortSignal): Promise<void> {
+  const response = await fetch(catalogUrl(namespace), { cache: 'no-store', redirect: 'error', signal });
+  if (signal.aborted || ctx.fiber.uid === null) return;
   if (!response.ok) throw Object.assign(new Error(`Locale catalogs: HTTP ${response.status}`), {
     messages: [message('error.localeHttp', { status: String(response.status) })],
   });
   const data = await response.json() as { ok?: boolean; dictionaries?: Record<string, unknown> } | null;
-  if (ctx.fiber.uid === null) return;
+  if (signal.aborted || ctx.fiber.uid === null) return;
   const catalogs = data?.dictionaries;
   if (data?.ok !== true || !catalogs || !isDictionary(catalogs.en)) {
     throw Object.assign(new Error('Invalid locale catalogs.'), { messages: [message('error.invalidLocaleDictionaries')] });

@@ -35,8 +35,8 @@ interface DeletionStatus { gcRunning?: boolean; deletionRunning?: boolean; pendi
 export interface DeletionPreview { count: number; token: string; archived: boolean }
 interface DeletionDialog { id: string; title: string; preview?: DeletionPreview; busy?: boolean; error?: Failure }
 
-async function api<T>(path: string, data?: object): Promise<T> {
-  const response = await fetch('/session-deletion/api/' + path, { credentials: 'same-origin', cache: 'no-store',
+async function api<T>(path: string, data?: object, signal?: AbortSignal): Promise<T> {
+  const response = await fetch('/session-deletion/api/' + path, { credentials: 'same-origin', cache: 'no-store', signal,
     method: data ? 'POST' : 'GET', headers: data ? { 'Content-Type': 'application/json', 'X-DSH-Session-Deletion': '1' } : {},
     ...(data ? { body: JSON.stringify(data) } : {}) });
   if (!response.ok) throw new ApiError(await readFailure(response), response.status);
@@ -48,19 +48,22 @@ type Refresh = () => Promise<void>;
 window.__ModuleLoader__.load({ id: 'dsh-session-deletion', factory: require => ({
   inject: ['slots', 'sessions', 'uiWorkspace', 'contextMenus', 'locale'],
   apply(ctx: DeletionClientContext) {
+    const controller = new AbortController();
+    const { signal } = controller;
     let scope: ClientScope | undefined;
     let refresh: Refresh | undefined;
-    let active = true, polling = false;
+    let polling = false;
     // rc.5 can retain this browser bundle while its host entry is disabled.
     async function poll(): Promise<void> {
-      if (!active || polling) return;
+      if (signal.aborted || polling) return;
       polling = true;
       try {
         if (refresh) { await refresh(); return; }
-        const status = await api<DeletionStatus>('status');
-        if (!active || !status.ok || ctx.fiber.uid === null) return;
+        const status = await api<DeletionStatus>('status', undefined, signal);
+        if (signal.aborted || !status.ok || ctx.fiber.uid === null) return;
         scope = ctx.plugin(async child => {
-          refresh = await mountClient(child, require, poll, status);
+          try { refresh = await mountClient(child, require, poll, status, signal); }
+          catch (error) { if (!signal.aborted) throw error; }
         });
         await scope;
       } catch (error) {
@@ -73,17 +76,18 @@ window.__ModuleLoader__.load({ id: 'dsh-session-deletion', factory: require => (
     }
     ctx.effect(() => {
       const timer = setInterval(() => { void poll(); }, 1000);
-      return () => { active = false; clearInterval(timer); };
+      // Cordis waits for child setup during disposal, including pending network reads.
+      return () => { clearInterval(timer); controller.abort(); };
     }, 'session-deletion status');
     // DSH waits for client plugins before opening its gateway connection.
     void poll();
   },
 }) });
 
-async function mountClient(ctx: DeletionClientContext, require: (name: string) => unknown, poll: () => Promise<void>, initial: DeletionStatus): Promise<Refresh | undefined> {
+async function mountClient(ctx: DeletionClientContext, require: (name: string) => unknown, poll: () => Promise<void>, initial: DeletionStatus, signal: AbortSignal): Promise<Refresh | undefined> {
   const namespace = 'session-deletion';
-  await registerClientLocale(ctx, namespace);
-  if (ctx.fiber.uid === null) return;
+  await registerClientLocale(ctx, namespace, signal);
+  if (signal.aborted || ctx.fiber.uid === null) return;
   const React = require('react') as ReactAPI;
   const h = React.createElement;
   function errorContent(error: Failure, t: LocalizedProps['t']): ElementNode {
@@ -189,7 +193,7 @@ async function mountClient(ctx: DeletionClientContext, require: (name: string) =
     }
   }
   async function refresh(initial?: DeletionStatus): Promise<void> {
-    if (!active) return;
+    if (!active || signal.aborted) return;
     const own = generation, wasSubmitting = submitting;
     // Replacing the existing preview revokes a delete request whose body has
     // not arrived yet. An idle status alone cannot prove that request ended.
@@ -200,24 +204,25 @@ async function mountClient(ctx: DeletionClientContext, require: (name: string) =
         if (own === generation && dialog === failed) dialog = { ...failed, preview };
       } catch { /* A lost replacement response still leaves the request uncertain. */ }
     }
-    try { status = initial ?? await api<DeletionStatus>('status'); }
+    try { status = initial ?? await api<DeletionStatus>('status', undefined, signal); }
     catch (error) {
-      if (status.ok) { status = { ...status, ok: false }; publish(); }
+      if (!signal.aborted && status.ok) { status = { ...status, ok: false }; publish(); }
       throw error;
     }
-    if (!active) return;
+    if (!active || signal.aborted) return;
     if (own === generation && !wasSubmitting && !submitting && dialog?.busy && dialog.error && status.deletionRunning === false
       && (dialog.preview || status.pending.length)) dialog = { ...dialog, busy: false };
     publish();
     try {
-      if (!receipt || receipt.revision !== status.receipt.revision) receipt = await api<DeletionReceipt>('receipt');
-      if (!active) return;
+      if (!receipt || receipt.revision !== status.receipt.revision) receipt = await api<DeletionReceipt>('receipt', undefined, signal);
+      if (!active || signal.aborted) return;
       // Keep applying cached tombstones: an old tab may write a deleted session's state back later.
       await cleanBrowserState(receipt.deletedIdHashes);
       const current = dialog;
       if (current?.error && !submitting && receipt.deletedIdHashes.includes(await hash(current.id))
-        && dialog === current && !submitting) completeDeletion(current.title);
-      if (lastMainId && receipt.deletedIdHashes.includes(await hash(lastMainId)) && active) {
+        && dialog === current && !submitting && active && !signal.aborted) completeDeletion(current.title);
+      const selected = lastMainId;
+      if (selected && receipt.deletedIdHashes.includes(await hash(selected)) && selected === lastMainId && active && !signal.aborted) {
         lastMainId = undefined; ctx.uiWorkspace.startSession();
       }
     } catch { /* A disconnected host is expected during shutdown. */ }

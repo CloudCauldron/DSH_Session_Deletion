@@ -8,7 +8,7 @@ export interface LocaleClientContext {
         register(namespace: string, dictionaries: Dictionaries): () => void;
     };
 }
-export declare function registerClientLocale(ctx: LocaleClientContext, namespace: string, id?: string): Promise<void>;
+export declare function registerClientLocale(ctx: LocaleClientContext, namespace: string, signal: AbortSignal): Promise<void>;
 export declare class ApiError extends Error {
     readonly status: number;
     readonly failure: Failure;
