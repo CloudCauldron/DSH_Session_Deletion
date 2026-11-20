@@ -654,8 +654,8 @@ export class DeletionRuntime {
     if ((await this.until(listRequests(this.home), deadline)).length) throw new DeletionRefused('error.pendingCleanup');
     // A preview can see an imported log before its workspace attachment settles.
     if (this.importer?.active) await this.until(this.importer.active.settled, deadline);
-    const readConfirmedFamily = async () => {
-      const headers = await this.until(this.headers(), deadline); const root = headers.get(id);
+    const readConfirmedFamily = async (checkDeadline: number) => {
+      const headers = await this.until(this.headers(), checkDeadline); const root = headers.get(id);
       if (!root || root.createdAt !== confirmed.get(id)) throw new DeletionRefused('error.sessionChanged');
       if (root.origin === 'subagent' || (root.delegationDepth ?? 0) > 0) throw new DeletionRefused('error.mainSessionRequired');
       const ids = familyOf(headers, id);
@@ -663,7 +663,7 @@ export class DeletionRuntime {
       if (ids.some(member => headers.get(member)!.createdAt !== confirmed.get(member))) throw new DeletionRefused('error.sessionChanged');
       return { headers, root, ids };
     };
-    const { headers, root, ids } = await readConfirmedFamily();
+    const { headers, root, ids } = await readConfirmedFamily(deadline);
     this.assertAllowed(ids);
     await this.checkScheduleDelivery(ids, deadline);
     await this.until(this.assertSoleHost(), deadline);
@@ -696,10 +696,14 @@ export class DeletionRuntime {
         if (!lock) throw new LocalizedError('error.activeSessionWriter');
         writerLocks.push(lock);
       }
-      await readConfirmedFamily();
-      await this.checkScheduleDelivery(ids, deadline);
-      if (this.manager() !== stopped.manager || this.activations(root, ids, stopped.manager).length) throw new DeletionRefused('activity.unconfirmed');
+      const remaining = deadline - performance.now();
+      if (remaining <= 0) throw new DeletionRefused('error.stopTimeout');
       const request = await captureDeletionRequest(this.home, root, plan, member => this.ctx.sessionPersistence.stat(member));
+      // Keep the shared preparation budget for native checks, regardless of transcript size.
+      const checkDeadline = performance.now() + remaining;
+      await readConfirmedFamily(checkDeadline);
+      await this.checkScheduleDelivery(ids, checkDeadline);
+      if (this.manager() !== stopped.manager || this.activations(root, ids, stopped.manager).length) throw new DeletionRefused('activity.unconfirmed');
       // Another host can open the shared workspace and schedule tables while large logs are read.
       await this.assertSoleHost();
       enqueueAttempted = true;

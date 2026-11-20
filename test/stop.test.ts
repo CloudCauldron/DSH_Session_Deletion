@@ -340,6 +340,42 @@ void test('a second same-home host started during transcript capture prevents jo
   }
 });
 
+for (const change of ['new child', 'delivery reservation']) void test(`a ${change} published during capture invalidates the request`, async () => {
+  const s = await stoppingFixture();
+  try {
+    s.runtime.ctx.sessionPersistence.stat = async id => {
+      if (id === s.root.id && !s.agents.has(id)) {
+        if (change === 'new child') await s.f.session('late-child', { parentSession: id, origin: 'subagent' });
+        else await s.f.write(join(s.f.home, 'storages/schedule.json'), JSON.stringify({
+          unit: { name: 'schedule' }, tables: { tasks: { reminder: { target: { kind: 'new' }, pendingDelivery: { targetSessionId: id } } } },
+        }));
+      }
+      return s.f.stat(id);
+    };
+    await assert.rejects(s.remove(), change === 'new child' ? /subagent group has changed/ : /Message submissions or session operations/);
+    assert.deepEqual(await listRequests(s.f.home), []);
+    assert.equal(s.runtime.locked.size, 0);
+    for (const id of s.ids) assert.ok(await s.f.stat(id));
+  } finally { await s.f.cleanup(); }
+});
+
+void test('a long transcript read leaves time for the final family and schedule checks', async t => {
+  const s = await stoppingFixture();
+  try {
+    const now = performance.now.bind(performance);
+    s.runtime.ctx.sessionPersistence.stat = async id => {
+      if (id === s.root.id && !s.agents.has(id)) t.mock.method(performance, 'now', () => now() + 60_000);
+      return s.f.stat(id);
+    };
+    const headers = s.runtime.headers.bind(s.runtime);
+    s.runtime.headers = async () => {
+      if (!s.agents.has(s.root.id)) await delay(10);
+      return headers();
+    };
+    assert.deepEqual(await s.remove(), { deleted: 3 });
+  } finally { await s.f.cleanup(); }
+});
+
 void test('directory fsync failure after journal rename cannot reopen the target', { skip: process.platform !== 'linux' }, async () => {
   const s = await stoppingFixture(); const open = fs.open; let failed = false;
   try {
