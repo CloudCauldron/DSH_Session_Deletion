@@ -253,7 +253,8 @@ try{
  assert.equal(await deleteToast.evaluate(el=>el.parentElement===document.body),true,'native Toast renders through its portal');
  await otherPage.waitForFunction(()=>[...document.querySelectorAll('[role="alert"]')].some(el=>el.textContent==='正在删除会话…'));
  assert.equal((await status()).deletionRunning,true);
- assert.equal(await otherPage.getByText('清理未完成，将在下次启动时自动恢复',{exact:true}).count(),0,'a pending journal is not an interruption while the server is deleting');
+ const pendingNotice='会话删除未完成';
+ assert.equal(await otherPage.getByText(pendingNotice,{exact:true}).count(),0,'a pending journal is not an interruption while the server is deleting');
  const deletingDialog=page.getByRole('dialog',{name:/归档并删除此会话|删除此会话/});
  assert.equal(await deletingDialog.locator('button').evaluateAll((buttons: HTMLButtonElement[])=>buttons.every(button=>button.disabled)),true);
  await page.keyboard.press('Escape');
@@ -453,10 +454,10 @@ try{
  assert.equal((await interrupting).status(),500);
  assert.equal((await status()).deletionRunning,false);
  assert.equal((await status()).pending.length,1);
- const recoveryToast=page.getByRole('alert').filter({hasText:'清理未完成，将在下次启动时自动恢复'});
+ const recoveryToast=page.getByRole('alert').filter({hasText:pendingNotice});
  await recoveryToast.waitFor();
  assert.equal(await recoveryToast.locator('svg').count(),1,'recovery uses the native warning icon');
- await page.waitForFunction(()=>[...document.querySelectorAll('[role="alert"]')].some(el=>el.textContent==='清理未完成，将在下次启动时自动恢复'&&getComputedStyle(el).opacity==='1'));
+ await page.waitForFunction(text=>[...document.querySelectorAll('[role="alert"]')].some(el=>el.textContent===text&&getComputedStyle(el).opacity==='1'),pendingNotice);
  assert.ok(await interruptedDialog.getByRole('button',{name:'确认删除',exact:true}).isDisabled());
  await interruptedDialog.getByRole('button',{name:'取消',exact:true}).click();
  await page.getByRole('button',{name:'插件',exact:true}).click();

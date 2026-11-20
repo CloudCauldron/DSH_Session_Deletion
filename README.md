@@ -21,8 +21,6 @@
     Deletion operations lock only the target session and its subagents, leaving other active sessions, AI tasks, background executions, and file uploads completely undisturbed.
 - **Global Orphaned Attachment and Cache Reclamation**
     Checks persisted session logs, live sessions, staged uploads, and DSH storage before removing orphaned attachments. A shared image becomes reclaimable after its last reference disappears.
-- **Automatic Recovery from Unexpected Interruptions**
-    The recovery guard resumes a pending session deletion after the host exits or at the next startup. If attachment cleanup is interrupted, run **Free Up Space** again for a fresh scan.
 
 ## **3 - User Guide**
 
@@ -59,6 +57,25 @@ By separating the two, routine session deletion only needs to lock the target se
 2. Select **"Free Up Space"**. The menu shows how much space can be reclaimed, or **"Size unknown"** if the estimate is unavailable.
 3. Confirm cleanup when all sessions are idle. DSH displays the number of reclaimed attachments and cache files.
 
+If cleanup is interrupted, run **Free Up Space** again for a fresh scan.
+
+### **3.3 - Manual Recovery After an Interrupted Session Deletion**
+
+If DSH shows “Session deletion is incomplete”, new deletions and **Free Up Space** are unavailable until you resolve the pending request.
+
+1. Stop every DSH process that uses the affected data directory, including DSH Desktop. Keep them stopped until the command finishes.
+2. Open a terminal in the data directory that DSH was using (`DSH_HOME`, usually `~/.dsh`). Run the installed guard from there. The final `.` passes that directory to the guard. If you installed the plugin in the Desktop profile, replace `web` with `desktop`.
+
+    ```sh
+    node ./profiles/web/node_modules/dsh-session-deletion/lib/guard.js .
+    ```
+
+- `Deletion completed for <id>.` means the guard finished deleting the session and its confirmed subagents.
+- `Deletion abandoned for <id>.` means a saved log for the session or one of its subagents changed or was replaced. The guard clears the request and keeps everything that remains.
+- `Nothing pending.` means there were no requests to resolve.
+
+These outcomes return exit code `0`. On an error, the guard prints the reason and exits with code `1`. Address the reported problem before running it again.
+
 ## **4 - Requirements**
 
 - **DeepSeek Harness**: `0.2.2-rc.5` (CLI default Web profile or DSH Desktop)
@@ -68,8 +85,6 @@ By separating the two, routine session deletion only needs to lock the target se
 ## **5 - Installation and Configuration**
 
 ### **5.1 - Installing the Plugin**
-
-When upgrading, let the previous version finish pending deletions and stop DSH before switching versions.
 
 1. Build the compiled artifacts in this repository directory:
 
@@ -112,13 +127,13 @@ When upgrading, let the previous version finish pending deletions and stop DSH b
 
 ### **5.2 - Uninstalling the Plugin**
 
-<span style="margin-left:2em;">&#8203;</span>To remove the plugin, run the following command and restart DSH:
+<span style="margin-left:2em;">&#8203;</span>If a session deletion is pending, resolve it first. Then run the uninstall command below and restart DSH.
 
 ```bash
 dsh plugin --profile web remove dsh-session-deletion
 ```
 
-After any pending recovery deletions have finished and DSH is stopped, you can optionally delete the `.dsh-session-deletion` directory under your actual `DSH_HOME`; the default location is `~/.dsh/.dsh-session-deletion`.
+With DSH stopped, you can also remove the plugin’s `.dsh-session-deletion` directory under your `DSH_HOME`.
 
 ## **6 - Development and Testing**
 

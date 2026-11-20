@@ -30,7 +30,7 @@
     "gc.success": "Cleaned up {count} orphaned attachment and cache file(s).",
     "gc.title": "Clean up orphaned attachments and cache?",
 
-    "recovery.pending": "Cleanup incomplete; it will resume automatically on next launch",
+    "recovery.pending": "Session deletion is incomplete",
 
     "activity.globalAgentBusy": "An AI agent is still running or awaiting input; wait until all are idle before cleaning up attachments",
     "activity.chatImport": "A DeepSeek chat import is saving sessions and attachments.",
@@ -116,7 +116,7 @@
     "error.invalidDeletionRequest": "Invalid deletion request",
     "error.invalidPlanIds": "Invalid deletion plan identities",
     "error.invalidPlanPath": "Invalid deletion plan path",
-    "error.pendingDeletion": "An incomplete session deletion is pending. Please restart DSH to recover.",
+    "error.pendingDeletion": "Attachment and cache cleanup is unavailable while a session deletion is incomplete.",
     "error.pendingQueueFile": "Unexpected pending queue file",
     "error.previewExpired": "Confirmation expired. Please reopen the delete dialog.",
     "error.targetLifecycleMismatch": "Target lifecycle mismatch",
@@ -146,11 +146,11 @@
 
     "error.cleanupBusy": "Another cleanup is already in progress. Please try again later.",
     "error.confirmGc": "Explicit confirmation is required to clean up orphaned attachments and cache.",
-    "error.gcPendingSessions": "Finish pending session deletions before GC",
+    "error.gcPendingSessions": "Attachment and cache scanning is unavailable while a session deletion is incomplete.",
     "error.gcUnclassifiedStorage": "Unclassified storage during GC: {path}",
     "error.imageCacheBusy": "Image cache is still being generated. Please try again later.",
     "error.injectedGcInterruption": "Injected GC interruption",
-    "error.pendingCleanup": "An incomplete cleanup is pending. Please restart DSH to recover.",
+    "error.pendingCleanup": "A previous session deletion is incomplete.",
     "error.sizeChanged": "Sessions or attachments have changed. Please reopen the menu to recalculate size.",
 
     "error.attachmentObject": "Unexpected attachment object: {path}",

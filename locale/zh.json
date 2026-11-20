@@ -30,7 +30,7 @@
     "gc.success": "共清理 {count} 项残留附件与缓存文件。",
     "gc.title": "清理残留附件与缓存？",
 
-    "recovery.pending": "清理未完成，将在下次启动时自动恢复",
+    "recovery.pending": "会话删除未完成",
 
     "activity.globalAgentBusy": "仍有 AI 在工作或等待交互，请全部空闲后再清理附件",
     "activity.chatImport": "DeepSeek 对话导入正在保存会话和附件。",
@@ -116,7 +116,7 @@
     "error.invalidDeletionRequest": "删除请求无效。",
     "error.invalidPlanIds": "删除计划中的会话标识无效。",
     "error.invalidPlanPath": "删除计划中的路径无效。",
-    "error.pendingDeletion": "有未完成的会话删除，请先重启 DSH 恢复。",
+    "error.pendingDeletion": "有会话尚未删除完毕，暂时无法清理附件和缓存。",
     "error.pendingQueueFile": "待处理队列中存在异常文件。",
     "error.previewExpired": "确认已过期，请重新打开删除对话框。",
     "error.targetLifecycleMismatch": "目标会话的生命周期与删除计划不一致。",
@@ -146,11 +146,11 @@
 
     "error.cleanupBusy": "另一项清理正在执行，请稍后重试。",
     "error.confirmGc": "需要明确确认清理残留附件与缓存。",
-    "error.gcPendingSessions": "请先完成待处理的会话删除，再清理附件和缓存。",
+    "error.gcPendingSessions": "有会话尚未删除完毕，暂时无法扫描附件和缓存。",
     "error.gcUnclassifiedStorage": "清理时发现无法归类的存储：{path}。",
     "error.imageCacheBusy": "图片缓存仍在生成，请稍后重试。",
     "error.injectedGcInterruption": "已触发模拟清理中断。",
-    "error.pendingCleanup": "有未完成的清理，请先重启 DSH 恢复。",
+    "error.pendingCleanup": "上一次会话删除尚未完成。",
     "error.sizeChanged": "会话或附件已变化，请重新打开菜单计算体积。",
 
     "error.attachmentObject": "附件对象异常：{path}。",
