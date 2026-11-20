@@ -8,7 +8,7 @@ import{PublicationBarrier}from'../lib/runtime.js';
 import { makeRuntime } from './runtime-fixture.ts';
 import type { RuntimeContext } from '../lib/runtime.js';
 import { fixture } from './fixtures.ts';
-import { familyOf, listRequests, stateDir, SUPPORTED_DSH } from '../lib/core.js';
+import { familyOf, listRequests, stateDir } from '../lib/core.js';
 
 void test('upload coordination covers importer replacement and preserves synchronous prompt bindings', async () => {
  const f = await fixture(); let dispose: (() => void | Promise<void>) | undefined, maintenance: Promise<unknown> | undefined;
@@ -24,10 +24,12 @@ void test('upload coordination covers importer replacement and preserves synchro
   for (const name of ['saveImage', 'saveImages', 'saveFile', 'saveFileStream', 'readImageRequest']) attachments[name] = async () => {};
   let bindImporter!: (ctx: RuntimeContext) => void;
   const runtime = makeRuntime({
-   sessionDeletionGate: { home: f.home, version: SUPPORTED_DSH, healthy: () => true }, attachments, fileUploads: uploads,
-   sessions: { list: () => [] }, sessionPersistence: { async flush() { flushing.resolve(); await release.promise; } },
+   dshHomePath: () => f.home, attachments, fileUploads: uploads,
+   sessions: { list: () => [] }, sessionPersistence: { name: 'session-persistence-jsonl', root: join(f.home, 'sessions'), async flush() { flushing.resolve(); await release.promise; } },
    workspaceRegistry: { pinSession() {}, async archiveSession() {}, async unarchiveSession() {} },
-   agents: { requireFactory: () => ({ target: {} }), setFactory() {} }, sessionProjectionCache: { table: new Map<string, unknown>(), put() {} },
+   agents: { list: () => [], requireFactory: () => ({ target: {} }), setFactory() {} }, sessionProjectionCache: { table: new Map<string, unknown>(), put() {} },
+   sessionController: Object.fromEntries(['prompt', 'attachment', 'updateQueue', 'fork', 'rename', 'selectModel', 'create', 'resolveAgent', 'state', 'page', 'projections', 'list'].map(name => [name, () => {}])),
+   schedule: { create: async () => {}, edit: async () => {}, catalog: async () => [] },
    on() { return () => {}; }, inject(names, bind) { if (names.includes('deepseekChatImport')) bindImporter = bind; }, effect(callback) { dispose = callback(); },
   });
   await runtime.initialize();
@@ -49,20 +51,18 @@ void test('upload coordination covers importer replacement and preserves synchro
   uploads.retirePrompt({ id: f.ids.main }, 'request');
   assert.equal(retired, 1, 'retirement only removes references and must remain available during disposal');
   runtime.locked.clear();
-  runtime.controller = {}; runtime.schedule = {} as RuntimeContext['schedule'];
-  await fs.mkdir(join(stateDir(f.home), 'hosts'), { recursive: true });
   maintenance = runtime.gc();
   await flushing.promise;
   const upload = uploads.uploadStream({ sessionId: f.ids.main });
   assert.throws(() => uploads.bindPrompt({ id: f.ids.main }, [], 'request'), /Session cleanup is in progress/);
   assert(dispose);
-  const unloading = dispose(); dispose = undefined;
+  const unloading = runtime.closeAdmission();
   await new Promise(setImmediate);
   assert.equal(uploadsCalled, 0);
   assert.equal(next.claim(), undefined, 'the importer stays excluded while GC drains during unload');
   await assert.rejects(runtime.gc(), /no longer active/);
   release.resolve();
-  await maintenance; await upload; await unloading;
+  await maintenance; await upload; await unloading; await dispose(); dispose = undefined;
   assert.equal(uploadsCalled, 1);
   assert.equal(next.claim, nativeClaim, 'provider method is restored after cleanup');
  } finally { release.resolve(); await maintenance; await dispose?.(); await f.cleanup(); }
@@ -100,12 +100,11 @@ for (const change of ['staged', 'session/event', 'transient-session', 'publicati
   const stagedFiles = new WeakMap<object, Map<string, { attachment: unknown }>>(), events: unknown[] = [], listeners = new Map<string, Set<(...args: never[]) => unknown>>();
   const emit = (name: string) => { for (const listener of listeners.get(name) || []) listener(); };
   const runtime = makeRuntime({
-   sessionDeletionGate: { home: f.home, healthy: () => true }, sessions: { list: () => [session] }, fileUploads: { stagedFiles },
+   dshHomePath: () => f.home, sessions: { list: () => [session] }, fileUploads: { stagedFiles },
    sessionQuery: { observeSession: async () => ({ header: session.header, events, [Symbol.dispose]() {} }) },
    attachments: { requestInflight: new Map() },
    on(name, listener) { const group = listeners.get(name) || new Set<(...args: never[]) => unknown>(); listeners.set(name, group); group.add(listener); return () => group.delete(listener); },
   });
-  await fs.mkdir(join(stateDir(f.home), 'hosts'), { recursive: true });
   let injected = false;
   fs.readdir = (async (...args: Parameters<typeof readdir>) => {
    const path = args[0];
@@ -134,12 +133,10 @@ for (const change of ['staged', 'session/event', 'transient-session', 'publicati
 void test('a GC that finishes during the last size read invalidates the estimate', async () => {
  const f = await fixture(), lstat = fs.lstat;
  try {
-  await fs.mkdir(join(stateDir(f.home), 'hosts'), { recursive: true });
   const runtime = makeRuntime({
-   sessionDeletionGate: { home: f.home, healthy: () => true }, sessions: { list: () => [] }, fileUploads: { stagedFiles: new WeakMap() },
+   dshHomePath: () => f.home, sessions: { list: () => [] }, fileUploads: { stagedFiles: new WeakMap() },
    attachments: { requestInflight: new Map() }, sessionPersistence: { async flush() {} },
   });
-  runtime.controller = {}; runtime.schedule = {} as RuntimeContext['schedule'];
   const cache = join(f.home, 'cache/attachments/request-images/ab/cache');
   let collected = false;
   fs.lstat = (async (path, options) => {
@@ -213,7 +210,7 @@ void test('a child created after HTTP validation requires renewed confirmation b
  try {
   let archived = false;
   const runtime = makeRuntime({
-   sessionDeletionGate: { home: f.home, healthy: () => true },
+   dshHomePath: () => f.home,
    workspaceRegistry: { archiveSession: async () => { archived = true; } },
   });
   runtime.headers = async () => new Map(Object.entries(f.headers));
@@ -230,7 +227,6 @@ void test('submissions queued behind GC do not make its global idle check fail',
   agents: { get: () => ({ id: session.id, session, status: 'idle', inbox: { nextTurn: [], nextStep: [] }, whenIdle: async () => {}, cancel() {} }) },
   waterfall: async () => [],
  });
- runtime.controller = {}; runtime.schedule = { catalog: async () => [], create: async () => {}, edit: async () => {} };
  let release!: () => void, published = false;
  const exclusive = runtime.barrier.exclusive(() => new Promise<void>(resolve => { release = resolve; }));
  const queued = runtime.operation(['other'], () => { published = true; });
@@ -244,12 +240,11 @@ for (const failure of ['receipt-read', 'receipt-cleanup']) void test(`deletion p
  const f = await fixture();
  const readFile = fs.readFile, rm = fs.rm;
  try {
-  await fs.mkdir(join(stateDir(f.home), 'hosts'), { recursive: true });
   // This case exercises real log removal and receipt I/O, without unrelated workspace services.
   await fs.rm(join(f.home, 'storages/workspace.json'));
   await fs.rm(join(f.home, 'storages/schedule.json'));
   const runtime = makeRuntime({
-   sessionDeletionGate: { home: f.home, healthy: () => true },
+   dshHomePath: () => f.home,
    workspaceRegistry: { archiveSession: async () => {}, archivedSessionIds: [f.ids.main] },
    agents: { get: () => undefined }, sessions: { get: () => undefined },
    sessionProjectionCache: { table: { delete: async () => {} } },

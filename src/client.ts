@@ -3,7 +3,9 @@ import type { Failure, LocalizedMessage, LocalizedProps } from './locale/shared.
 
 type ReactAPI = typeof import('react');
 type ElementNode = import('react').ReactNode;
+type ClientScope = PromiseLike<unknown> & { dispose(): Promise<void> };
 export interface DeletionClientContext extends LocaleClientContext {
+  plugin(apply: (ctx: DeletionClientContext) => Promise<void>): ClientScope;
   locale: LocaleClientContext['locale'] & {
     bind(namespace: string): LocalizedProps['t'];
     getSnapshot(): { active: string; revision: number };
@@ -29,14 +31,60 @@ export interface PendingDeletion { sessionId: string; queuedAt: string }
 interface GcResult { total: number }
 interface GcDialog { busy?: boolean; error?: Failure }
 export interface DeletionReceipt { revision: string; deletedIdHashes: string[] }
-interface DeletionStatus { gcRunning?: boolean; deletionRunning?: boolean; pending: PendingDeletion[]; locked: string[]; archived: string[]; guardHealthy: boolean; receipt: { revision: string; count: number } }
+interface DeletionStatus { gcRunning?: boolean; deletionRunning?: boolean; pending: PendingDeletion[]; locked: string[]; archived: string[]; ok: boolean; receipt: { revision: string; count: number } }
 export interface DeletionPreview { count: number; token: string; archived: boolean }
 interface DeletionDialog { id: string; title: string; preview?: DeletionPreview; busy?: boolean; error?: Failure }
 
-window.__ModuleLoader__.load({ id: 'dsh-session-deletion', factory(require) {
+async function api<T>(path: string, data?: object): Promise<T> {
+  const response = await fetch('/session-deletion/api/' + path, { credentials: 'same-origin', cache: 'no-store',
+    method: data ? 'POST' : 'GET', headers: data ? { 'Content-Type': 'application/json', 'X-DSH-Session-Deletion': '1' } : {},
+    ...(data ? { body: JSON.stringify(data) } : {}) });
+  if (!response.ok) throw new ApiError(await readFailure(response), response.status);
+  return await response.json() as T;
+}
+
+type Refresh = () => Promise<void>;
+
+window.__ModuleLoader__.load({ id: 'dsh-session-deletion', factory: require => ({
+  inject: ['slots', 'sessions', 'uiWorkspace', 'contextMenus', 'locale'],
+  async apply(ctx: DeletionClientContext) {
+    let scope: ClientScope | undefined;
+    let refresh: Refresh | undefined;
+    let active = true, polling = false;
+    // rc.5 can retain this browser bundle while its host entry is disabled.
+    async function poll(): Promise<void> {
+      if (!active || polling) return;
+      polling = true;
+      try {
+        if (refresh) { await refresh(); return; }
+        const status = await api<DeletionStatus>('status');
+        if (!active || !status.ok || ctx.fiber.uid === null) return;
+        scope = ctx.plugin(async child => {
+          refresh = await mountClient(child, require, poll, status);
+        });
+        await scope;
+      } catch (error) {
+        if (!refresh || (error instanceof ApiError && error.status === 404)) {
+          refresh = undefined;
+          await scope?.dispose();
+          scope = undefined;
+        }
+      } finally { polling = false; }
+    }
+    ctx.effect(() => {
+      const timer = setInterval(() => { void poll(); }, 1000);
+      return () => { active = false; clearInterval(timer); };
+    }, 'session-deletion status');
+    await poll();
+  },
+}) });
+
+async function mountClient(ctx: DeletionClientContext, require: (name: string) => unknown, poll: () => Promise<void>, initial: DeletionStatus): Promise<Refresh | undefined> {
+  const namespace = 'session-deletion';
+  await registerClientLocale(ctx, namespace);
+  if (ctx.fiber.uid === null) return;
   const React = require('react') as ReactAPI;
   const h = React.createElement;
-  const namespace = 'session-deletion';
   function errorContent(error: Failure, t: LocalizedProps['t']): ElementNode {
     return h('span', { role: 'alert', style: { display: 'block', color: 'var(--dsw-alias-state-error-primary)',
       marginTop: 8, fontSize: 12, overflowWrap: 'anywhere' } }, renderFailure(React, t, error));
@@ -54,21 +102,20 @@ window.__ModuleLoader__.load({ id: 'dsh-session-deletion', factory(require) {
   const listeners = new Set<() => void>();
   let dialog: DeletionDialog | undefined;
   let gcDialog: GcDialog | undefined;
-  let status: DeletionStatus = { pending: [], locked: [], archived: [], guardHealthy: false, receipt: { revision: '', count: 0 } };
+  let status = initial;
   let receipt: DeletionReceipt | undefined;
   let toast: { id: number; message: LocalizedMessage } | undefined;
   let toastId = 0;
-  let context: DeletionClientContext | undefined;
+  let active = true;
   let submitting = false;
-  let refreshing = false;
   let lastMainId: string | undefined;
   const inputStates = new Map<HTMLElement, { inert: boolean; aria: string | null }>();
   function affected(): boolean {
+    if (!active) return false;
     if (gcDialog?.busy || status.gcRunning) return true;
     if (submitting && dialog?.id === lastMainId) return true;
-    if (!context) return false;
     if (lastMainId && status.locked.includes(lastMainId)) return true;
-    const rows = Object.values(context.sessions.list.getSnapshot().byId);
+    const rows = Object.values(ctx.sessions.list.getSnapshot().byId);
     return rows.some(row => status.locked.includes(row.id) && Object.values(row.retainedBy).some(n => n > 0));
   }
   function protectInputs(): void {
@@ -91,13 +138,6 @@ window.__ModuleLoader__.load({ id: 'dsh-session-deletion', factory(require) {
   const publish = () => { snapshot = { dialog, status, gcDialog, toast }; for (const listener of listeners) listener(); protectInputs(); };
   const stateSource = { getSnapshot: () => snapshot, subscribe: (callback: () => void) => { listeners.add(callback); return () => { listeners.delete(callback); }; } };
   const useSnapshot = () => React.useSyncExternalStore(stateSource.subscribe, stateSource.getSnapshot);
-  async function api<T>(path: string, data?: object): Promise<T> {
-    const response = await fetch('/session-deletion/api/' + path, { credentials: 'same-origin', cache: 'no-store',
-      method: data ? 'POST' : 'GET', headers: data ? { 'Content-Type': 'application/json', 'X-DSH-Session-Deletion': '1' } : {},
-      ...(data ? { body: JSON.stringify(data) } : {}) });
-    if (!response.ok) throw new ApiError(await readFailure(response));
-    return await response.json() as T;
-  }
   async function hash(value: string): Promise<string> {
     const bytes = await crypto.subtle.digest('SHA-256', new TextEncoder().encode(value));
     return [...new Uint8Array(bytes)].map(v => v.toString(16).padStart(2, '0')).join('');
@@ -143,35 +183,39 @@ window.__ModuleLoader__.load({ id: 'dsh-session-deletion', factory(require) {
       }
     }
   }
-  async function refresh(): Promise<void> {
-    if (refreshing) return;
+  async function refresh(initial?: DeletionStatus): Promise<void> {
+    if (!active) return;
     const own = generation, wasSubmitting = submitting;
-    refreshing = true;
+    // Replacing the existing preview revokes a delete request whose body has
+    // not arrived yet. An idle status alone cannot prove that request ended.
+    const failed = dialog?.error && !submitting && !dialog.preview ? dialog : undefined;
+    if (failed) {
+      try {
+        const preview = await api<DeletionPreview>('preview', { sessionId: failed.id });
+        if (own === generation && dialog === failed) dialog = { ...failed, preview };
+      } catch { /* A lost replacement response still leaves the request uncertain. */ }
+    }
+    try { status = initial ?? await api<DeletionStatus>('status'); }
+    catch (error) {
+      if (status.ok) { status = { ...status, ok: false }; publish(); }
+      throw error;
+    }
+    if (!active) return;
+    if (own === generation && !wasSubmitting && !submitting && dialog?.error && dialog.preview && status.deletionRunning === false
+      && !status.locked.includes(dialog.id) && !status.pending.some(item => item.sessionId === dialog!.id)) dialog = { ...dialog, busy: false };
+    publish();
     try {
-      // Replacing the existing preview revokes a delete request whose body has
-      // not arrived yet. An idle status alone cannot prove that request ended.
-      const failed = dialog?.error && !submitting && !dialog.preview ? dialog : undefined;
-      if (failed) {
-        try {
-          const preview = await api<DeletionPreview>('preview', { sessionId: failed.id });
-          if (own === generation && dialog === failed) dialog = { ...failed, preview };
-        } catch { /* A lost replacement response still leaves the request uncertain. */ }
-      }
-      status = await api<DeletionStatus>('status');
-      if (own === generation && !wasSubmitting && !submitting && dialog?.error && dialog.preview && status.deletionRunning === false
-        && !status.locked.includes(dialog.id) && !status.pending.some(item => item.sessionId === dialog!.id)) dialog = { ...dialog, busy: false };
-      publish();
       if (!receipt || receipt.revision !== status.receipt.revision) receipt = await api<DeletionReceipt>('receipt');
+      if (!active) return;
       // Keep applying cached tombstones: an old tab may write a deleted session's state back later.
       await cleanBrowserState(receipt.deletedIdHashes);
       const current = dialog;
       if (current?.error && !submitting && receipt.deletedIdHashes.includes(await hash(current.id))
         && dialog === current && !submitting) completeDeletion(current.title);
-      if (lastMainId && receipt.deletedIdHashes.includes(await hash(lastMainId))) {
-        lastMainId = undefined; context?.uiWorkspace.startSession();
+      if (lastMainId && receipt.deletedIdHashes.includes(await hash(lastMainId)) && active) {
+        lastMainId = undefined; ctx.uiWorkspace.startSession();
       }
     } catch { /* A disconnected host is expected during shutdown. */ }
-    finally { refreshing = false; }
   }
   async function open(id: string, title: string): Promise<void> {
     const own = ++generation;
@@ -195,9 +239,9 @@ window.__ModuleLoader__.load({ id: 'dsh-session-deletion', factory(require) {
     try {
       await api('delete', { sessionId: current.id, token: current.preview!.token, confirmation: 'DELETE_SESSION' });
       submitting = false;
-      completeDeletion(current.title); await refresh();
+      completeDeletion(current.title); await poll();
     } catch (e) { submitting = false; dialog = { ...current, preview: undefined, busy: true, error: asFailure(e) }; publish(); }
-    finally { await refresh(); protectInputs(); }
+    finally { await poll(); protectInputs(); }
   }
   function useDisabledClose(selector: string, open: boolean, busy: boolean): void {
     React.useLayoutEffect(() => {
@@ -226,7 +270,7 @@ window.__ModuleLoader__.load({ id: 'dsh-session-deletion', factory(require) {
       ? h('span', { role: 'status', 'aria-label': t('gc.calculating'), style: { display: 'inline-flex', verticalAlign: 'middle' } }, h(ui.StateDot, { state: 'ongoing', size: 12 }))
       : bytes === null ? t('gc.sizeUnavailable') : formatBytes(bytes);
     const [before, after] = t('gc.menu', { size: '{size}' }).split('{size}');
-    return h(ui.MenuItemButton, { disabled: !state.status.guardHealthy || !!state.status.gcRunning, separatorBefore: true,
+    return h(ui.MenuItemButton, { disabled: !state.status.ok || !!state.status.gcRunning, separatorBefore: true,
       // Phosphor Broom (MIT): its 16-unit outline renders at DSH's regular 1px weight at 16px.
       icon: h('svg', { width: 16, height: 16, viewBox: '0 0 256 256', fill: 'currentColor', 'aria-hidden': true, focusable: false },
         h('path', { d: 'M235.5 216.81c-22.56-11-35.5-34.58-35.5-64.8v-17.28a15.94 15.94 0 0 0-10.09-14.87L165 110a8 8 0 0 1-4.48-10.34l21.32-53a28 28 0 0 0-16.1-37a28.14 28.14 0 0 0-35.82 16a.6.6 0 0 0 0 .12L108.9 79a8 8 0 0 1-10.37 4.49L73.11 73.14a15.89 15.89 0 0 0-17.37 3.66C34.68 98.45 24 123.75 24 152a111.45 111.45 0 0 0 31.18 77.53A8 8 0 0 0 61 232h171a8 8 0 0 0 3.5-15.19M67.14 88l25.41 10.3a24 24 0 0 0 31.23-13.45l21-53c2.56-6.11 9.47-9.27 15.43-7a12 12 0 0 1 6.88 15.92l-21.4 52.99a24 24 0 0 0 13.43 31.14l24.88 9.83V153L55.77 101.71A109 109 0 0 1 67.14 88m48 128a87.53 87.53 0 0 1-24.34-42a8 8 0 0 0-15.49 4a105.2 105.2 0 0 0 18.36 38H64.44A95.54 95.54 0 0 1 40 152a85.9 85.9 0 0 1 7.73-36.29l137.8 55.12c3 18 10.56 33.48 21.89 45.16Z' })),
@@ -241,7 +285,7 @@ window.__ModuleLoader__.load({ id: 'dsh-session-deletion', factory(require) {
       toast = { id: ++toastId, message: { key: 'gc.success', params: { count: result.total } } };
     }
     catch (error) { gcDialog = { error: asFailure(error) }; }
-    finally { publish(); await refresh(); }
+    finally { publish(); await poll(); }
   }
   function GcOverlay({ t }: LocalizedProps): ElementNode {
     const state = useSnapshot(); const d = state.gcDialog;
@@ -301,38 +345,33 @@ window.__ModuleLoader__.load({ id: 'dsh-session-deletion', factory(require) {
           h(ui.Button, { variant: 'outline', className: 'dsh-session-deletion-danger', onClick: () => { void confirm(); }, disabled: busy || !d.preview }, t(submitting ? 'delete.submitting' : 'delete.confirm'))),
       }));
   }
-  return { inject: ['slots', 'sessions', 'uiWorkspace', 'contextMenus', 'locale'], async apply(ctx: DeletionClientContext) {
-    await registerClientLocale(ctx, namespace);
-    if (ctx.fiber.uid === null) return;
-    const t = ctx.locale.bind(namespace);
-    context = ctx;
-    ctx.effect(() => ctx.contextMenus.register({ id: 'session-deletion.action', target: 'session', order: 10000,
-      observe: () => [stateSource, ctx.sessions.list, ctx.locale],
-      resolve({ sessionId, displayTitle }) {
-        const disabled = status.locked.includes(sessionId) || !status.guardHealthy || !globalThis.crypto?.subtle || !!status.gcRunning;
-        return [{ id: 'delete', label: t('delete.menu'), disabled, danger: true, separatorBefore: true,
-          afterContent: true, icon: { key: 'workspace.delete' }, run: () => { void open(sessionId, displayTitle); } }];
-      } }), 'session-deletion menu');
-    ctx.slots.inject('sidebar.panellist.actions', () => ctx.slots.register({ name: 'sidebar.panellist.actions', id: 'session-deletion.gc', order: 10000, locale: namespace }, GcMenuItem));
-    ctx.slots.inject('shell.overlay', () => ctx.slots.register({ name: 'shell.overlay', id: 'session-deletion.gc-dialog', order: 560, locale: namespace }, GcOverlay));
-    ctx.slots.inject('shell.overlay', () => ctx.slots.register({ name: 'shell.overlay', id: 'session-deletion.dialog', order: 550, locale: namespace }, Overlay));
-    ctx.effect(() => {
-      const watchSelection = () => {
-        const current = Object.values(ctx.sessions.list.getSnapshot().byId).find(row => (row.retainedBy.mainView || 0) > 0);
-        if (current) lastMainId = current.id;
-        publish();
-      };
-      const unsubscribe = ctx.sessions.list.subscribe(watchSelection); watchSelection();
-      const observer = new MutationObserver(protectInputs); observer.observe(document.body, { childList: true, subtree: true });
-      const prevent = (event: Event) => {
-        if (affected() && !(event.target instanceof Element && event.target.closest(pluginUiSelector))) { event.preventDefault(); event.stopImmediatePropagation(); }
-      };
-      const events = ['click', 'submit', 'keydown', 'beforeinput', 'paste', 'drop'];
-      for (const event of events) window.addEventListener(event, prevent, true);
-      const style = document.createElement('style'); style.textContent = '.dsh-deletion-input-locked{opacity:.45!important;pointer-events:none!important}.dsh-session-deletion-danger:not(:disabled){color:var(--dsw-alias-state-error-primary)}.dsh-session-deletion-confirmation .dsh-session-deletion-danger:hover:not(:disabled){background:var(--dsw-alias-interactive-bg-hover-danger)}.dsh-session-deletion-modal button[aria-label]:disabled{opacity:.4;pointer-events:none}'; document.head.append(style);
-      void refresh();
-      const timer = setInterval(() => { void refresh(); }, 1000);
-      return () => { clearInterval(timer); unsubscribe(); observer.disconnect(); for (const event of events) window.removeEventListener(event, prevent, true); submitting = false; gcDialog = undefined; toast = undefined; receipt = undefined; status.gcRunning = false; status.locked = []; protectInputs(); style.remove(); listeners.clear(); };
-    }, 'session-deletion status');
-  } };
-} });
+  const t = ctx.locale.bind(namespace);
+  ctx.effect(() => ctx.contextMenus.register({ id: 'session-deletion.action', target: 'session', order: 10000,
+    observe: () => [stateSource, ctx.sessions.list, ctx.locale],
+    resolve({ sessionId, displayTitle }) {
+      const disabled = status.locked.includes(sessionId) || !status.ok || !globalThis.crypto?.subtle || !!status.gcRunning;
+      return [{ id: 'delete', label: t('delete.menu'), disabled, danger: true, separatorBefore: true,
+        afterContent: true, icon: { key: 'workspace.delete' }, run: () => { void open(sessionId, displayTitle); } }];
+    } }), 'session-deletion menu');
+  ctx.slots.inject('sidebar.panellist.actions', () => ctx.slots.register({ name: 'sidebar.panellist.actions', id: 'session-deletion.gc', order: 10000, locale: namespace }, GcMenuItem));
+  ctx.slots.inject('shell.overlay', () => ctx.slots.register({ name: 'shell.overlay', id: 'session-deletion.gc-dialog', order: 560, locale: namespace }, GcOverlay));
+  ctx.slots.inject('shell.overlay', () => ctx.slots.register({ name: 'shell.overlay', id: 'session-deletion.dialog', order: 550, locale: namespace }, Overlay));
+  ctx.effect(() => {
+    const watchSelection = () => {
+      const current = Object.values(ctx.sessions.list.getSnapshot().byId).find(row => (row.retainedBy.mainView || 0) > 0);
+      if (current) lastMainId = current.id;
+      publish();
+    };
+    const unsubscribe = ctx.sessions.list.subscribe(watchSelection); watchSelection();
+    const observer = new MutationObserver(protectInputs); observer.observe(document.body, { childList: true, subtree: true });
+    const prevent = (event: Event) => {
+      if (affected() && !(event.target instanceof Element && event.target.closest(pluginUiSelector))) { event.preventDefault(); event.stopImmediatePropagation(); }
+    };
+    const events = ['click', 'submit', 'keydown', 'beforeinput', 'paste', 'drop'];
+    for (const event of events) window.addEventListener(event, prevent, true);
+    const style = document.createElement('style'); style.textContent = '.dsh-deletion-input-locked{opacity:.45!important;pointer-events:none!important}.dsh-session-deletion-danger:not(:disabled){color:var(--dsw-alias-state-error-primary)}.dsh-session-deletion-confirmation .dsh-session-deletion-danger:hover:not(:disabled){background:var(--dsw-alias-interactive-bg-hover-danger)}.dsh-session-deletion-modal button[aria-label]:disabled{opacity:.4;pointer-events:none}'; document.head.append(style);
+    return () => { active = false; unsubscribe(); observer.disconnect(); for (const event of events) window.removeEventListener(event, prevent, true); protectInputs(); style.remove(); listeners.clear(); };
+  }, 'session-deletion input protection');
+  await refresh(initial);
+  return refresh;
+}

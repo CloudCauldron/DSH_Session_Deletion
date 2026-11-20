@@ -9,6 +9,11 @@ import type { LocalizedProps } from '../src/locale/shared.js';
 
 type ClientFixture = Partial<Omit<DeletionClientContext, 'slots'>> & { slots: Partial<DeletionClientContext['slots']> };
 interface ClientPlugin { apply(ctx: ClientFixture): Promise<void> }
+function applyClient(plugin: ClientPlugin, ctx: ClientFixture) {
+  return plugin.apply({ ...ctx, plugin(apply) {
+    return Object.assign(apply(ctx as DeletionClientContext), { dispose: async () => {} });
+  } });
+}
 interface ClientModule { factory(require: (name: string) => unknown): ClientPlugin }
 type MenuContribution = Parameters<DeletionClientContext['contextMenus']['register']>[0];
 type MockNode = MockElement | string | number | boolean | null | undefined | MockNode[];
@@ -112,12 +117,12 @@ async function refreshClient(localStorage: ReturnType<typeof browserStorage>, se
         if (failReceipt) { failReceipt = false; return Response.json({ error: 'retry' }, { status: 503 }); }
         return { ok: true, json: async () => receipt };
       }
-      return { ok: true, json: async () => ({ pending: [], locked: [], archived: [], guardHealthy: true,
+      return { ok: true, json: async () => ({ pending: [], locked: [], archived: [], ok: true,
         receipt: { revision: receipt.revision, count: receipt.deletedIdHashes.length } }) };
     },
   };
   vm.runInNewContext(await readFile(new URL('../lib/client.js', import.meta.url), 'utf8'), sandbox);
-  await plugin.apply({
+  await applyClient(plugin,{
     locale: localeFixture(), fiber: { uid: 1 },
     slots: { inject() {} },
     contextMenus: { register() { return () => {}; } },
@@ -209,7 +214,7 @@ void test('deletion copy and API errors follow locale changes, use English for m
   const locale = localeFixture();
   const zh = { ...dictionaries.zh };
   delete zh['delete.confirm'];
-  const translated = { zh, fr: { 'session.unnamed': 'Sans titre' }, en: { ...dictionaries.en, 'delete.checking': '[en] checking', 'delete.menu': '[en] delete', 'error.guardUnavailable': '[en] guard unavailable' } };
+  const translated = { zh, fr: { 'session.unnamed': 'Sans titre' }, en: { ...dictionaries.en, 'delete.checking': '[en] checking', 'delete.menu': '[en] delete', 'error.runtimeUnavailable': '[en] runtime unavailable' } };
   const preview = new Promise<DeletionPreview>(resolve => { resolvePreview = resolve; });
   const ui = { Modal: 'NativeModal', MenuItemButton: 'NativeMenu', Button: 'NativeButton', IconTrashOutlineRegular: 'NativeIcon' };
   const react = {
@@ -229,7 +234,7 @@ void test('deletion copy and API errors follow locale changes, use English for m
       if (url.endsWith('/preview') && previewThrown) throw 0;
       if (url.endsWith('/preview')) {
         if (missingPreview) return Response.json({ error: 'Session missing' }, { status: 404 });
-        if (previewFailed) return Response.json({ error: 'Host fallback', messages: [{ key: 'error.guardUnavailable' }], diagnostic: 'system detail\n<&>' }, { status: 409 });
+        if (previewFailed) return Response.json({ error: 'Host fallback', messages: [{ key: 'error.runtimeUnavailable' }], diagnostic: 'system detail\n<&>' }, { status: 409 });
         const token = issuedToken = 'fixture-' + ++nextToken;
         if (losePreview) throw new Error('Replacement response lost');
         return { ok: true, json: async () => ({ ...await preview, token }) };
@@ -252,11 +257,11 @@ void test('deletion copy and API errors follow locale changes, use English for m
       if (url.endsWith('/status') && statusFailed) throw new Error('Disconnected');
       return { ok: true, json: async () => url.endsWith('/receipt')
         ? { revision: completed ? 'deleted' : 'empty', deletedIdHashes: completed ? [createHash('sha256').update(id).digest('hex')] : [] }
-        : { pending, deletionRunning, locked: deletionRunning ? [id] : [], archived: [], guardHealthy: true, receipt: { revision: completed ? 'deleted' : 'empty', count: completed ? 1 : 0 } } };
+        : { pending, deletionRunning, locked: deletionRunning ? [id] : [], archived: [], ok: true, receipt: { revision: completed ? 'deleted' : 'empty', count: completed ? 1 : 0 } } };
     },
   };
   vm.runInNewContext(await readFile(new URL('../lib/client.js', import.meta.url), 'utf8'), sandbox);
-  await plugin.apply({
+  await applyClient(plugin,{
     locale, fiber: { uid: 1 },
     slots: { inject(_, callback) { callback(); }, register(options, component) {
       assert.equal(options.locale, 'session-deletion');
@@ -291,7 +296,7 @@ void test('deletion copy and API errors follow locale changes, use English for m
     rows[id].running = false; previewFailed = true;
     menu.resolve({ sessionId: id, displayTitle: 'Test' })[0].run();
     await new Promise(setImmediate);
-    assert.ok(render().includes('[en] guard unavailable'));
+    assert.ok(render().includes('[en] runtime unavailable'));
     function checkDiagnostic(lead: string, raw: string) {
       const dialog = element(render().find(node => isElement(node) && node.type === ui.Modal));
       assert.equal(dialog.props.children, undefined);
@@ -303,9 +308,9 @@ void test('deletion copy and API errors follow locale changes, use English for m
       const style = block.props.style as React.CSSProperties;
       assert.deepEqual([style.display, style.marginTop, style.whiteSpace], ['block', 4, 'pre-wrap']);
     }
-    checkDiagnostic('[en] guard unavailable', 'system detail\n<&>');
+    checkDiagnostic('[en] runtime unavailable', 'system detail\n<&>');
     locale.setLocale('zh');
-    assert.ok(render().includes('恢复监测不可用，请重启 DSH。'));
+    assert.ok(render().includes('会话删除插件已停用。请在启用后重新打开菜单。'));
     previewThrown = true;
     menu.resolve({ sessionId: id, displayTitle: 'Test' })[0].run();
     await new Promise(setImmediate);
@@ -371,12 +376,14 @@ void test('GC menu shows a native spinner, formats binary units and reports fail
     window: { __ModuleLoader__: { load(definition: ClientModule) { plugin = definition.factory(name => name === 'react' ? react : ui); } } },
     fetch: async (url: string) => {
       if (url === 'api/session-deletion/locales') return { ok: true, json: async () => ({ ok: true, dictionaries }) };
+      if (url.endsWith('/status')) return Response.json({ ok: true, pending: [], locked: [], archived: [], receipt: { revision: '', count: 0 } });
+      if (url.endsWith('/receipt')) return Response.json({ revision: '', deletedIdHashes: [] });
       assert.equal(url, '/session-deletion/api/gc-size'); requests++;
       if (fail === 'network') throw new Error('Disconnected');
       return fail ? Response.json({ error: 'Cannot scan' }, { status: 500 }) : { ok: true, json: async () => ({ bytes: response }) };
     },
   });
-  await plugin.apply({
+  await applyClient(plugin,{
     locale, fiber: { uid: 1 },
     slots: { inject(_, callback) { callback(); }, register(options, component) { if (options.id === 'session-deletion.gc') {
       assert.equal(options.locale, 'session-deletion'); menu = component as typeof menu;

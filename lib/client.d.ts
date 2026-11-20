@@ -1,6 +1,10 @@
 import { type LocaleClientContext } from './locale/client.js';
 import type { LocalizedProps } from './locale/shared.js';
+type ClientScope = PromiseLike<unknown> & {
+    dispose(): Promise<void>;
+};
 export interface DeletionClientContext extends LocaleClientContext {
+    plugin(apply: (ctx: DeletionClientContext) => Promise<void>): ClientScope;
     locale: LocaleClientContext['locale'] & {
         bind(namespace: string): LocalizedProps['t'];
         getSnapshot(): {
@@ -84,3 +88,4 @@ export interface DeletionPreview {
     token: string;
     archived: boolean;
 }
+export {};

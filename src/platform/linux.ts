@@ -48,11 +48,11 @@ export async function birth(pid: number): Promise<string | undefined> {
     return fields[0] === 'Z' ? undefined : fields[19];
   } catch (e) { if (['ENOENT', 'ESRCH'].includes((e as NodeJS.ErrnoException).code || '')) return; throw e; }
 }
-export async function processes(excluded: Set<number>, executables: readonly string[], matches: (args: readonly string[], cwd: string) => boolean): Promise<ProcessInfo[]> {
+export async function processes(excludePid: number | undefined, executables: readonly string[], matches: (args: readonly string[], cwd: string) => boolean): Promise<ProcessInfo[]> {
   const found: ProcessInfo[] = [];
   for (const pidText of await fs.readdir('/proc')) {
     const pid = Number(pidText);
-    if (!/^\d+$/.test(pidText) || excluded.has(pid)) continue;
+    if (!/^\d+$/.test(pidText) || pid === excludePid) continue;
     try {
       const p = '/proc/' + pidText;
       if ((await fs.stat(p)).uid !== process.getuid!() || !(await birth(pid))) continue;

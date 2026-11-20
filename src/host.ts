@@ -1,10 +1,9 @@
 import type { IncomingMessage, ServerResponse } from 'node:http';
 import type { WebServer } from '@deepseek-ai/dsh-host-webserver';
-import { join, resolve } from 'node:path';
+import { join } from 'node:path';
 import { randomBytes, timingSafeEqual } from 'node:crypto';
-import { familyOf, listRequests, readJSON, stateDir } from './core.js';
+import { SUPPORTED_DSH, familyOf, listRequests, readJSON, stateDir } from './core.js';
 import { DeletionRefused, type DeletionRuntime } from './runtime.js';
-import type { Gate } from './gate.js';
 import type { HostConnectionFetch } from '@deepseek-ai/dsh-client-connection';
 import { registerCatalogs } from './locale/catalogs.js';
 import { describeFailure, LocalizedError } from './locale/errors.js';
@@ -12,16 +11,12 @@ import type { LocalizedMessage } from './locale/shared.js';
 
 export interface HostContext {
   effect(register: () => () => void, label: string): unknown;
-  sessionDeletionGate: Gate; sessionDeletionRuntime: DeletionRuntime;
-  sessionPersistence: { name: string; root: string };
   connection: {
     fetch: HostConnectionFetch;
     admit(request: IncomingMessage): { rejection: number } | { peer: { principal: { kind: string } } };
   };
   webServer: Pick<WebServer, 'register'>;
 }
-export const name = 'session-deletion';
-export const inject = ['sessionDeletionGate', 'sessionDeletionRuntime', 'webServer', 'connection', 'sessionPersistence', 'sessionController', 'schedule'];
 class HttpError extends LocalizedError { constructor(public status: number, key: string, params?: LocalizedMessage['params']) { super(key, params); } }
 function send(res: ServerResponse, status: number, value: unknown): void {
   res.writeHead(status, { 'Content-Type': 'application/json; charset=utf-8', 'Cache-Control': 'no-store', 'X-Content-Type-Options': 'nosniff' });
@@ -40,12 +35,9 @@ async function body(req: IncomingMessage): Promise<Record<string, unknown>> {
   if (!data || typeof data !== 'object' || Array.isArray(data)) throw new HttpError(400, 'error.expectedJsonObject');
   return data as Record<string, unknown>;
 }
-export async function apply(ctx: HostContext): Promise<void> {
-  const gate = ctx.sessionDeletionGate; const runtime = ctx.sessionDeletionRuntime;
-  if (ctx.sessionPersistence.name !== 'session-persistence-jsonl' || resolve(ctx.sessionPersistence.root) !== join(gate.home, 'sessions')) {
-    throw new LocalizedError('error.defaultSessionRoot');
-  }
-  registerCatalogs(ctx.connection.fetch, name);
+export function registerRoutes(ctx: HostContext, runtime: DeletionRuntime): void {
+  const home = runtime.home;
+  registerCatalogs(ctx.connection.fetch, 'session-deletion');
   const previews = new Map<string, { token: string; expires: number; createdAt: number; ids: string[] }>();
   ctx.effect(() => ctx.webServer.register({ kind: 'prefix', path: '/session-deletion/api', async handler(req, res) {
     try {
@@ -54,12 +46,12 @@ export async function apply(ctx: HostContext): Promise<void> {
       if (admission.peer.principal.kind !== 'owner') throw new HttpError(403, 'error.ownerRequired');
       const path = new URL(req.url || '/', 'http://localhost').pathname;
       if (req.method === 'GET' && path === '/session-deletion/api/status') {
-        send(res, 200, { ok: true, mode: 'private-delete-and-gc', version: gate.version, guardHealthy: gate.healthy(), gcRunning: runtime.gcRunning, deletionRunning: runtime.deletionRunning,
+        send(res, 200, { ok: true, mode: 'private-delete-and-gc', version: SUPPORTED_DSH, gcRunning: runtime.gcRunning, deletionRunning: runtime.deletionRunning,
           archived: runtime.archivedIds, locked: [...runtime.locked],
-          pending: (await listRequests(gate.home)).map(r => ({ sessionId: r.sessionId, queuedAt: r.queuedAt })),
+          pending: (await listRequests(home)).map(r => ({ sessionId: r.sessionId, queuedAt: r.queuedAt })),
           receipt: runtime.receiptSummary,
-          gc: await readJSON<unknown>(join(stateDir(gate.home), 'gc.json'), null),
-          cleanup: await readJSON<unknown>(join(stateDir(gate.home), 'status.json'), null) }); return;
+          gc: await readJSON<unknown>(join(stateDir(home), 'gc.json'), null),
+          cleanup: await readJSON<unknown>(join(stateDir(home), 'status.json'), null) }); return;
       }
       if (req.method === 'GET' && path === '/session-deletion/api/receipt') {
         send(res, 200, { ok: true, ...runtime.receipt }); return;
@@ -75,7 +67,6 @@ export async function apply(ctx: HostContext): Promise<void> {
       }
       if (typeof data.sessionId !== 'string' || !data.sessionId || data.sessionId.length > 1024) throw new HttpError(400, 'error.invalidSessionId');
       const id = data.sessionId;
-      if (!gate.healthy()) throw new HttpError(503, 'error.guardUnavailable');
       if (path === '/session-deletion/api/delete') {
         if (data.confirmation !== 'DELETE_SESSION') throw new HttpError(400, 'error.confirmDeletion');
         const preview = previews.get(id); const token = typeof data.token === 'string' ? data.token : '';

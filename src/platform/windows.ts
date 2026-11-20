@@ -157,7 +157,7 @@ function parameters(handle: number | bigint, matches: (args: readonly string[], 
   });
   return { cwd, env };
 }
-export async function processes(excluded: Set<number>, executables: readonly string[], matches: (args: readonly string[], cwd: string) => boolean): Promise<ProcessInfo[]> {
+export async function processes(excludePid: number | undefined, executables: readonly string[], matches: (args: readonly string[], cwd: string) => boolean): Promise<ProcessInfo[]> {
   const found: ProcessInfo[] = [];
   const list = snapshot(2 /* TH32CS_SNAPPROCESS */, 0);
   if (list === -1 || list === -1n) check(false, 'CreateToolhelp32Snapshot');
@@ -165,7 +165,7 @@ export async function processes(excluded: Set<number>, executables: readonly str
     const entry = Buffer.alloc(koffi.sizeof(entryType)); entry.writeUInt32LE(entry.length);
     for (let ok = first(list, entry); ok; ok = next(list, entry)) {
       const row = koffi.decode(entry, entryType);
-      if (excluded.has(row.pid) || !executables.includes(row.exe.replace(/\.exe$/i, '').toLowerCase())) continue;
+      if (row.pid === excludePid || !executables.includes(row.exe.replace(/\.exe$/i, '').toLowerCase())) continue;
       const handle = openProcess(0x101410 /* QUERY_INFORMATION | QUERY_LIMITED_INFORMATION | VM_READ | SYNCHRONIZE */, 0, row.pid);
       if (!handle && lastError() === 87) continue;
       check(handle, 'OpenProcess');

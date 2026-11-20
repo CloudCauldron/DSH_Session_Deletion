@@ -1,16 +1,12 @@
-interface InternalPlugin<C> {
-    name: string;
-    inject?: string[];
-    apply(ctx: C): Promise<void>;
-}
-interface Fiber {
-    uid: number | null;
-}
-export interface PluginContext {
-    fiber: Fiber;
-    plugin<C>(plugin: InternalPlugin<C>): unknown;
-    on(name: 'internal/plugin', listener: (fiber: Fiber) => void): () => void;
+import { type RuntimeContext } from './runtime.js';
+import { type HostContext } from './host.js';
+interface PluginContext {
+    plugin(apply: (ctx: RuntimeContext & HostContext) => Promise<void>): PromiseLike<unknown> & {
+        dispose(): Promise<void>;
+    };
+    effect(register: () => Iterable<() => void | Promise<void>>, label: string): unknown;
 }
 export declare const name = "session-deletion";
+export declare const inject: string[];
 export declare function apply(ctx: PluginContext): Promise<void>;
 export {};

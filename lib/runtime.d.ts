@@ -1,5 +1,4 @@
 import { type UploadIndex, type LiveSnapshot, type SessionHeader, type GcResult, type ScheduleTask } from './core.js';
-import { type Gate } from './gate.js';
 import { LocalizedError } from './locale/errors.js';
 import { type LocalizedMessage } from './locale/shared.js';
 interface Session {
@@ -70,7 +69,10 @@ interface Jobs {
     };
 }
 export interface RuntimeContext {
-    sessionDeletionGate: Gate;
+    dshHomePath(): string;
+    fiber: {
+        uid: number | null;
+    };
     attachments: {
         root: string;
         cacheRoot: string;
@@ -84,6 +86,7 @@ export interface RuntimeContext {
         }>>;
     };
     agents: {
+        list(): Agent[];
         get(id: string): Agent | undefined;
         requireFactory(): {
             target: object;
@@ -98,6 +101,8 @@ export interface RuntimeContext {
         get(id: string): Session | undefined;
     };
     sessionPersistence: {
+        name: string;
+        root: string;
         stat(id: string): Promise<{
             sizeBytes: number;
         } | undefined>;
@@ -212,8 +217,7 @@ export declare class DeletionRuntime {
     private restorers;
     private agentRestorers;
     private wrapped;
-    private controller?;
-    private schedule?;
+    private schedule;
     private terminals?;
     private subagentBinding?;
     private stopping?;
@@ -224,8 +228,8 @@ export declare class DeletionRuntime {
     private disposed;
     get gcRunning(): boolean;
     get deletionRunning(): boolean;
+    readonly home: string;
     constructor(ctx: RuntimeContext, unwrap: <T extends object>(value: T) => T, UploadIndex: new (path: string) => UploadIndex);
-    get home(): string;
     get receiptSummary(): {
         revision: string;
         count: number;
@@ -242,6 +246,7 @@ export declare class DeletionRuntime {
     private captureFactory;
     private installReceipt;
     private loadReceipt;
+    closeAdmission(): Promise<void> | undefined;
     initialize(): Promise<void>;
     headers(): Promise<Map<string, SessionHeader>>;
     /** The public stop APIs do not expose cold-resumed or external Activation cleanup. */
@@ -265,7 +270,5 @@ export declare class DeletionRuntime {
     gc(): Promise<GcResult>;
     private removeOne;
 }
-export declare const name = "session-deletion-runtime";
-export declare const inject: string[];
-export declare function apply(ctx: RuntimeContext): Promise<void>;
+export declare function createRuntime(ctx: RuntimeContext): Promise<DeletionRuntime>;
 export {};

@@ -2,13 +2,14 @@
  * set of guarded internal cache hooks closes the missing deletion seam. */
 import { AsyncLocalStorage } from 'node:async_hooks';
 import { pathToFileURL } from 'node:url';
-import { join, relative } from 'node:path';
+import { createRequire } from 'node:module';
+import { realpath } from 'node:fs/promises';
+import { join, relative, resolve } from 'node:path';
 import { setTimeout as delay } from 'node:timers/promises';
-import { digest, enqueue, familyOf, listRequests, readJSON, readSchedule, stateDir, sweep, planSessionDeletion, collectGarbage, garbageSize, scheduledSession,
+import { SUPPORTED_DSH, digest, enqueue, familyOf, listRequests, readJSON, readSchedule, stateDir, sweep, planSessionDeletion, collectGarbage, garbageSize, scheduledSession,
   type UploadIndex, type LiveSnapshot, type Receipt, type SessionHeader, type GcResult, type ScheduleTask } from './core.js';
-import { tryLock, waitingHosts, otherHosts } from './guard.js';
+import { tryLock, sameHomeHosts } from './locks.js';
 import type { Lock } from './platform/index.js';
-import { hostRequire, type Gate } from './gate.js';
 import { LocalizedError } from './locale/errors.js';
 import { message, type LocalizedMessage } from './locale/shared.js';
 
@@ -55,12 +56,14 @@ interface SubagentManager {
 }
 interface Operation { done: Promise<void>; startup: boolean }
 export interface RuntimeContext {
-  sessionDeletionGate: Gate;
+  dshHomePath(): string;
+  fiber: { uid: number | null };
   attachments: { root: string; cacheRoot: string; requestInflight: { size: number } };
   fileUploads: { stagedFiles: WeakMap<object, Map<string, { attachment: unknown }>> };
-  agents: { get(id: string): Agent | undefined; requireFactory(): { target: object }; setFactory(...args: unknown[]): unknown; factory?: { target: object } };
+  agents: { list(): Agent[]; get(id: string): Agent | undefined; requireFactory(): { target: object }; setFactory(...args: unknown[]): unknown; factory?: { target: object } };
   sessions: { list(): Session[]; get(id: string): Session | undefined };
   sessionPersistence: {
+    name: string; root: string;
     stat(id: string): Promise<{ sizeBytes: number } | undefined>;
     flush(): Promise<void>;
     coldLogMemo?: DeletionCache;
@@ -154,8 +157,7 @@ export class DeletionRuntime {
   private restorers: (() => void)[] = [];
   private agentRestorers = new Map<Agent, (() => void)[]>();
   private wrapped = new WeakMap<object, Set<string>>();
-  private controller?: object;
-  private schedule?: Schedule;
+  private schedule!: Schedule;
   private terminals?: Terminals;
   private subagentBinding?: { manager: SubagentManager; fields: SubagentManager };
   private stopping?: Promise<void>;
@@ -166,8 +168,10 @@ export class DeletionRuntime {
   private disposed = false;
   get gcRunning(): boolean { return this.maintenance?.kind === 'gc'; }
   get deletionRunning(): boolean { return this.maintenance?.kind === 'delete'; }
-  constructor(readonly ctx: RuntimeContext, private unwrap: <T extends object>(value: T) => T, private UploadIndex: new(path: string) => UploadIndex) {}
-  get home(): string { return this.ctx.sessionDeletionGate.home; }
+  readonly home: string;
+  constructor(readonly ctx: RuntimeContext, private unwrap: <T extends object>(value: T) => T, private UploadIndex: new(path: string) => UploadIndex) {
+    this.home = ctx.dshHomePath();
+  }
   get receiptSummary() { return { revision: this.receiptRevision, count: this.deleted.size }; }
   get receipt() { return { revision: this.receiptRevision, deletedIdHashes: [...this.deleted] }; }
   isLocked(id: string): boolean { return this.locked.has(id) || this.deleted.has(digest(id)); }
@@ -231,6 +235,7 @@ export class DeletionRuntime {
       const ids = [input.sessionId, input.resumeSessionId, input.parentAgent?.id, input.meta?.parentSession].filter((x): x is string => typeof x === 'string');
       return runtime.operation(ids, async () => {
         const handle = await Reflect.apply(original, this, [owner, options]) as Handle;
+        if (runtime.ctx.fiber.uid === null) return handle;
         runtime.handles.set(handle.agent.id, handle);
         runtime.trackAgent(handle.agent);
         if (ids.some(id => runtime.isLocked(id))) {
@@ -248,14 +253,20 @@ export class DeletionRuntime {
   private async loadReceipt(): Promise<void> {
     this.installReceipt(await readJSON<Receipt>(join(stateDir(this.home), 'receipt.json'), { schema: 1, revision: '', deletedIdHashes: [] }));
   }
+  closeAdmission(): Promise<void> | undefined {
+    this.disposed = true;
+    return this.maintenance?.settled;
+  }
   async initialize(): Promise<void> {
+    const persistence = this.ctx.sessionPersistence;
+    if (persistence.name !== 'session-persistence-jsonl' || resolve(persistence.root) !== join(this.home, 'sessions')) {
+      throw new LocalizedError('error.defaultSessionRoot');
+    }
     await this.loadReceipt();
     const runtime = this;
     if (this.ctx.attachments.root !== join(this.home, 'attachments', 'v1')
       || this.ctx.attachments.cacheRoot !== join(this.home, 'cache', 'attachments')) throw new LocalizedError('error.attachmentStorage');
-    this.ctx.effect(() => async () => {
-      runtime.disposed = true;
-      await runtime.maintenance?.settled;
+    this.ctx.effect(() => () => {
       for (const restorers of runtime.agentRestorers.values()) for (const restore of restorers.reverse()) restore();
       runtime.agentRestorers.clear();
       for (const restore of runtime.restorers.reverse()) restore();
@@ -274,6 +285,7 @@ export class DeletionRuntime {
       return disposer;
     });
     if (registry.factory?.target) this.captureFactory(registry.factory.target);
+    for (const agent of registry.list()) this.trackAgent(agent);
     const manager = this.manager();
     this.patch(manager, 'assertAdmitting', original => function (agent) {
       const member = agent as Agent;
@@ -347,50 +359,46 @@ export class DeletionRuntime {
     });
     this.ctx.on('agent/pre-step', async ({ agent }: { agent: Agent }, next: () => Promise<unknown>) =>
       runtime.barrier.read(() => runtime.isLocked(agent.id) ? { kind: 'reject' } : next()));
-    this.ctx.inject(['sessionController'], (ctx: RuntimeContext) => {
-      runtime.controller = ctx.sessionController;
-      for (const name of ['prompt', 'attachment', 'updateQueue', 'fork', 'rename', 'selectModel', 'create']) {
-        runtime.patch(ctx.sessionController, name, original => function (request, ...args) {
-          const input = request as SessionRequest | undefined;
-          const ids = [input?.sessionId, input?.parentSession].filter((x): x is string => typeof x === 'string');
-          return runtime.operation(ids, () => Reflect.apply(original, this, [request, ...args]));
+    const controller = this.ctx.sessionController;
+    for (const name of ['prompt', 'attachment', 'updateQueue', 'fork', 'rename', 'selectModel', 'create']) {
+      this.patch(controller, name, original => function (request, ...args) {
+        const input = request as SessionRequest | undefined;
+        const ids = [input?.sessionId, input?.parentSession].filter((x): x is string => typeof x === 'string');
+        return runtime.operation(ids, () => Reflect.apply(original, this, [request, ...args]));
+      });
+    }
+    for (const name of ['resolveAgent', 'state', 'page', 'projections']) {
+      this.patch(controller, name, original => function (request, ...args) {
+        const id = typeof request === 'string' ? request : (request as SessionRequest | undefined)?.sessionId;
+        return runtime.operation(id ? [id] : [], async () => {
+          const result = await Reflect.apply(original, this, [request, ...args]);
+          if (id) runtime.assertAllowed([id]);
+          return result;
         });
-      }
-      for (const name of ['resolveAgent', 'inspect', 'page', 'projections']) {
-        runtime.patch(ctx.sessionController, name, original => function (request, ...args) {
-          const id = typeof request === 'string' ? request : (request as SessionRequest | undefined)?.sessionId;
-          return runtime.operation(id ? [id] : [], async () => {
-            const result = await Reflect.apply(original, this, [request, ...args]);
-            if (id) runtime.assertAllowed([id]);
-            return result;
-          });
-        });
-      }
-      runtime.patch(ctx.sessionController, 'list', original => async function (...args) {
-        const result = await Reflect.apply(original, this, args) as { items: Array<{ sessionId: string }> };
-        if (!Array.isArray(result?.items)) throw new LocalizedError('error.sessionListResponse');
-        return { ...result, items: result.items.filter((row: { sessionId: string }) => !runtime.deleted.has(digest(row.sessionId))) };
       });
+    }
+    this.patch(controller, 'list', original => async function (...args) {
+      const result = await Reflect.apply(original, this, args) as { items: Array<{ sessionId: string }> };
+      if (!Array.isArray(result?.items)) throw new LocalizedError('error.sessionListResponse');
+      return { ...result, items: result.items.filter((row: { sessionId: string }) => !runtime.deleted.has(digest(row.sessionId))) };
     });
-    this.ctx.inject(['schedule'], (ctx: RuntimeContext) => {
-      const service = runtime.unwrap(ctx.schedule);
-      const edit = service.edit;
-      if (typeof edit !== 'function') throw new LocalizedError('error.scheduleEdit');
-      runtime.editSchedule = (...args) => Reflect.apply(edit, service, args);
-      runtime.patch(service, 'create', original => function (request, actor, ...args) {
-        const target = scheduledSession(request as ScheduleTask);
-        const ids = [target, actor].filter((id): id is string => typeof id === 'string');
-        return runtime.operation(ids, () => Reflect.apply(original, this, [request, actor, ...args]));
-      });
-      runtime.patch(service, 'edit', original => async function (request, actor, ...args) {
-        const input = request as Parameters<Schedule['edit']>[0];
-        const task = (await service.catalog()).find(task => task.id === input.id);
-        const ids = [task && scheduledSession(task), input.patch?.target && scheduledSession({ target: input.patch.target }), actor]
-          .filter((id): id is string => typeof id === 'string');
-        return runtime.operation(ids, () => Reflect.apply(original, this, [request, actor, ...args]));
-      });
-      runtime.schedule = service;
+    const service = this.unwrap(this.ctx.schedule);
+    const edit = service.edit;
+    if (typeof edit !== 'function') throw new LocalizedError('error.scheduleEdit');
+    runtime.editSchedule = (...args) => Reflect.apply(edit, service, args);
+    runtime.patch(service, 'create', original => function (request, actor, ...args) {
+      const target = scheduledSession(request as ScheduleTask);
+      const ids = [target, actor].filter((id): id is string => typeof id === 'string');
+      return runtime.operation(ids, () => Reflect.apply(original, this, [request, actor, ...args]));
     });
+    runtime.patch(service, 'edit', original => async function (request, actor, ...args) {
+      const input = request as Parameters<Schedule['edit']>[0];
+      const task = (await service.catalog()).find(task => task.id === input.id);
+      const ids = [task && scheduledSession(task), input.patch?.target && scheduledSession({ target: input.patch.target }), actor]
+        .filter((id): id is string => typeof id === 'string');
+      return runtime.operation(ids, () => Reflect.apply(original, this, [request, actor, ...args]));
+    });
+    runtime.schedule = service;
     this.ctx.inject(['terminals'], (ctx: RuntimeContext) => {
       runtime.terminals = ctx.terminals;
       runtime.patch(ctx.terminals, 'spawn', original => function (owner, ...args) {
@@ -533,7 +541,6 @@ export class DeletionRuntime {
   /** Final validation; native promises own stopping and lifecycle settlement. */
   private async quiescence(ids: string[], global = false, deleting = false): Promise<Activity> {
     const reasons: LocalizedMessage[] = [];
-    if (!this.controller || !this.schedule) reasons.push(message('activity.initializing'));
     const targets = new Set(ids);
     const all = new Set(global ? this.ctx.sessions.list().map((session) => session.id) as string[] : ids);
     for (const id of all) {
@@ -591,13 +598,11 @@ export class DeletionRuntime {
     return this.runMaintenance('delete', () => this.removeOne(id, createdAt, expectedIds));
   }
   private async assertSoleHost(): Promise<void> {
-    const excluded = await waitingHosts(stateDir(this.home)); excluded.add(process.pid);
-    if ((await otherHosts(this.home, excluded)).length) throw new DeletionRefused('error.otherHost');
+    if ((await sameHomeHosts(this.home, process.pid)).length) throw new DeletionRefused('error.otherHost');
   }
   private assertAvailable(kind: 'delete' | 'gc'): void {
     if (this.disposed) throw new DeletionRefused('error.runtimeUnavailable');
     if (this.maintenance) throw new DeletionRefused('error.cleanupBusy');
-    if (!this.ctx.sessionDeletionGate.healthy()) throw new DeletionRefused('error.guardUnavailable');
     if (kind === 'gc' && this.importer?.active) throw new DeletionRefused('activity.chatImport');
   }
   async garbageSize(): Promise<number> {
@@ -662,7 +667,6 @@ export class DeletionRuntime {
       await this.checkScheduleDelivery(ids, deadline);
       if (performance.now() >= deadline) throw new DeletionRefused('error.stopTimeout');
       if (this.manager() !== stopped.manager || this.activations(root, ids, stopped.manager).length) throw new DeletionRefused('activity.unconfirmed');
-      if (!this.ctx.sessionDeletionGate.healthy()) throw new DeletionRefused('error.guardUnavailable');
       // Commit only private paths. No attachment reference snapshot is needed.
       enqueueAttempted = true;
       const request = await enqueue(this.home, root, plan);
@@ -696,7 +700,7 @@ export class DeletionRuntime {
               await registry.unpinSession(member); await this.unarchiveForCleanup(member);
             }
           } else if (path === join('storages', 'schedule.json')) {
-            for (const task of await this.schedule!.catalog()) if (targets.has(scheduledSession(task)!)) {
+            for (const task of await this.schedule.catalog()) if (targets.has(scheduledSession(task)!)) {
               const result = await this.editSchedule({ id: task.id, action: 'delete', expectedUpdatedAt: task.updatedAt ?? null }) as { deleted?: boolean };
               if (!result.deleted) throw new LocalizedError('error.scheduleDeletionUnconfirmed');
             }
@@ -725,18 +729,20 @@ export class DeletionRuntime {
         // Only settled native cleanup may release an uncommitted attempt's locks.
         if (!pending) for (const member of ids) this.locked.delete(member);
       };
-      if (this.stopping) void this.stopping.then(finish, finish).catch(error => { this.ctx.logger.warn('Session stop finalization failed', error); });
-      else await finish();
+      if (this.stopping) {
+        this.stopping = this.stopping.then(finish, finish)
+          .catch(error => { this.ctx.logger.warn('Session stop finalization failed', error); })
+          .finally(() => { this.stopping = undefined; });
+      } else await finish();
     }
   }
 }
 
-export const name = 'session-deletion-runtime';
-export const inject = ['sessionDeletionGate', 'agents', 'sessions', 'sessionPersistence', 'sessionProjectionCache', 'sessionQuery', 'workspaceRegistry', 'attachments', 'fileUploads', 'subagents', 'jobs'];
-export async function apply(ctx: RuntimeContext): Promise<void> {
-  const require = await hostRequire();
+export async function createRuntime(ctx: RuntimeContext): Promise<DeletionRuntime> {
+  const require = createRequire(process.versions.electron ? resolve(process.argv[1]) : await realpath(process.argv[1]));
+  const { version } = require('@deepseek-ai/dsh/package.json') as { version: string };
+  if (version !== SUPPORTED_DSH) throw new LocalizedError('error.incompatibleDsh', { supported: SUPPORTED_DSH, found: version });
   const cordis = await import(pathToFileURL(require.resolve('@deepseek-ai/cordis')).href);
   const provider = await import(pathToFileURL(require.resolve('@deepseek-ai/dsh-llm-deepseek')).href);
-  const runtime = new DeletionRuntime(ctx, object => ((object as Record<symbol, unknown> | undefined)?.[cordis.symbols.original] ?? object) as typeof object, provider.DeepSeekUploadIndex);
-  await runtime.initialize(); ctx.provide('sessionDeletionRuntime', runtime);
+  return new DeletionRuntime(ctx, object => ((object as Record<symbol, unknown> | undefined)?.[cordis.symbols.original] ?? object) as typeof object, provider.DeepSeekUploadIndex);
 }

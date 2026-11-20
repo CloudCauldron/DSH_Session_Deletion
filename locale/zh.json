@@ -34,7 +34,6 @@
 
     "activity.globalAgentBusy": "仍有 AI 在工作或等待交互，请全部空闲后再清理附件",
     "activity.chatImport": "DeepSeek 对话导入正在保存会话和附件。",
-    "activity.initializing": "会话服务仍在初始化",
     "activity.maintenance": "会话后台维护尚未结束",
     "activity.missingHandle": "缺少完整生命周期句柄，请重启 DSH",
     "activity.nativeBusy": "官方归档状态仍有活动：{kind}",
@@ -68,18 +67,12 @@
     "error.unsupportedCapability": "不支持此 DSH 能力：{capability}。",
     "error.unsupportedPlatform": "会话删除插件仅支持 Linux 和 Windows。",
 
-    "error.guardExit": "恢复监测进程已退出，退出码为 {code}。",
-    "error.guardStartTimeout": "恢复监测进程启动超时。",
     "error.runtimeUnavailable": "会话删除插件已停用。请在启用后重新打开菜单。",
-    "error.guardUnavailable": "恢复监测不可用，请重启 DSH。",
     "error.guardUsage": "用法：{command}",
-    "error.homeBusyAtStartup": "另一个 DSH 宿主或清理进程正在使用此数据目录，请先将其关闭再启动 DSH。",
-    "error.hostExitedBeforeGuard": "恢复监测初始化前，宿主已退出。",
     "error.otherHost": "另一个 DSH 进程正在使用相同目录，请先关闭它。",
     "error.otherProcessCleanup": "另一个 DSH 进程正在使用此数据目录，清理已推迟。",
 
     "error.driveCwd": "无法解析目标驱动器的当前目录，清理已推迟。",
-    "error.hostIdentity": "无法识别 DSH 宿主进程。",
     "error.kernelLock": "内核文件锁操作失败，错误码为 {errno}。",
     "error.processEnvironment": "进程环境块缺少终止符。",
     "error.processIdentityUnreadable": "无法读取进程标识。",

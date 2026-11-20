@@ -1,37 +1,28 @@
-import * as gate from './gate.js';
-import * as runtime from './runtime.js';
-import * as host from './host.js';
+import { createRuntime, type DeletionRuntime, type RuntimeContext } from './runtime.js';
+import { registerRoutes, type HostContext } from './host.js';
 
-interface InternalPlugin<C> {
-  name: string;
-  inject?: string[];
-  apply(ctx: C): Promise<void>;
-}
-
-interface Fiber { uid: number | null }
-export interface PluginContext {
-  fiber: Fiber;
-  plugin<C>(plugin: InternalPlugin<C>): unknown;
-  on(name: 'internal/plugin', listener: (fiber: Fiber) => void): () => void;
+interface PluginContext {
+  plugin(apply: (ctx: RuntimeContext & HostContext) => Promise<void>): PromiseLike<unknown> & { dispose(): Promise<void> };
+  effect(register: () => Iterable<() => void | Promise<void>>, label: string): unknown;
 }
 
 export const name = 'session-deletion';
+export const inject = ['dshHomePath', 'agents', 'sessions', 'sessionPersistence', 'sessionProjectionCache', 'sessionQuery',
+  'workspaceRegistry', 'attachments', 'fileUploads', 'subagents', 'jobs', 'sessionController', 'schedule', 'webServer', 'connection'];
 
 export async function apply(ctx: PluginContext): Promise<void> {
-  // Awaiting a pending fiber does not wait for its dependencies. Keep this Loader
-  // entry loading until HTTP registration finishes, while each child owns its lifecycle.
-  await new Promise<void>((resolve, reject) => {
-    const off = ctx.on('internal/plugin', fiber => {
-      if (fiber === ctx.fiber && fiber.uid === null) resolve();
-    });
-    const mount = <C>(plugin: InternalPlugin<C>, ready?: () => void): void => {
-      ctx.plugin({ ...plugin, async apply(child: C): Promise<void> {
-        try { await plugin.apply(child); ready?.(); }
-        catch (error) { off(); reject(error); throw error; }
-      } });
-    };
-    mount(gate);
-    mount(runtime);
-    mount(host, () => { off(); resolve(); });
+  let runtime: DeletionRuntime | undefined;
+  const scope = ctx.plugin(async child => {
+    runtime = await createRuntime(child);
+    await runtime.initialize();
+    child.provide('sessionDeletionRuntime', runtime);
+    registerRoutes(child, runtime);
   });
+  // Cordis drains a single effect in reverse order. Keep the child and its
+  // native event subscriptions live until admitted maintenance finishes.
+  ctx.effect(function* () {
+    yield scope.dispose;
+    yield () => runtime?.closeAdmission();
+  }, 'session-deletion lifecycle');
+  await scope;
 }

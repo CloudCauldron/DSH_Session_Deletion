@@ -10,8 +10,9 @@ export interface LocaleClientContext {
 }
 export declare function registerClientLocale(ctx: LocaleClientContext, namespace: string, id?: string): Promise<void>;
 export declare class ApiError extends Error {
+    readonly status: number;
     readonly failure: Failure;
-    constructor(failure: Failure);
+    constructor(failure: Failure, status: number);
 }
 export declare function asFailure(error: unknown): Failure;
 export declare function readFailure(response: Response): Promise<Failure>;

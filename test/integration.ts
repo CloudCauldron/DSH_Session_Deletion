@@ -10,8 +10,9 @@ import { setTimeout as delay } from 'node:timers/promises';
 import { zipSync, strToU8 } from 'fflate';
 import { chromium, type Browser, type Locator } from 'playwright-core';
 import type { SessionHeader } from '../lib/core.js';
-import { exists, encodeSegment, stateDir, SUPPORTED_DSH } from '../lib/core.js';
-import { tryLock } from '../lib/guard.js';
+import { exists, encodeSegment, listRequests, SUPPORTED_DSH } from '../lib/core.js';
+import { runGuard } from '../lib/guard.js';
+import { tryLock } from '../lib/locks.js';
 
 const repo=resolve('.');
 const base=await fs.mkdtemp(join(tmpdir(),'dsh-deletion-integration-'));
@@ -25,7 +26,8 @@ await fs.writeFile(join(home,'profiles/web/package.json'),JSON.stringify({name:'
 await fs.writeFile(join(home,'profiles/web/pnpm-workspace.yaml'),'packages:\n  - .\nnodeLinker: hoisted\nautoInstallPeers: false\nallowBuilds:\n  koffi: true\n');
 await fs.writeFile(join(home,'profiles/web/cordis.yml'),'[]\n');
 await fs.writeFile(join(home,'profiles/web/cordis.patch.yml'),'[]\n');
-const env={...process.env,DSH_HOME:home,DSH_TELEMETRY_DISABLED:'1',pnpm_config_store_dir:join(base,'pnpm-store')};
+// A remote launch selects DSH's in-app folder browser on both platforms.
+const env={...process.env,SSH_CONNECTION:'127.0.0.1 10000 127.0.0.1 22',DSH_HOME:home,DSH_TELEMETRY_DISABLED:'1',pnpm_config_store_dir:join(base,'pnpm-store')};
 // Native Windows cannot spawn a .cmd shim directly; an explicit CLI entry also
 // lets either platform test an isolated DSH installation.
 const dshArgs=process.env.DSH_CLI?[...process.execArgv.filter(arg=>arg==='--expose-internals'),process.env.DSH_CLI]:[];
@@ -88,15 +90,6 @@ async function start(){
 async function stop(){
  if(!host)return;assert(exited);
  if(host.exitCode===null&&host.signalCode===null){host.kill('SIGINT');await Promise.race([exited,delay(15000,undefined,{ref:false}).then(()=>{throw new Error('Host did not exit')})]);}
- const path=join(stateDir(home),'lifecycle.lock');
- if(process.platform!=='win32'&&!(await exists(path)))return;
- const deadline=Date.now()+15000;
- for(;;){
-  const lock=await tryLock(path,true,true);
-  if(lock){await lock.close();return;}
-  if(Date.now()>=deadline)throw new Error('Recovery guard has not finished; retain the fixture until it exits');
-  await delay(50);
- }
 }
 try{
  const url=await start();
@@ -123,7 +116,7 @@ try{
  const status=async()=>{const r=await context.request.get(`http://127.0.0.1:${port}/session-deletion/api/status`);assert.equal(r.status(),200);return r.json()};
  const receipt=async()=>{const r=await context.request.get(`http://127.0.0.1:${port}/session-deletion/api/receipt`);assert.equal(r.status(),200);return r.json()};
  const initialStatus=await status();
- assert.equal(initialStatus.guardHealthy,true);
+ assert.equal(initialStatus.ok,true);
  assert.equal(initialStatus.version,SUPPORTED_DSH);
  const initialReceipt=await receipt();
  assert.deepEqual(initialReceipt,{ok:true,revision:'',deletedIdHashes:[]});
@@ -451,13 +444,67 @@ try{
  await delay(1200);
  assert.equal(await recoveryToast.count(),0,'polling an unchanged state must not reopen an expired Toast');
  await page.evaluate(id=>localStorage.setItem('dsh.conversation.'+id,JSON.stringify({draft:'private fixture draft'})),id);
- // Restart recovery uses a fresh page while retaining the same browser storage.
+ // Exiting and reopening DSH both leave the interrupted request pending.
  await Promise.all([otherPage.close(),independentPage.close(),page.goto('about:blank')]);
  await stop();
+ assert.equal((await listRequests(home)).length,1);
+ const reopened=await start();await page.goto(reopened);
+ assert.equal((await status()).pending.length,1);
+ assert.equal((await controls('attach',{cwd,id:preserved.id})).status(),200);
+ assert.equal((await controls('pin',{id:preserved.id})).status(),200);
+ async function switchPlugin(kind:'package'|'component',enabled:boolean){
+  await page.getByRole('button',{name:'插件',exact:true}).click();
+  const card=page.locator('[data-plugin-package="dsh-session-deletion"]');
+  const detail=page.locator('[data-plugin-detail="dsh-session-deletion"]');
+  await card.or(detail).first().waitFor();
+  if(kind==='component'&&!await detail.isVisible())await card.getByRole('button',{name:/^查看/}).click();
+  const controls=kind==='package'?card:detail.locator('[data-plugin-rows]');
+  await controls.getByRole('switch',{checked:!enabled}).click();
+  await page.waitForFunction(async expected=>(await fetch('/session-deletion/api/status')).ok===expected,enabled,{timeout:60000,polling:250});
+ }
+ const survivor=page.locator(`[data-row-key="session:${preserved.id}"]`);
+ const visibleSessions=()=>page.locator('[data-row-key^="session:"]').evaluateAll(rows=>rows.map(row=>row.getAttribute('data-row-key')).sort());
+ await survivor.click();
+ const transcript=page.getByText('Preserved fixture sha256:'+shared,{exact:true});
+ await transcript.waitFor();
+ for(const kind of ['package','component'] as const){
+  await survivor.click();
+  const expected=await visibleSessions();
+  await switchPlugin(kind,false);
+  await survivor.click({button:'right'});
+  await page.getByRole('menuitem',{name:'重命名',exact:true}).waitFor();
+  await page.getByRole('menuitem',{name:'删除会话',exact:true}).waitFor({state:'hidden'});
+  await page.keyboard.press('Escape');
+  await page.reload();
+  await survivor.click();
+  await transcript.waitFor();
+  assert.deepEqual(await visibleSessions(),expected);
+  await page.getByRole('button',{name:'添加工作区',exact:true}).click();
+  const picker=page.getByRole('dialog',{name:'选择工作区目录'});
+  await picker.getByRole('button',{name:'取消'}).click();
+  await page.getByRole('button',{name:'新建会话',exact:true}).filter({hasText:'新会话'}).click();
+  await page.waitForFunction(previous=>{
+   const current=JSON.parse(localStorage.getItem('dsh.sessions.current')??'{}').sessionId;
+   return typeof current==='string' && current!==previous;
+  },preserved.id,{timeout:10000});
+  await Promise.all([
+   page.waitForResponse(r=>new URL(r.url()).pathname==='/session-deletion/api/receipt' && r.ok(),{timeout:60000}),
+   switchPlugin(kind,true),
+  ]);
+  assert.equal((await status()).pending.length,1);
+  await survivor.click();
+  await transcript.waitFor();
+  await survivor.click({button:'right'});
+  const action=page.getByRole('menuitem',{name:'删除会话',exact:true});
+  await action.waitFor();assert.equal(await action.count(),1);assert.ok(await action.isEnabled());
+  await page.keyboard.press('Escape');
+ }
+ await page.goto('about:blank');await stop();
+ await runGuard(home);
  await fs.rmdir(oldWorkspace);await fs.writeFile(oldWorkspace,'former workspace directory');
  const again=await start();await page.goto(again);await page.waitForTimeout(2000);
  assert.equal((await status()).pending.length,0);
- assert.equal(await exists(interrupted.path),false,'the pending deletion recovers on restart');
+ assert.equal(await exists(interrupted.path),false,'explicit offline recovery completes the pending deletion');
  const scheduleAfterRecovery=JSON.parse(await fs.readFile(join(home,'storages/schedule.json'),'utf8'));
  assert.equal(scheduleAfterRecovery.tables.tasks[raceTask.taskId].target.sessionId,raceDestination.id,'a concurrently retargeted reminder survives both failure and recovery');
  assert.equal(await page.evaluate(id=>localStorage.getItem('dsh.conversation.'+id),id),null);
@@ -474,7 +521,7 @@ try{
  await pluginCard.getByText('DSH 会话删除',{exact:true}).waitFor();
  await pluginCard.getByText(zhDescription,{exact:true}).waitFor();
  assert.equal(await pluginCard.getByText(enDescription,{exact:true}).count(),0);
- assert.equal(await pluginCard.count(),1,'internal gate/runtime fibers must not become Loader inventory entries');
+ assert.equal(await pluginCard.count(),1,'internal plugin scopes must not become Loader inventory entries');
  assert.equal(await pluginCard.getAttribute('data-plugin-module'),'dsh-session-deletion');
  assert.equal(await pluginCard.getAttribute('data-failed'),null);
  await settings.getByRole('button',{name:'通用设置',exact:true}).click();
@@ -629,6 +676,5 @@ try{
  console.error('Host log:',bootLog.replace(/token=[^\s]+/g,'token=[redacted]').slice(-6000));throw e;
 }finally{
  await browser?.close();await stop();
- // Both the host and its recovery guard have finished before the fixture is removed.
  await fs.rm(base,{recursive:true,force:true,maxRetries:10,retryDelay:100});
 }

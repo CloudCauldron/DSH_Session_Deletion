@@ -24,7 +24,6 @@ function deferred() {
 
 async function stoppingFixture() {
   const f = await fixture();
-  await fs.mkdir(join(stateDir(f.home), 'hosts'), { recursive: true });
   // These tests run real private-file deletion; metadata behavior has separate native coverage.
   await fs.rm(join(f.home, 'storages/workspace.json'));
   await fs.rm(join(f.home, 'storages/schedule.json'));
@@ -47,7 +46,7 @@ async function stoppingFixture() {
   };
   const subagents = { manager };
   const runtime = makeRuntime({
-    sessionDeletionGate: { home: f.home, healthy: () => true }, subagents,
+    dshHomePath: () => f.home, subagents,
     agents: { get: id => agents.get(id) },
     sessions: { get: id => agents.get(id)?.session, list: () => [...agents.values()].map(agent => agent.session) },
     sessionPersistence: { stat: async () => ({ sizeBytes: 1 }) },
@@ -64,7 +63,6 @@ async function stoppingFixture() {
     }) as RuntimeContext['on'],
     waterfall: async () => [], emit: (_name, id) => { removed.push(id); }, logger: { warn() {} },
   });
-  runtime.controller = {};
   runtime.schedule = { catalog: async () => [], create: async () => {}, edit: async () => {} };
   runtime.terminals = {
     list: agent => (terminals.get(agent) ?? []).map(sessionId => ({ sessionId, status: { kind: 'running' } })),
@@ -153,7 +151,10 @@ void test('the shared deadline invalidates deletion while late native cleanup re
     assert(s.runtime.isLocked(s.root.id)); assert.equal(s.runtime.deletionRunning, true);
     assert(s.agents.has(s.root.id)); assert.deepEqual(await listRequests(s.f.home), []);
     await assert.rejects(s.remove(), /Another cleanup is already in progress/);
-    cleanup.resolve(); await s.drained();
+    const unloading = s.runtime.closeAdmission();
+    assert.ok(unloading);
+    await assert.rejects(s.remove(), /no longer active/);
+    cleanup.resolve(); await unloading;
     assert.equal(s.runtime.isLocked(s.root.id), false); assert(s.agents.has(s.root.id));
     assert.deepEqual(await listRequests(s.f.home), []);
     assert.equal(await exists(join(s.f.home, 'sessions/project', s.root.id)), true, 'late completion never enters enqueue or sweep');
@@ -161,15 +162,16 @@ void test('the shared deadline invalidates deletion while late native cleanup re
   } finally { cleanup.resolve(); await s.drained(); await s.f.cleanup(); }
 });
 
-for (const change of ['manager', 'method', 'pending', 'identity', 'startup'] as const) void test(`refuses unsafe ${change} before stopping visible work`, async () => {
+for (const change of ['manager', 'method', 'pending', 'identity', 'startup', 'missing-handle'] as const) void test(`refuses unsafe ${change} before stopping visible work`, async () => {
   const s = await stoppingFixture(); let operation: Promise<unknown> | undefined; const pending = deferred();
   try {
+    if (change === 'missing-handle') s.runtime.handles.delete(s.root.id);
     if (change === 'manager') s.subagents.manager = {} as Manager;
     if (change === 'method') s.manager.dispose = undefined as unknown as Manager['dispose'];
     if (change === 'pending') s.manager.materializations.add({ root: s.root });
     if (change === 'identity') s.manager.resident.set('bad', { childId: 'bad', kind: 'external', root: { ...s.root, session: { ...s.root.session, header: { ...s.root.session.header, createdAt: 0 } } } });
     if (change === 'startup') operation = s.runtime.operation([s.root.id], () => pending.promise, true);
-    await assert.rejects(s.remove());
+    await assert.rejects(s.remove(), change === 'missing-handle' ? /Missing full lifecycle handle/ : Error);
     assert.deepEqual(s.cancelled, []); assert.deepEqual(s.disposed, []);
     assert.deepEqual(await listRequests(s.f.home), []); assert.equal(s.listeners(), 0);
   } finally { pending.resolve(); await operation; await s.f.cleanup(); }

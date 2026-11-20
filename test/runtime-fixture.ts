@@ -8,7 +8,7 @@ type RuntimeStubs = {
 };
 type RuntimeInternals = Pick<DeletionRuntime, keyof DeletionRuntime> & {
   operation: RuntimeSource['operation']; gcSources: RuntimeSource['gcSources']; quiescence: RuntimeSource['quiescence'];
-  maintenance: RuntimeSource['maintenance']; controller: RuntimeSource['controller']; schedule: RuntimeSource['schedule'];
+  maintenance: RuntimeSource['maintenance']; schedule: RuntimeSource['schedule'];
   handles: RuntimeSource['handles']; stopTimeoutMs: RuntimeSource['stopTimeoutMs']; terminals: RuntimeSource['terminals'];
   manager: RuntimeSource['manager']; activations: RuntimeSource['activations']; stop: RuntimeSource['stop'];
 };
@@ -25,7 +25,7 @@ export function makeRuntime(ctx: RuntimeStubs): RuntimeInternals {
   const manager = { resident: new Map(), materializations: new Set(),
     dispose: async () => {}, assertAdmitting() {}, rootOf: (agent: unknown) => agent };
   return new DeletionRuntime({
-    subagents: { manager },
+    dshHomePath: () => '', fiber: { uid: 1 }, subagents: { manager },
     jobs: { start() {}, list: () => [], kill() {}, events: { subscribe: () => () => {} } },
     on: () => () => {}, ...ctx,
   } as RuntimeContext, value => value, FixtureUploadIndex) as unknown as RuntimeInternals;

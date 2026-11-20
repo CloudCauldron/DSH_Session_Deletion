@@ -24,7 +24,7 @@ export async function registerClientLocale(ctx: LocaleClientContext, namespace: 
 
 export class ApiError extends Error {
   readonly failure: Failure;
-  constructor(failure: Failure) { super(failure.error); this.failure = failure; }
+  constructor(failure: Failure, readonly status: number) { super(failure.error); this.failure = failure; }
 }
 
 export function asFailure(error: unknown): Failure {
