@@ -24,7 +24,7 @@
 
 ## **3 - User Guide**
 
-When deleting a session or using **Free Up Space**, keep only one DSH instance running against that data directory until the operation finishes.
+<span style="margin-left:2em;">&#8203;</span>When deleting a session or using **Free Up Space**, keep only one DSH instance running against that data directory until the operation finishes.
 
 ### **3.1 - Deleting a Session**
 
@@ -63,7 +63,9 @@ If cleanup is interrupted, run **Free Up Space** again for a fresh scan.
 
 ### **3.3 - Manual Recovery After an Interrupted Session Deletion**
 
-If DSH shows “Session deletion is incomplete”, new deletions and **Free Up Space** are unavailable until you resolve the pending request.
+<span style="margin-left:2em;">&#8203;</span>If DSH shows “Session deletion is incomplete”, new deletions and **Free Up Space** are unavailable until you resolve the pending request.
+
+> Until DSH upstream provides a plugin hook for its `prepare` startup stage, the only way to recover an interrupted deletion is to run `guard.js` manually with DSH stopped.
 
 1. Stop every DSH process that uses the affected data directory, including DSH Desktop. Keep them stopped until the command finishes.
 2. Open a terminal in the data directory that DSH was using (`DSH_HOME`, usually `~/.dsh`). Run the installed guard from there. The final `.` passes that directory to the guard. If you installed the plugin in the Desktop profile, replace `web` with `desktop`.
