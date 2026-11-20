@@ -240,7 +240,8 @@ void test('offline recovery recognizes a replacement transcript: ' + replacement
   try {
     const { header, location } = await f.stat(f.ids.other);
     const historical = join(dirname(location.path), 'session.jsonl');
-    await f.write(historical, JSON.stringify({ ...header, version: 0 }) + '\n');
+    const { id, createdAt, cwd, delegationDepth } = header;
+    await f.write(historical, JSON.stringify({ type: 'session', version: 0, id, createdAt, cwd, delegationDepth }) + '\n');
     // Only a historical capture can acquire a higher generation after confirmation.
     if (replacement === 'higher') {
       await fs.unlink(location.path);
@@ -252,7 +253,7 @@ void test('offline recovery recognizes a replacement transcript: ' + replacement
     } else {
       await f.queue(header.id);
       if (replacement !== 'lower') await fs.unlink(historical);
-      if (replacement === 'encoding') await f.write(location.path + '.zstd', zstdCompressSync(await fs.readFile(location.path)));
+      if (replacement === 'encoding') await f.write(location.path + '.zstd', zstdCompressSync(JSON.stringify(header) + '\n'));
       if (replacement === 'project') {
         const project = join(f.home, 'sessions/--other-~6D4B~8BD5--');
         await f.write(location.path, JSON.stringify({ ...header, cwd: '/other/测试' }) + '\n');
@@ -288,6 +289,32 @@ void test('offline recovery hashes only surviving authorities and keeps a newly 
     assert.deepEqual(await listRequests(f.home), []);
     const receipt = await readJSON<Receipt>(join(stateDir(f.home), 'receipt.json'));
     assert.deepEqual(receipt.deletedIdHashes.sort(), [f.ids.main, f.ids.child, f.ids.grand].map(digest).sort());
+  } finally { await f.cleanup(); }
+});
+
+for (const compressed of [false, true]) void test(`offline recovery requires a complete native ${compressed ? 'header frame' : 'first line'}`, async () => {
+  const f = await fixture(compressed);
+  try {
+    await f.queue(f.ids.other);
+    const [request] = await listRequests(f.home);
+    const { header, location: { path } } = await f.stat(f.ids.other);
+    const line = JSON.stringify(header);
+    const encode = (text: string) => compressed ? zstdCompressSync(text) : Buffer.from(text);
+    const invalid = [encode(line), encode('\n' + line + '\n'), encode(JSON.stringify({ ...header, delegationDepth: '0' }) + '\n')];
+    if (compressed) invalid.push(encode(line + '\n{}\n'), Buffer.concat([encode(line), encode('\n')]));
+    for (const bytes of invalid) {
+      await f.write(path, bytes);
+      await assert.rejects(sweep(f.home), /Cannot read session log/);
+      assert.deepEqual(await listRequests(f.home), [request]);
+      assert.deepEqual(await fs.readFile(path), bytes);
+    }
+    // Once identity and a length change are known, the event body need not be decodable.
+    const changed = Buffer.concat([encode(line + '\n'), Buffer.from('torn')]);
+    await f.write(path, changed);
+    assert.deepEqual(await sweep(f.home), []);
+    assert.deepEqual(await listRequests(f.home), []);
+    assert.deepEqual(await fs.readFile(path), changed);
+    assert.equal(await exists(join(stateDir(f.home), 'receipt.json')), false);
   } finally { await f.cleanup(); }
 });
 

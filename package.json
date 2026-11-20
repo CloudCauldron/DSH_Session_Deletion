@@ -52,6 +52,7 @@
     "typescript-eslint": "8.72.2"
   },
   "dependencies": {
+    "@deepseek-ai/dsh-session-format-catalog": "0.2.2-rc.5",
     "koffi": "3.1.1"
   },
   "files": [

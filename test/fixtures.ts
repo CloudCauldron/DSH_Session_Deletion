@@ -24,7 +24,7 @@ export async function fixture(compressed = true) {
   const sessionProject = join(home, 'sessions/--project--');
   const logName = compressed ? 'session.v4.jsonl.zstd' : 'session.v4.jsonl';
   async function session(id: string, extra: Partial<SessionHeader> = {}, refs: unknown[] = []) {
-    const header: SessionHeader = { type: 'session', version: 4, id, createdAt: 1234, cwd: '/project', isSeeded: false, ...extra };
+    const header: SessionHeader = { type: 'session', version: 4, id, createdAt: 1234, cwd: '/project', isSeeded: false, delegationDepth: 0, ...extra };
     headers[id] = header;
     const path = join(sessionProject, encodeSegment(id), logName);
     // Real persistence uses concatenated independent Zstandard frames.

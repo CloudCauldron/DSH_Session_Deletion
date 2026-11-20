@@ -193,7 +193,7 @@ function references(value: unknown, refs: Set<string>) {
 }
 // Node 24 stops at the first Zstandard frame within a write. Keep frames in
 // separate chunks and prove that the final frame is complete before accepting EOF.
-async function* zstdChunks(input: AsyncIterable<Buffer>) {
+async function* zstdChunks(input: AsyncIterable<Buffer>, firstFrameOnly = false) {
   const header = Buffer.alloc(4);
   let state = 'magic', need = 4, used = 0, skip = 0, checksum = 0;
   for await (const chunk of input) {
@@ -213,6 +213,7 @@ async function* zstdChunks(input: AsyncIterable<Buffer>) {
           else throw new LocalizedError('error.invalidZstdFrame');
         } else if (state === 'descriptor') {
           const descriptor = header[0], single = descriptor & 32, size = descriptor >>> 6;
+          if (firstFrameOnly && (descriptor & 0x18)) throw new LocalizedError('error.invalidZstdFrame');
           skip = (single ? 0 : 1) + [0, 1, 2, 4][descriptor & 3] + (size ? 1 << size : single ? 1 : 0);
           checksum = descriptor & 4; state = 'block'; need = 3;
         } else if (state === 'skippable') {
@@ -224,24 +225,46 @@ async function* zstdChunks(input: AsyncIterable<Buffer>) {
           if (block & 1) { skip += checksum; state = 'magic'; need = 4; }
         }
       }
-      if (state === 'magic' && !skip) { yield chunk.subarray(start, at); start = at; }
+      if (state === 'magic' && !skip) {
+        yield chunk.subarray(start, at);
+        if (firstFrameOnly) return;
+        start = at;
+      }
     }
     if (start < chunk.length) yield chunk.subarray(start);
   }
   if (used || skip || state !== 'magic') throw new LocalizedError('error.incompleteZstdFrame');
 }
 
+/** rc.5 reads a terminated first line, or exactly one line in the first Zstandard frame. */
+async function storedHeader(path: string, input: AsyncIterable<Buffer>, compressed: boolean): Promise<SessionHeader> {
+  const chunks: Buffer[] = [];
+  for await (const chunk of input) {
+    const end = compressed ? -1 : chunk.indexOf(10);
+    if (end !== -1) { chunks.push(chunk.subarray(0, end + 1)); break; }
+    chunks.push(chunk);
+  }
+  const line = Buffer.concat(chunks);
+  if (!line.length || line.indexOf(10) !== line.length - 1) throw new LocalizedError('error.sessionHeaderUnsupported', { path });
+  const { sessionFormatCatalog } = await import('@deepseek-ai/dsh-session-format-catalog');
+  const result = sessionFormatCatalog.readHeader(JSON.parse(line.toString('utf8')));
+  if (result.status === 'unsupported') throw new LocalizedError('error.sessionFormatUnsupported', { path });
+  if (result.status === 'malformed') throw new LocalizedError('error.sessionHeaderUnsupported', { path });
+  return { ...result.header, version: result.storedVersion };
+}
+
 export async function readLog(path: string, refs?: Set<string>) {
   await safePath(path);
   const input = createReadStream(path, { fd: openSync(path, constants.O_RDONLY | constants.O_NOFOLLOW), autoClose: true });
   const compressed = path.endsWith('.zstd');
-  const source = compressed ? Readable.from(zstdChunks(input)) : input;
+  const source = compressed ? Readable.from(zstdChunks(input, !refs)) : input;
   const decoded = compressed ? source.pipe(createZstdDecompress()) : source;
   // Forward the source error; async iteration must never silently accept a truncated compressed stream.
   if (decoded !== source) source.on('error', e => decoded.destroy(e));
-  const lines = createInterface({ input: decoded, crlfDelay: Infinity });
   let header: SessionHeader | undefined; let count = 0;
   try {
+    if (!refs) return await storedHeader(path, decoded, compressed);
+    using lines = createInterface({ input: decoded, crlfDelay: Infinity });
     for await (const line of lines) {
       if (!line.trim()) continue;
       let record;
@@ -252,16 +275,15 @@ export async function readLog(path: string, refs?: Set<string>) {
         if (!Number.isInteger(record.version) || record.version < 0 || record.version > 4)
           throw new LocalizedError('error.sessionFormatUnsupported', { path });
         header = record;
-        if (!refs) break;
       }
-      if (refs) references(record, refs);
+      references(record, refs);
     }
-    if (refs && decoded.errored) throw decoded.errored;
+    if (decoded.errored) throw decoded.errored;
     if (!header) throw new LocalizedError('error.emptySessionLog', { path });
     return header;
   } catch (error) {
     throw new LocalizedError('error.readSessionLog', { path }, { cause: error, failures: [error] });
-  } finally { lines.close(); decoded.destroy(); source.destroy(); input.destroy(); }
+  } finally { decoded.destroy(); source.destroy(); input.destroy(); }
 }
 
 export async function scanSessions(home: string, refs = new Set<string>()) {
@@ -462,8 +484,7 @@ async function offlineTranscript(dir: string, row: SessionDirectory): Promise<st
     }
     const header = await targetHeader(path, row);
     const project = dirname(dir);
-    if ((header.cwd !== undefined && (typeof header.cwd !== 'string' || !header.cwd))
-      || !await sameDirectory(project, join(dirname(project), projectKey(header.cwd))))
+    if (!await sameDirectory(project, join(dirname(project), projectKey(header.cwd))))
       throw new LocalizedError('error.directorySessionMismatch', { path });
     if (header.version !== Number(generation[1] ?? 0)
       || (latest && latest.name.endsWith('.zstd') !== entry.name.endsWith('.zstd')))
