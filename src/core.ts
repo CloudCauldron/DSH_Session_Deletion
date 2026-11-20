@@ -331,20 +331,19 @@ export async function listRequests(home: string): Promise<DeletionRequest[]> {
       throw new LocalizedError('error.invalidDeletionRequest');
     validatePlan(home, r.sessionId, r.plan);
     if (r.plan.directories.find(row => row.id === r.sessionId)?.createdAt !== r.createdAt
-      || r.plan.directories.some(({ transcript }) => !transcript || !LOG.test(transcript.path)
-        || !Number.isSafeInteger(transcript.sizeBytes) || transcript.sizeBytes <= 0 || !/^[a-f0-9]{64}$/.test(transcript.sha256)))
+      || r.plan.directories.some(({ transcript }) => !transcript || typeof transcript.path !== 'string' || !LOG.test(transcript.path)
+        || !Number.isSafeInteger(transcript.sizeBytes) || transcript.sizeBytes <= 0
+        || typeof transcript.sha256 !== 'string' || !/^[a-f0-9]{64}$/.test(transcript.sha256)))
       throw new LocalizedError('error.invalidDeletionRequest');
     out.push(r);
   }
   return out;
 }
 /** The caller holds every target writer lock through journal publication and cleanup. */
-export async function enqueue(home: string, header: SessionHeader, plan: DeletionPlan, stat: (id: string) => Promise<SessionStat | undefined>) {
+export async function captureDeletionRequest(home: string, header: SessionHeader, plan: DeletionPlan, stat: (id: string) => Promise<SessionStat | undefined>): Promise<DeletionRequest> {
   await safePath(home, { directory: true });
   validatePlan(home, header.id, plan);
   if (plan.directories.find(row => row.id === header.id)?.createdAt !== header.createdAt) throw new LocalizedError('error.targetLifecycleMismatch');
-  const path = requestPath(home, header.id);
-  if (await exists(path)) throw new LocalizedError('error.deletionAlreadyQueued');
   const directories: DeletionRequest['plan']['directories'] = [];
   for (const row of plan.directories) {
     const stored = await stat(row.id);
@@ -363,10 +362,13 @@ export async function enqueue(home: string, header: SessionHeader, plan: Deletio
     if (input.bytesRead !== stored.sizeBytes) throw new LocalizedError('error.sessionChanged');
     directories.push({ ...row, transcript: { path: leaf, sizeBytes: input.bytesRead, sha256: hash.digest('hex') } });
   }
-  const request: DeletionRequest = { schema: 1, dshVersion: SUPPORTED_DSH, sessionId: header.id,
+  return { schema: 1, dshVersion: SUPPORTED_DSH, sessionId: header.id,
     createdAt: header.createdAt, queuedAt: new Date().toISOString(), plan: { ids: plan.ids, directories } };
+}
+export async function enqueue(home: string, request: DeletionRequest) {
+  const path = requestPath(home, request.sessionId);
+  if (await exists(path)) throw new LocalizedError('error.deletionAlreadyQueued');
   await atomicJSON(path, request);
-  return request;
 }
 
 /** Only target bookkeeping is examined; unrelated logs/projections can keep changing. */

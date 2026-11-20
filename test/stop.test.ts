@@ -2,6 +2,8 @@ import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import fs from 'node:fs/promises';
 import { syncBuiltinESMExports } from 'node:module';
+import { spawn, type ChildProcess } from 'node:child_process';
+import { once } from 'node:events';
 import { join } from 'node:path';
 import { hash } from 'node:crypto';
 import { zstdCompressSync } from 'node:zlib';
@@ -311,6 +313,29 @@ for (const failure of ['writer', 'missing', 'identity', 'path', 'size', 'journal
     assert.deepEqual(await contents(), before); assert.equal(s.runtime.locked.size, 0);
     assert.deepEqual(s.runtime.receipt.deletedIdHashes, []);
   } finally { fs.open = open; syncBuiltinESMExports(); if (competingWriter) await competingWriter.close(); await s.f.cleanup(); }
+});
+
+void test('a second same-home host started during transcript capture prevents journal publication', async () => {
+  const s = await stoppingFixture();
+  let host: ChildProcess | undefined;
+  try {
+    const entry = join(s.f.base, '@deepseek-ai/dsh/lib/bin.js');
+    await s.f.write(entry, "process.send('ready'); setInterval(() => {}, 1000)");
+    s.runtime.ctx.sessionPersistence.stat = async id => {
+      if (!s.agents.has(s.root.id) && !host) {
+        host = spawn(process.execPath, [entry], { env: { ...process.env, DSH_HOME: s.f.home }, stdio: ['ignore', 'ignore', 'ignore', 'ipc'] });
+        await once(host, 'message');
+      }
+      return s.f.stat(id);
+    };
+    await assert.rejects(s.remove(), /Another DSH process/);
+    assert.deepEqual(await listRequests(s.f.home), []);
+    assert.equal(s.runtime.locked.size, 0);
+    for (const id of s.ids) assert.ok(await s.f.stat(id));
+  } finally {
+    if (host) { const done = once(host, 'exit'); host.kill(); await done; }
+    await s.f.cleanup();
+  }
 });
 
 void test('directory fsync failure after journal rename cannot reopen the target', { skip: process.platform !== 'linux' }, async () => {

@@ -2,7 +2,7 @@ import * as fs from 'node:fs/promises';
 import { join } from 'node:path';
 import { tmpdir } from 'node:os';
 import { zstdCompressSync } from 'node:zlib';
-import { digest, encodeSegment, enqueue, planSessionDeletion } from '../lib/core.js';
+import { captureDeletionRequest, digest, encodeSegment, enqueue, planSessionDeletion } from '../lib/core.js';
 import type { SessionHeader } from '../lib/core.js';
 
 export async function fixture(compressed = true) {
@@ -54,7 +54,10 @@ export async function fixture(compressed = true) {
     return { header: headers[id], sizeBytes: (await fs.stat(path)).size, location: { kind: 'jsonl', path } };
   }
   return { base, home, temporary, ids, headers, exclusive, shared, spillRoot, spill, sharedSpill, write, session, projectFile, stat,
-    queue: async (id = ids.main) => enqueue(home, headers[id], await planSessionDeletion(home, new Map(Object.entries(headers)), id), stat),
+    queue: async (id = ids.main) => {
+      const plan = await planSessionDeletion(home, new Map(Object.entries(headers)), id);
+      await enqueue(home, await captureDeletionRequest(home, headers[id], plan, stat));
+    },
     cleanup: () => fs.rm(base, { recursive: true, force: true }) };
 }
 

@@ -6,7 +6,7 @@ import { createHash, Hash, hash, randomBytes } from 'node:crypto';
 import { basename, join } from 'node:path';
 import { zstdCompressSync, constants } from 'node:zlib';
 import { syncBuiltinESMExports } from 'node:module';
-import { scanSessions, sweep, collectGarbage, garbageSize, exists, digest, encodeSegment, listRequests, readJSON, stateDir, enqueue, planSessionDeletion, atomicJSON, safePath, readLog, SUPPORTED_DSH, scheduledSession } from '../lib/core.js';
+import { scanSessions, sweep, collectGarbage, garbageSize, exists, digest, encodeSegment, listRequests, readJSON, stateDir, captureDeletionRequest, planSessionDeletion, atomicJSON, safePath, readLog, SUPPORTED_DSH, scheduledSession } from '../lib/core.js';
 import type { Receipt, DeletionRequest } from '../lib/core.js';
 import { birth } from '../lib/platform/index.js';
 import { fixture } from './fixtures.ts';
@@ -223,14 +223,20 @@ void test('plan validation rejects invalid schemas and traversal', async () => {
     const plan = await planSessionDeletion(f.home, new Map(Object.entries(f.headers)), f.ids.main);
     if (process.platform === 'win32') {
       const outside = { ...plan, directories: plan.directories.map(row => ({ ...row, path: `${f.home[0].toUpperCase() === 'Z' ? 'Y' : 'Z'}:\\${row.id}` })) };
-      await assert.rejects(enqueue(f.home, f.headers[f.ids.main], outside, f.stat), /Invalid deletion plan path/);
+      await assert.rejects(captureDeletionRequest(f.home, f.headers[f.ids.main], outside, f.stat), /Invalid deletion plan path/);
     }
-    await assert.rejects(enqueue(f.home, { ...f.headers[f.ids.main], createdAt: 9 }, plan, f.stat), /lifecycle/);
+    await assert.rejects(captureDeletionRequest(f.home, { ...f.headers[f.ids.main], createdAt: 9 }, plan, f.stat), /lifecycle/);
     await f.queue();
     const path = join(stateDir(f.home), 'pending', digest(f.ids.main) + '.json');
     const request = await readJSON<DeletionRequest>(path);
     await f.write(path, JSON.stringify({ ...request, schema: 'invalid' }));
     await assert.rejects(sweep(f.home), /Invalid deletion request/);
+    const transcript = request.plan.directories[0].transcript;
+    for (const key of ['path', 'sha256'] as const) {
+      request.plan.directories[0].transcript = { ...transcript, [key]: [transcript[key]] };
+      await f.write(path, JSON.stringify(request));
+      await assert.rejects(listRequests(f.home), /Invalid deletion request/);
+    }
     plan.directories[0].path = '../outside';
     await f.write(path, JSON.stringify({ ...request, plan }));
     await assert.rejects(sweep(f.home), /Invalid deletion plan path/);

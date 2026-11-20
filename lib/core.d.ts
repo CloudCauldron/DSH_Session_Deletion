@@ -140,7 +140,8 @@ export declare function familyOf(headers: ReadonlyMap<string, SessionHeader>, ro
 export declare function planSessionDeletion(home: string, headers: Map<string, SessionHeader>, rootId: string): Promise<DeletionPlan>;
 export declare function listRequests(home: string): Promise<DeletionRequest[]>;
 /** The caller holds every target writer lock through journal publication and cleanup. */
-export declare function enqueue(home: string, header: SessionHeader, plan: DeletionPlan, stat: (id: string) => Promise<SessionStat | undefined>): Promise<DeletionRequest>;
+export declare function captureDeletionRequest(home: string, header: SessionHeader, plan: DeletionPlan, stat: (id: string) => Promise<SessionStat | undefined>): Promise<DeletionRequest>;
+export declare function enqueue(home: string, request: DeletionRequest): Promise<void>;
 /** Sweep confirmed session data under the caller's live maintenance or exclusive offline writer protections. */
 export declare function sweep(home: string, { failAfter, hooks }?: {
     failAfter?: number;

@@ -6,7 +6,7 @@ import { createRequire } from 'node:module';
 import { realpath } from 'node:fs/promises';
 import { join, relative, resolve } from 'node:path';
 import { setTimeout as delay } from 'node:timers/promises';
-import { SUPPORTED_DSH, digest, enqueue, familyOf, listRequests, readJSON, readSchedule, stateDir, sweep, planSessionDeletion, collectGarbage, garbageSize, scheduledSession,
+import { SUPPORTED_DSH, captureDeletionRequest, digest, enqueue, exists, familyOf, listRequests, readJSON, readSchedule, requestPath, stateDir, sweep, planSessionDeletion, collectGarbage, garbageSize, scheduledSession,
   type UploadIndex, type LiveSnapshot, type Receipt, type SessionHeader, type SessionStat, type GcResult, type ScheduleTask } from './core.js';
 import { tryLock, sameHomeHosts } from './locks.js';
 import type { Lock } from './platform/index.js';
@@ -699,8 +699,11 @@ export class DeletionRuntime {
       await readConfirmedFamily();
       await this.checkScheduleDelivery(ids, deadline);
       if (this.manager() !== stopped.manager || this.activations(root, ids, stopped.manager).length) throw new DeletionRefused('activity.unconfirmed');
+      const request = await captureDeletionRequest(this.home, root, plan, member => this.ctx.sessionPersistence.stat(member));
+      // Another host can open the shared workspace and schedule tables while large logs are read.
+      await this.assertSoleHost();
       enqueueAttempted = true;
-      await enqueue(this.home, root, plan, member => this.ctx.sessionPersistence.stat(member));
+      await enqueue(this.home, request);
       for (const member of ids) {
         const writes = this.cacheWrites.get(member);
         if (writes?.size) await Promise.all(writes);
@@ -731,7 +734,7 @@ export class DeletionRuntime {
       await Promise.all(writerLocks.map(lock => lock.close()));
       const finish = async () => {
         // rename may commit a request even when the subsequent directory fsync fails.
-        const pending = enqueueAttempted && (await listRequests(this.home)).some(request => request.sessionId === id);
+        const pending = enqueueAttempted && await exists(requestPath(this.home, id));
         if (pending || committed) {
           // Install every tombstone before notifying fallible downstream listeners.
           if (!committed) await this.loadReceipt();
