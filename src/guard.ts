@@ -3,7 +3,7 @@ import * as fs from 'node:fs/promises';
 import { basename, join, resolve, toNamespacedPath } from 'node:path';
 import { atomicJSON, cleanAtomicTemps, exists, privateDir, safePath, stateDir, sweep, type DeletionRequest } from './core.js';
 import { sameHomeHosts, tryLock } from './locks.js';
-import { usesLockFiles, type Lock } from './platform/index.js';
+import { usesLockFiles } from './platform/index.js';
 import { LocalizedError } from './locale/errors.js';
 
 const usageError = () => new LocalizedError('error.guardUsage', { command: 'node lib/guard.js <DSH_HOME>' });
@@ -14,7 +14,7 @@ async function assertOffline(home: string) {
 
 async function offline(home: string, report?: (line: string) => void): Promise<void> {
   const state = stateDir(home);
-  const handles: Lock[] = [];
+  await using writerLocks = new AsyncDisposableStack();
   async function checkWriters(requests: readonly DeletionRequest[]) {
     const root = join(home, 'sessions');
     if (!await exists(root)) return;
@@ -34,7 +34,7 @@ async function offline(home: string, report?: (line: string) => void): Promise<v
         if (usesLockFiles && !await exists(path)) continue;
         const lock = await tryLock(path);
         if (!lock) throw new LocalizedError('error.activeWriterCleanup');
-        if (hold) handles.push(lock);
+        if (hold) writerLocks.defer(() => lock.close());
         else await lock.close();
       }
     }
@@ -49,16 +49,14 @@ async function offline(home: string, report?: (line: string) => void): Promise<v
         if (await exists(join(dir, target))) await checkWriter(project.name, target, true);
     }
   }
-  try {
-    let resolved = 0;
-    await sweep(home, { checkWriters, assertOffline: () => assertOffline(home), onResolved(id, outcome) {
-      resolved++;
-      report?.(`Deletion ${outcome} for ${id}.`);
-    } });
-    await cleanAtomicTemps(state);
-    await cleanAtomicTemps(join(home, 'storages'));
-    if (!resolved) report?.('Nothing pending.');
-  } finally { await Promise.all(handles.map(h => h.close())); }
+  let resolved = 0;
+  await sweep(home, { checkWriters, assertOffline: () => assertOffline(home), onResolved(id, outcome) {
+    resolved++;
+    report?.(`Deletion ${outcome} for ${id}.`);
+  } });
+  await cleanAtomicTemps(state);
+  await cleanAtomicTemps(join(home, 'storages'));
+  if (!resolved) report?.('Nothing pending.');
 }
 
 export async function runGuard(home: string, report?: (line: string) => void): Promise<void> {

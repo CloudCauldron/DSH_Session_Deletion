@@ -9,7 +9,6 @@ import { setTimeout as delay } from 'node:timers/promises';
 import { SUPPORTED_DSH, captureDeletionRequest, digest, enqueue, familyOf, listRequests, readReceipt, readSchedule, sweep, planSessionDeletion, collectGarbage, garbageSize, scheduledSession,
   type UploadIndex, type LiveSnapshot, type Receipt, type SessionHeader, type SessionStat, type GcResult, type ScheduleTask } from './core.js';
 import { tryLock, sameHomeHosts } from './locks.js';
-import type { Lock } from './platform/index.js';
 import { LocalizedError } from './locale/errors.js';
 import { message, type LocalizedMessage } from './locale/shared.js';
 
@@ -674,7 +673,6 @@ export class DeletionRuntime {
     await this.checkScheduleDelivery(ids, deadline);
     await this.until(this.assertSoleHost(), deadline);
     if (performance.now() >= deadline) throw new DeletionRefused('error.stopTimeout');
-    const writerLocks: Lock[] = [];
     try {
       const stopped = this.stop(root, headers, ids, deadline);
       await this.until(stopped.done, deadline);
@@ -696,10 +694,11 @@ export class DeletionRuntime {
         }
         if (this.ctx.sessions.get(member) || this.ctx.agents.get(member)) throw new LocalizedError('error.liveStoresRetained');
       }
+      await using writerLocks = new AsyncDisposableStack();
       for (const record of plan.directories) {
         const lock = await tryLock(join(this.home, record.path, 'session.lock'), true);
         if (!lock) throw new LocalizedError('error.activeSessionWriter');
-        writerLocks.push(lock);
+        writerLocks.defer(() => lock.close());
       }
       const remaining = deadline - performance.now();
       if (remaining <= 0) throw new DeletionRefused('error.stopTimeout');
@@ -739,13 +738,10 @@ export class DeletionRuntime {
       } });
       return { deleted: result.reduce((n, value) => n + value.sessions, 0) };
     } finally {
-      try { await Promise.all(writerLocks.map(lock => lock.close())); }
-      finally {
-        const unlock = () => { for (const member of ids) this.locked.delete(member); };
-        if (this.stopping) {
-          this.stopping = this.stopping.then(unlock, unlock).finally(() => { this.stopping = undefined; });
-        } else unlock();
-      }
+      const unlock = () => { for (const member of ids) this.locked.delete(member); };
+      if (this.stopping) {
+        this.stopping = this.stopping.then(unlock, unlock).finally(() => { this.stopping = undefined; });
+      } else unlock();
       if (this.deleted.has(digest(id))) {
         const registry = this.unwrap(this.ctx.workspaceRegistry);
         for (const member of ids) {

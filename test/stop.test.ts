@@ -10,7 +10,7 @@ import { zstdCompressSync } from 'node:zlib';
 import { setTimeout as delay } from 'node:timers/promises';
 import { fixture, trackContentHashes } from './fixtures.ts';
 import { makeRuntime } from './runtime-fixture.ts';
-import { familyOf, exists, listRequests, stateDir, requestPath } from '../lib/core.js';
+import { digest, familyOf, exists, listRequests, readReceipt, stateDir, requestPath } from '../lib/core.js';
 import { tryLock } from '../lib/locks.js';
 import type { RuntimeContext } from '../lib/runtime.js';
 import type { DeletionRuntime } from '../src/runtime.ts';
@@ -123,6 +123,45 @@ void test('live deletion stops the active root and hashes each confirmed transcr
     assert.equal(s.removed.length, 3); assert.equal(s.listeners(), 0);
     assert.deepEqual(await listRequests(s.f.home), []);
   } finally { await s.f.cleanup(); }
+});
+
+void test('unload drains every writer lock and publishes native removals after a close failure', { skip: process.platform !== 'linux' }, async () => {
+  const s = await stoppingFixture(), open = fs.open;
+  const failed = deferred(), waiting = deferred(), release = deferred();
+  let closing = 0, closed = 0, removal: Promise<void> | undefined;
+  try {
+    fs.open = async (path, ...args) => {
+      const handle = await open(path, ...args);
+      if (String(path).endsWith('/session.lock')) {
+        const close = handle.close.bind(handle);
+        handle.close = async () => {
+          const order = ++closing;
+          if (order === 2) { waiting.resolve(); await release.promise; }
+          await close(); closed++;
+          if (order === 1) { failed.resolve(); throw Error('writer close failed'); }
+        };
+      }
+      return handle;
+    };
+    syncBuiltinESMExports();
+    removal = assert.rejects(s.remove(), /writer close failed/);
+    await Promise.race([Promise.all([failed.promise, waiting.promise]), removal.then(() => { throw Error('Deletion ended before sibling close'); })]);
+    const unloading = s.runtime.closeAdmission();
+    assert.ok(unloading);
+    await new Promise(setImmediate);
+    assert.equal(s.runtime.deletionRunning, true);
+    assert.equal(s.runtime.locked.size, s.ids.length);
+    release.resolve();
+    await Promise.all([removal, unloading]);
+    assert.equal(closed, s.ids.length);
+    assert.equal(s.runtime.locked.size, 0);
+    assert.deepEqual(s.removed.toSorted(), s.ids.toSorted());
+    assert.deepEqual((await readReceipt(s.f.home)).deletedIdHashes.toSorted(), s.ids.map(digest).toSorted());
+    assert.ok(s.ids.every(id => s.runtime.isLocked(id)));
+  } finally {
+    release.resolve(); fs.open = open; syncBuiltinESMExports();
+    try { await removal; } finally { await s.f.cleanup(); }
+  }
 });
 
 for (const kind of ['local', 'external', 'closing'] as const) void test(`joins native ${kind} Activation cleanup, including cold-resumed children without a receipt registry`, async () => {
