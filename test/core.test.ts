@@ -42,11 +42,12 @@ for (const compressed of [false, true]) void test(`schema 1 captures only the se
     await f.write(root.location.path.replace('.v4.', '.v3.'), compressed ? zstdCompressSync(historical) : historical);
     await f.session('unlinked');
     const blank = await f.stat('unlinked');
-    const headerOnly = JSON.stringify(blank.header) + '\n';
-    await f.write(blank.location.path, compressed ? zstdCompressSync(headerOnly) : headerOnly);
+    const header = Buffer.from(JSON.stringify(blank.header) + '\n');
+    const headerOnly = compressed ? zstdCompressSync(header) : header;
+    await f.write(blank.location.path, headerOnly);
     const contentHashes = trackContentHashes(t);
     await garbageSize(f.home); await collectGarbage(f.home);
-    assert.equal(await exists(blank.location.path), true);
+    assert.deepEqual(await fs.readFile(blank.location.path), headerOnly);
     assert.equal(contentHashes(), 0);
     await f.queue();
     const [request] = await listRequests(f.home);
@@ -186,10 +187,13 @@ void test('receipts retain all hashes and advance revision after each deletion',
     assert.equal(first.deletedIdHashes.length, previous.length + 3);
     assert.match(first.revision, /^[a-f0-9]{32}$/);
     await f.queue(f.ids.other);
+    // All transcripts for this request are already gone, but its receipt is still outstanding.
+    await fs.unlink((await f.stat(f.ids.other)).location.path);
     await sweep(f.home);
     const second = await readJSON<Receipt>(path);
     assert.notEqual(second.revision, first.revision);
     assert.deepEqual(second.deletedIdHashes.slice(0, first.deletedIdHashes.length), first.deletedIdHashes);
+    assert.deepEqual(second.deletedIdHashes.slice(first.deletedIdHashes.length), [digest(f.ids.other)]);
   } finally { await f.cleanup(); }
 });
 async function fileSnapshot(root: string) {

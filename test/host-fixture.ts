@@ -123,9 +123,10 @@ export function apply(ctx: FixtureContext){
     };
     ctx.effect(()=>()=>{releaseImage.resolve();attachments.saveImage=saveImage});
     res.writeHead(200,{'Content-Type':'application/json'});res.end(JSON.stringify({id:workspace.id}));return;
-   }else if(path==='/deletion-test/attach'||path==='/deletion-test/detach'){
+   }else if(path==='/deletion-test/create-workspace'||path==='/deletion-test/attach'||path==='/deletion-test/detach'){
     const workspace=await ctx.workspaceRegistry.create(data.cwd);
-    if(path.endsWith('/attach'))await workspace.attachSession(data.id!);else await workspace.detachSession(data.id!);
+    if(path.endsWith('/attach'))await workspace.attachSession(data.id!);
+    if(path.endsWith('/detach'))await workspace.detachSession(data.id!);
    }else if(path==='/deletion-test/import-image'){
     res.writeHead(200,{'Content-Type':'application/json'});res.end(JSON.stringify({id:importedImage}));return;
    }else if(path==='/deletion-test/release-image'){releaseImage.resolve()}

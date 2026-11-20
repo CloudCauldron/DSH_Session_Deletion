@@ -1,5 +1,6 @@
 import assert from 'node:assert/strict';
 import * as fs from 'node:fs/promises';
+import { createReadStream } from 'node:fs';
 import { basename, dirname, join, resolve } from 'node:path';
 import { tmpdir } from 'node:os';
 import { spawn } from 'node:child_process';
@@ -11,7 +12,7 @@ import { setTimeout as delay } from 'node:timers/promises';
 import { zipSync, strToU8 } from 'fflate';
 import { chromium, type Browser, type Locator } from 'playwright-core';
 import type { SessionHeader } from '../lib/core.js';
-import { exists, projectKey, listRequests, SUPPORTED_DSH } from '../lib/core.js';
+import { encodeSegment, exists, projectKey, listRequests, SUPPORTED_DSH } from '../lib/core.js';
 import { runGuard } from '../lib/guard.js';
 import { tryLock } from '../lib/locks.js';
 
@@ -91,6 +92,13 @@ async function stop(){
  if(!host)return;assert(exited);
  if(host.exitCode===null&&host.signalCode===null){host.kill('SIGINT');await Promise.race([exited,delay(15000,undefined,{ref:false}).then(()=>{throw new Error('Host did not exit')})]);}
 }
+async function waitForHost(check:()=>Promise<boolean>,description:string){
+ const deadline=performance.now()+60000;
+ while(!await check()){
+  assert.ok(performance.now()<deadline,description);
+  await delay(100);
+ }
+}
 try{
  const url=await start();
  for(const path of ['status','receipt','gc-size']){
@@ -113,8 +121,9 @@ try{
  const onboarding=page.getByRole('dialog').filter({hasText:'开始使用'});
  await onboarding.locator('button').first().click();
  await page.addLocatorHandler(page.getByRole('dialog',{name:'开始使用'}),async dialog=>{const close=dialog.locator('button').first();if(await close.isEnabled())await close.click()},{noWaitAfter:true});
- const status=async()=>{const r=await context.request.get(`http://127.0.0.1:${port}/session-deletion/api/status`,{maxRetries:1});assert.equal(r.status(),200);return r.json()};
- const receipt=async()=>{const r=await context.request.get(`http://127.0.0.1:${port}/session-deletion/api/receipt`);assert.equal(r.status(),200);return r.json()};
+ const getApi=(path:string)=>context.request.get(`http://127.0.0.1:${port}/session-deletion/api/${path}`,{maxRetries:1});
+ const status=async()=>{const r=await getApi('status');assert.equal(r.status(),200);return r.json()};
+ const receipt=async()=>{const r=await getApi('receipt');assert.equal(r.status(),200);return r.json()};
  const initialStatus=await status();
  assert.equal(initialStatus.ok,true);
  assert.equal(initialStatus.version,SUPPORTED_DSH);
@@ -131,7 +140,7 @@ try{
  const row=page.getByText(/^(未命名|Offline deletion integration fixture)$/).first();
  await row.waitFor({timeout:15000});
  await row.click();
- const controls=async(action: string,data: Record<string, unknown>={})=>context.request.post(`http://127.0.0.1:${port}/deletion-test/`+action,{data});
+ const controls=async(action: string,data: Record<string, unknown>={})=>context.request.post(`http://127.0.0.1:${port}/deletion-test/`+action,{data,maxRetries:action==='state'?1:0});
  for(let i=0;i<100;i++){if((await (await controls('state',{id})).json()).agentResident)break;await delay(50)}
  const archivedProbe=await (await controls('archive-probe',{id})).json();
  assert.deepEqual(archivedProbe,{archived:true,agentResident:true,sessionResident:true,status:'idle',writerOpen:true});
@@ -202,7 +211,7 @@ try{
  assert.equal((await status()).archived.includes(id),false,'a refused stop must preserve the original archive state');
  assert.equal((await status()).deletionRunning,true,'a timed-out request retains protection until actual cleanup settles');
  await page.keyboard.press('Escape');await controls('release-maintenance',{id});
- await page.waitForFunction(async()=>!(await (await fetch('/session-deletion/api/status')).json()).deletionRunning);
+ await waitForHost(async()=>!(await status()).deletionRunning,'timed-out deletion did not settle');
  await controls('stop-timeout',{ms:30000});
  await controls('maintain',{id:draftOwner.id});
  const busyGc=await context.request.post(`http://127.0.0.1:${port}/session-deletion/api/gc`,{headers:{'X-DSH-Session-Deletion':'1'},data:{confirmation:'COLLECT_ORPHAN_ATTACHMENTS'}});
@@ -238,15 +247,17 @@ try{
  const deletionAppearance=await dialogAppearance(deletionDialog);
  assert.deepEqual(deletionAppearance,nativeAppearance,'private deletion uses the actual native modal and button styles');
  await page.getByRole('button',{name:'确认删除',exact:true}).click();
- for(let i=0;i<100;i++){if((await (await controls('held')).json()).held)break;await delay(50)}
- assert.equal((await (await controls('held')).json()).held,true,'test must pause after the backend locks the target');
+ const waitForHeldDeletion=()=>waitForHost(async()=>(await (await controls('held')).json()).held,'deletion did not reach the projection cleanup');
+ await waitForHeldDeletion();
  const lockedProbe=await controls('locked-transcript',{id});assert.equal(lockedProbe.status(),200,await lockedProbe.text());
  const selected=await lockedProbe.json();assert.equal(selected.location.path,log);
  const [journal]=await listRequests(home);
  assert.equal(journal.schema,1);assert.deepEqual(journal.plan.ids,[id]);
  const [target]=journal.plan.directories;
  assert.equal(join(home,target.path,target.transcript.path),log);
- assert.deepEqual(target.transcript,{path:basename(log),sizeBytes:selected.sizeBytes,sha256:createHash('sha256').update(await fs.readFile(log)).digest('hex')});
+ const storedHash=createHash('sha256');
+ for await(const chunk of createReadStream(selected.location.path))storedHash.update(chunk);
+ assert.deepEqual(target.transcript,{path:basename(log),sizeBytes:selected.sizeBytes,sha256:storedHash.digest('hex')});
  const deleteToast=page.getByRole('alert').filter({hasText:'正在删除会话…'});
  await page.waitForFunction(()=>[...document.querySelectorAll('[role="alert"]')].some(el=>el.textContent==='正在删除会话…'));
  assert.match(await deleteToast.getAttribute('class')??'',/toast/,'progress uses the DSH Toast primitive');
@@ -474,52 +485,85 @@ try{
  assert.equal((await status()).pending.length,1);
  assert.equal((await controls('attach',{cwd,id:preserved.id})).status(),200);
  assert.equal((await controls('pin',{id:preserved.id})).status(),200);
- async function switchPlugin(kind:'package'|'component',enabled:boolean){
-  await page.getByRole('button',{name:'插件',exact:true}).click();
+ async function clickPluginSwitch(kind:'package'|'component',enabled:boolean){
+  await page.getByRole('button',{name:/^(插件|Plugins)$/}).click();
   const card=page.locator('[data-plugin-package="dsh-session-deletion"]');
   const detail=page.locator('[data-plugin-detail="dsh-session-deletion"]');
   await card.or(detail).first().waitFor();
   if(kind==='component'&&!await detail.isVisible())await card.getByRole('button',{name:/^查看/}).click();
   const controls=kind==='package'?card:detail.locator('[data-plugin-rows]');
-  await controls.getByRole('switch',{checked:!enabled}).click();
-  await page.waitForFunction(async expected=>(await fetch('/session-deletion/api/status')).ok===expected,enabled,{timeout:60000,polling:250});
+  await Promise.all([
+   enabled && page.waitForResponse(r=>new URL(r.url()).pathname==='/session-deletion/api/receipt' && r.ok(),{timeout:60000}),
+   controls.getByRole('switch',{checked:!enabled}).click(),
+  ]);
  }
+ const waitForPlugin=(enabled:boolean)=>waitForHost(async()=>{
+  const response=await getApi('status');
+  return enabled ? response.ok() && (await response.json()).ok===true : response.status()===404;
+ },`plugin did not become ${enabled?'available':'unavailable'}`);
  const survivor=page.locator(`[data-row-key="session:${preserved.id}"]`);
  const visibleSessions=()=>page.locator('[data-row-key^="session:"]').evaluateAll(rows=>rows.map(row=>row.getAttribute('data-row-key')).sort());
  await survivor.click();
  const transcript=page.getByText('Preserved fixture sha256:'+shared,{exact:true});
  await transcript.waitFor();
- for(const kind of ['package','component'] as const){
-  await survivor.click();
-  const expected=await visibleSessions();
-  await switchPlugin(kind,false);
-  await survivor.click({button:'right'});
-  await page.getByRole('menuitem',{name:'重命名',exact:true}).waitFor();
-  await page.getByRole('menuitem',{name:'删除会话',exact:true}).waitFor({state:'hidden'});
-  await page.keyboard.press('Escape');
-  await page.reload();
-  await survivor.click();
-  await transcript.waitFor();
-  assert.deepEqual(await visibleSessions(),expected);
-  await page.getByRole('button',{name:'添加工作区',exact:true}).click();
-  const picker=page.getByRole('dialog',{name:'选择工作区目录'});
-  await picker.getByRole('button',{name:'取消'}).click();
-  await page.getByRole('button',{name:'新建会话',exact:true}).filter({hasText:'新会话'}).click();
-  await page.waitForFunction(previous=>{
-   const current=JSON.parse(localStorage.getItem('dsh.sessions.current')??'{}').sessionId;
-   return typeof current==='string' && current!==previous;
-  },preserved.id,{timeout:10000});
-  await Promise.all([
-   page.waitForResponse(r=>new URL(r.url()).pathname==='/session-deletion/api/receipt' && r.ok(),{timeout:60000}),
-   switchPlugin(kind,true),
-  ]);
-  assert.equal((await status()).pending.length,1);
-  await survivor.click();
-  await transcript.waitFor();
-  await survivor.click({button:'right'});
-  const action=page.getByRole('menuitem',{name:'删除会话',exact:true});
-  await action.waitFor();assert.equal(await action.count(),1);assert.ok(await action.isDisabled(),'the pending journal still blocks new deletions');
-  await page.keyboard.press('Escape');
+ async function nextSession(previous:string){
+  const selection=await page.waitForFunction(previous=>{
+   const id=JSON.parse(localStorage.getItem('dsh.sessions.current')??'{}').sessionId;
+   return typeof id==='string' && id.length>0 && id!==previous ? id : undefined;
+  },previous,{timeout:10000});
+  const id=await selection.jsonValue();assert.ok(id);return id;
+ }
+ for(const kind of ['package','package','component','component'] as const){
+  // DSH can reuse a workspace's existing blank. This workspace has no sessions to reuse.
+  const workspace=await fs.mkdtemp(join(base,'toggle-'));
+  assert.equal((await controls('create-workspace',{cwd:workspace})).status(),200);
+  let disabledSession: string | undefined;
+  for(const enabled of [false,true]){
+   await survivor.click();
+   await transcript.waitFor();
+   const expected=await visibleSessions();
+   await clickPluginSwitch(kind,enabled);
+   await waitForPlugin(enabled);
+   if(enabled){
+    assert.ok(disabledSession);
+    const state=await controls('state',{id:disabledSession});
+    assert.equal(state.status(),200);
+    assert.ok((await state.json()).agentResident,'the session opened while disabled survives re-enable');
+    assert.equal((await status()).pending.length,1);
+   }
+   await survivor.click();
+   await transcript.waitFor();
+   await survivor.click({button:'right'});
+   await page.getByRole('menuitem',{name:'重命名',exact:true}).waitFor();
+   const action=page.getByRole('menuitem',{name:'删除会话',exact:true});
+   await action.waitFor({state:enabled?'visible':'hidden'});
+   assert.equal(await action.count(),Number(enabled));
+   if(enabled)assert.ok(await action.isDisabled(),'the pending journal still blocks new deletions');
+   await page.keyboard.press('Escape');
+   const more=page.locator('nav').getByRole('button',{name:'更多',exact:true});
+   if(enabled || await more.isVisible()){
+    await more.click();
+    const gc=page.getByRole('menuitem',{name:/^释放空间/});
+    await gc.waitFor({state:enabled?'visible':'hidden'});
+    assert.equal(await gc.count(),Number(enabled));
+    await page.keyboard.press('Escape');
+   }
+   await page.reload();
+   await survivor.click();
+   await transcript.waitFor();
+   assert.deepEqual(await visibleSessions(),expected);
+   await page.getByRole('button',{name:'新建会话',exact:true}).filter({hasText:'新会话'}).click();
+   const blank=await nextSession(preserved.id);
+   await page.getByRole('button',{name:'添加工作区',exact:true}).click();
+   await page.getByRole('dialog',{name:'选择工作区目录'}).getByRole('button',{name:'取消'}).click();
+   if(!enabled){
+    const label=basename(workspace);
+    await page.getByText(label,{exact:true}).hover();
+    await page.getByRole('button',{name:`在“${label}”中新建会话`,exact:true}).click();
+    disabledSession=await nextSession(blank);
+    assert.ok(await exists(join(home,'sessions',projectKey(workspace),encodeSegment(disabledSession))));
+   }
+  }
  }
  await page.goto('about:blank');await stop();
  // Linux exposes the exec-time environment. Run this ambiguous-host case outside
@@ -644,18 +688,15 @@ try{
  const gcApi=`http://127.0.0.1:${port}/session-deletion/api/`;
  const post=(route:string,data:Record<string,unknown>)=>context.request.post(gcApi+route,{headers:{'X-DSH-Session-Deletion':'1'},data});
  const collect=()=>post('gc',{confirmation:'COLLECT_ORPHAN_ATTACHMENTS'});
- const reclaimable=()=>context.request.get(gcApi+'gc-size');
+ const reclaimable=()=>getApi('gc-size');
  const workspacePath=join(home,'storages/workspace.json');
  const hasFilteredMember=async()=>Object.values(JSON.parse(await fs.readFile(workspacePath,'utf8')).tables.workspaces as Record<string,{sessionIds:string[]}>)
   .some(row=>row.sessionIds.includes(filtered.id));
- assert.ok(await hasFilteredMember(),'the stored workspace retains the filtered candidate');
  const removeSession=async(sessionId:string)=>{
   const preview=await post('preview',{sessionId});assert.equal(preview.status(),200,await preview.text());
   const deletion=await post('delete',{sessionId,token:(await preview.json()).token,confirmation:'DELETE_SESSION'});
   assert.equal(deletion.status(),200,await deletion.text());assert.equal((await deletion.json()).deleted,1);
  };
- await removeSession(filtered.id);
- assert.equal(await hasFilteredMember(),false);
  const importing=upload();
  let importedHash:string|undefined;
  try {
@@ -714,6 +755,27 @@ try{
  await page.getByRole('menuitem',{name:/^Free Up Space/}).click();
  await page.getByRole('dialog',{name:'Clean up orphaned attachments and cache?',exact:true})
   .getByRole('button',{name:'Cancel',exact:true}).click();
+ // Disable from the sidebar while the admitted deletion is paused after journal publication.
+ assert.ok(await hasFilteredMember(),'the stored workspace retains the filtered candidate');
+ assert.equal((await controls('hold-delete',{id:filtered.id})).status(),200);
+ await Promise.all([removeSession(filtered.id),(async()=>{
+  try {
+   await waitForHeldDeletion();
+   await clickPluginSwitch('package',false);
+   await waitForHost(async()=>{
+    const response=await reclaimable();
+    return response.status()===409 && (await response.json()).messages[0]?.key==='error.runtimeUnavailable';
+   },'disable did not close admission while the deletion was held');
+   assert.ok(await exists(filtered.path));
+  } finally { await controls('release-delete'); }
+ })()]);
+ await waitForPlugin(false);
+ assert.equal(await exists(filtered.path),false);
+ assert.equal(await hasFilteredMember(),false);
+ assert.equal((await listRequests(home)).length,0);
+ await clickPluginSwitch('package',true);
+ await waitForPlugin(true);
+ assert.ok((await receipt()).deletedIdHashes.includes(createHash('sha256').update(filtered.id).digest('hex')));
  assert.deepEqual(errors,[]);
  console.log('INTEGRATION PASS: active native turns, cold-resumed and external subagents, jobs, schedules, preparation UI locks, private deletion, isolated publication, GC, recovery, and live zh/en metadata');
 }catch(e){

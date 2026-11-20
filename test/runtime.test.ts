@@ -7,10 +7,10 @@ import{setTimeout as delay}from'node:timers/promises';
 import{PublicationBarrier}from'../lib/runtime.js';
 import { makeRuntime } from './runtime-fixture.ts';
 import type { RuntimeContext } from '../lib/runtime.js';
-import { fixture } from './fixtures.ts';
+import { fixture, trackContentHashes } from './fixtures.ts';
 import { familyOf, listRequests, stateDir } from '../lib/core.js';
 
-void test('upload coordination covers importer replacement and preserves synchronous prompt bindings', async () => {
+void test('upload coordination covers importer replacement and preserves synchronous prompt bindings', async t => {
  const f = await fixture(); let dispose: (() => void | Promise<void>) | undefined, maintenance: Promise<unknown> | undefined;
  const flushing = Promise.withResolvers<void>(), release = Promise.withResolvers<void>();
  try {
@@ -39,7 +39,9 @@ void test('upload coordination covers importer replacement and preserves synchro
    on(name, listener) { if (name === 'agent/disposed') detachAgent = listener as typeof detachAgent; return () => {}; },
    inject(names, bind) { if (names.includes('deepseekChatImport')) bindImporter = bind; }, effect(callback) { dispose = callback(); },
   });
+  const contentHashes = trackContentHashes(t);
   await runtime.initialize();
+  assert.equal(contentHashes(), 0, 'startup does not hash transcripts');
   assert.notEqual(owner.send, nativeSend);
   await assert.rejects(runtime.gc(), /upload tracking/);
   assert.equal(await fs.readFile(join(f.home, 'attachments/v1/objects', f.exclusive.slice(0, 2), f.exclusive), 'utf8'), 'image');
