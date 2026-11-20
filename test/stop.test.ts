@@ -254,7 +254,7 @@ void test('duplicate operation identities drain once and do not wedge stopping',
   } finally { publication.resolve(); await s.f.cleanup(); }
 });
 
-void test('a request rename committed before a post-rename error preserves the journal and locks', async () => {
+void test('a post-rename error preserves the journal and releases the intact family', async () => {
   const s = await stoppingFixture(); const rm = fs.rm;
   try {
     const handle = s.runtime.handles.get(s.root.id)!, dispose = handle.dispose;
@@ -274,7 +274,10 @@ void test('a request rename committed before a post-rename error preserves the j
     const bytes = await fs.readFile(location.path);
     const transcript = request.plan.directories.find(row => row.id === s.root.id)!.transcript;
     assert.equal(transcript.sha256, hash('sha256', bytes)); assert.equal(transcript.sizeBytes, bytes.length);
-    assert(s.runtime.isLocked(s.root.id)); assert.deepEqual(s.disposed, [s.root.id]);
+    assert.ok(s.ids.every(member => !s.runtime.isLocked(member)));
+    assert.deepEqual(s.disposed, [s.root.id]);
+    await assert.rejects(s.remove(), /previous session deletion is incomplete/i);
+    await assert.rejects(s.runtime.gc(), /session deletion is incomplete/i);
   } finally { fs.rm = rm; syncBuiltinESMExports(); await s.f.cleanup(); }
 });
 
@@ -376,7 +379,7 @@ void test('a long transcript read leaves time for the final family and schedule 
   } finally { await s.f.cleanup(); }
 });
 
-void test('directory fsync failure after journal rename cannot reopen the target', { skip: process.platform !== 'linux' }, async () => {
+void test('directory fsync failure leaves the journal pending and the intact session accessible', { skip: process.platform !== 'linux' }, async () => {
   const s = await stoppingFixture(); const open = fs.open; let failed = false;
   try {
     fs.open = async (path, ...args) => {
@@ -393,7 +396,7 @@ void test('directory fsync failure after journal rename cannot reopen the target
     syncBuiltinESMExports();
     await assert.rejects(s.remove(), /directory fsync/);
     assert.equal(failed, true); assert.equal((await listRequests(s.f.home)).length, 1);
-    assert(s.runtime.isLocked(s.root.id)); assert.deepEqual(s.disposed, [s.root.id]);
+    assert.equal(s.runtime.isLocked(s.root.id), false); assert.deepEqual(s.disposed, [s.root.id]);
   } finally { fs.open = open; syncBuiltinESMExports(); await s.f.cleanup(); }
 });
 

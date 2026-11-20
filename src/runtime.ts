@@ -738,8 +738,7 @@ export class DeletionRuntime {
       await Promise.all(writerLocks.map(lock => lock.close()));
       const finish = async () => {
         // rename may commit a request even when the subsequent directory fsync fails.
-        const pending = enqueueAttempted && await exists(requestPath(this.home, id));
-        if (pending || committed) {
+        if (committed || (enqueueAttempted && await exists(requestPath(this.home, id)))) {
           // Install every tombstone before notifying fallible downstream listeners.
           if (!committed) await this.loadReceipt();
           const completed = ids.filter(member => this.deleted.has(digest(member)));
@@ -752,8 +751,8 @@ export class DeletionRuntime {
             catch (error) { this.ctx.logger.warn('Session removal notification failed', error); }
           }
         }
-        // Only settled native cleanup may release an uncommitted attempt's locks.
-        if (!pending) for (const member of ids) this.locked.delete(member);
+        // The journal blocks new maintenance. Only a receipt keeps a settled session locked.
+        for (const member of ids) this.locked.delete(member);
       };
       if (this.stopping) {
         this.stopping = this.stopping.then(finish, finish)

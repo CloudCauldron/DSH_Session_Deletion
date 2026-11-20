@@ -476,6 +476,8 @@ try{
  await recoveryToast.waitFor({state:'detached',timeout:12000});
  await delay(1200);
  assert.equal(await recoveryToast.count(),0,'polling an unchanged state must not reopen an expired Toast');
+ const reopen=await controls('open',{id:interrupted.id});
+ assert.equal(reopen.status(),200,await reopen.text());
  await page.evaluate(id=>localStorage.setItem('dsh.conversation.'+id,JSON.stringify({draft:'private fixture draft'})),id);
  // Exiting and reopening DSH both leave the interrupted request pending.
  await Promise.all([otherPage.close(),independentPage.close(),page.goto('about:blank')]);
