@@ -36,6 +36,9 @@ void test('guard CLI reports abandonment, an empty queue and invalid invocation'
     assert.equal(empty.status, 0, empty.stderr); assert.match(empty.stdout, /Nothing pending/);
     const invalid = guardCli();
     assert.equal(invalid.status, 1); assert.match(invalid.stderr, /Usage:/);
+    const unset = spawnSync(process.execPath, [join(process.cwd(), 'lib/guard.js'), ''], { cwd: f.base, encoding: 'utf8' });
+    assert.equal(unset.status, 1); assert.match(unset.stderr, /Usage:/);
+    assert.equal(await exists(stateDir(f.base)), false);
   } finally { await f.cleanup(); }
 });
 
@@ -67,8 +70,9 @@ void test('kernel writer lock defers all cleanup and preserves pending request',
     await lock.close();lock=undefined;
     const installed=join(f.base,'installed-plugin');
     await fs.symlink(process.cwd(),installed,'junction');
-    const retry=spawn(process.execPath,[join(installed,'lib/guard.js'),f.home],{stdio:'ignore'});
-    assert.equal((await finished(retry)).code,0);
+    const retry=spawnSync(process.execPath,[join(installed,'lib/guard.js'),f.home],{encoding:'utf8'});
+    assert.equal(retry.status,0,retry.stderr);
+    assert.equal(retry.stdout.trim(),`Deletion completed for ${f.ids.main}.`);
     assert.deepEqual(await listRequests(f.home),[]);
     assert.equal(await exists(join(f.sessionProject,f.ids.main)),false);
   } finally {await lock?.close();await f.cleanup();}

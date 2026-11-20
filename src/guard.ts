@@ -6,6 +6,8 @@ import { sameHomeHosts, tryLock } from './locks.js';
 import { usesLockFiles, type Lock } from './platform/index.js';
 import { LocalizedError } from './locale/errors.js';
 
+const usageError = () => new LocalizedError('error.guardUsage', { command: 'node lib/guard.js <DSH_HOME>' });
+
 async function offline(home: string, report?: (line: string) => void): Promise<void> {
   const state = stateDir(home);
   const pending = join(state, 'pending');
@@ -36,6 +38,7 @@ async function offline(home: string, report?: (line: string) => void): Promise<v
 }
 
 export async function runGuard(home: string, report?: (line: string) => void): Promise<void> {
+  if (!home) throw usageError();
   home = resolve(home);
   await safePath(home, { directory: true });
   if ((await sameHomeHosts(home)).length) throw new LocalizedError('error.otherProcessCleanup');
@@ -54,7 +57,7 @@ export async function runGuard(home: string, report?: (line: string) => void): P
 
 if (import.meta.main) {
   try {
-    if (process.argv.length !== 3) throw new LocalizedError('error.guardUsage', { command: 'node lib/guard.js <DSH_HOME>' });
+    if (process.argv.length !== 3) throw usageError();
     await runGuard(process.argv[2], console.log);
   } catch (error) {
     console.error(error instanceof Error ? error.message : error);
