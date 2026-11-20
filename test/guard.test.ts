@@ -4,6 +4,7 @@ import fs from 'node:fs/promises';
 import { basename, dirname, join, toNamespacedPath } from 'node:path';
 import { spawn, spawnSync } from 'node:child_process';
 import { once } from 'node:events';
+import { syncBuiltinESMExports } from 'node:module';
 import { runGuard } from '../lib/guard.js';
 import { tryLock, sameHomeHosts } from '../lib/locks.js';
 import { exists, listRequests, stateDir, atomicJSON, readJSON } from '../lib/core.js';
@@ -90,6 +91,41 @@ void test('a competing offline run neither deletes data nor overwrites the activ
     assert.equal((await listRequests(f.home)).length,1);
     assert.equal(await exists(join(f.sessionProject,f.ids.main)),true);
   } finally {await lock?.close();await f.cleanup();}
+});
+
+for (const changed of [false, true]) void test(`a host opened during transcript comparison prevents ${changed ? 'abandonment' : 'cleanup'}`, async () => {
+  const f = await fixture(false);
+  const open = fs.open;
+  let host: ChildProcess | undefined, done: ReturnType<typeof finished> | undefined;
+  try {
+    await f.queue(f.ids.other);
+    const { location: { path } } = await f.stat(f.ids.other);
+    if (changed) await fs.appendFile(path, '\n');
+    const transcript = await fs.readFile(path);
+    const workspace = join(f.home, 'storages/workspace.json'), original = await fs.readFile(workspace);
+    const entry = join(f.base, '@deepseek-ai/dsh/lib/bin.js');
+    await f.write(entry, 'console.log("ready"); setInterval(() => {}, 1000)');
+    fs.open = async (...args: Parameters<typeof open>) => {
+      if (!host && args[0] === path) {
+        host = spawn(process.execPath, [entry], { env: { ...process.env, DSH_HOME: f.home }, stdio: ['ignore', 'pipe', 'ignore'] });
+        done = finished(host);
+        await once(host.stdout!, 'data');
+      }
+      return open(...args);
+    };
+    syncBuiltinESMExports();
+    const outcomes: string[] = [];
+    await assert.rejects(runGuard(f.home, line => outcomes.push(line)), /Another DSH process/);
+    assert.deepEqual(outcomes, []);
+    assert.deepEqual(await fs.readFile(path), transcript);
+    assert.deepEqual(await fs.readFile(workspace), original);
+    assert.equal((await listRequests(f.home)).length, 1);
+    assert.equal(await exists(join(stateDir(f.home), 'receipt.json')), false);
+  } finally {
+    fs.open = open; syncBuiltinESMExports();
+    host?.kill(); await done;
+    await f.cleanup();
+  }
 });
 
 for (const desktop of [false, true]) void test(`an empty recovery queue refuses another ${desktop ? 'Desktop' : 'CLI'} host using the same home`, async () => {

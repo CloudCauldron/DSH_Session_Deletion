@@ -549,8 +549,8 @@ async function familyChanged(home: string, plan: DeletionRequest['plan']): Promi
   return changed;
 }
 /** Sweep confirmed session data under the caller's live maintenance or exclusive offline writer protections. */
-export async function sweep(home: string, { failAfter, hooks, onResolved }: {
-  failAfter?: number; hooks?: SweepHooks; onResolved?: (id: string, outcome: 'completed' | 'abandoned') => void;
+export async function sweep(home: string, { failAfter, hooks, assertOffline, onResolved }: {
+  failAfter?: number; hooks?: SweepHooks; assertOffline?: () => Promise<void>; onResolved?: (id: string, outcome: 'completed' | 'abandoned') => void;
 } = {}) {
   await safePath(home, { directory: true });
   let operations = 0;
@@ -560,6 +560,7 @@ export async function sweep(home: string, { failAfter, hooks, onResolved }: {
     const plan = request.plan; const ids = new Set(plan.ids);
     if (hooks) await validateTargetDirectories(home, plan);
     else if (await familyChanged(home, plan)) {
+      await assertOffline?.();
       await removeOwned(requestPath(home, request.sessionId));
       onResolved?.(request.sessionId, 'abandoned');
       continue;
@@ -568,6 +569,7 @@ export async function sweep(home: string, { failAfter, hooks, onResolved }: {
     const receiptPath = join(stateDir(home), 'receipt.json');
     const receipt = await readReceipt(home);
     receipt.deletedIdHashes = [...new Set([...receipt.deletedIdHashes, ...plan.ids.map(digest)])];
+    await assertOffline?.();
     checkpoint();
     for (const edit of work.rewrite) {
       if (hooks?.applyEdit) await hooks.applyEdit(edit, ids); else await atomicJSON(edit.path, edit.data);

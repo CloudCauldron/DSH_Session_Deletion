@@ -8,6 +8,10 @@ import { LocalizedError } from './locale/errors.js';
 
 const usageError = () => new LocalizedError('error.guardUsage', { command: 'node lib/guard.js <DSH_HOME>' });
 
+async function assertOffline(home: string) {
+  if ((await sameHomeHosts(home)).length) throw new LocalizedError('error.otherProcessCleanup');
+}
+
 async function offline(home: string, report?: (line: string) => void): Promise<void> {
   const state = stateDir(home);
   const pending = join(state, 'pending');
@@ -37,7 +41,7 @@ async function offline(home: string, report?: (line: string) => void): Promise<v
       }
     }
     let resolved = 0;
-    await sweep(home, { onResolved(id, outcome) {
+    await sweep(home, { assertOffline: () => assertOffline(home), onResolved(id, outcome) {
       resolved++;
       report?.(`Deletion ${outcome} for ${id}.`);
     } });
@@ -51,7 +55,7 @@ export async function runGuard(home: string, report?: (line: string) => void): P
   if (!home) throw usageError();
   home = resolve(home);
   await safePath(home, { directory: true });
-  if ((await sameHomeHosts(home)).length) throw new LocalizedError('error.otherProcessCleanup');
+  await assertOffline(home);
   const state = stateDir(home);
   await privateDir(state);
   const lock = await tryLock(join(await fs.realpath(state), 'lifecycle.lock'), true, true);
