@@ -8,11 +8,15 @@ import type { DeletionClientContext, DeletionPreview, DeletionReceipt, PendingDe
 import type { LocalizedProps } from '../src/locale/shared.js';
 
 type ClientFixture = Partial<Omit<DeletionClientContext, 'slots'>> & { slots: Partial<DeletionClientContext['slots']> };
-interface ClientPlugin { apply(ctx: ClientFixture): Promise<void> }
+interface ClientPlugin { apply(ctx: ClientFixture): void }
 function applyClient(plugin: ClientPlugin, ctx: ClientFixture) {
-  return plugin.apply({ ...ctx, plugin(apply) {
-    return Object.assign(apply(ctx as DeletionClientContext), { dispose: async () => {} });
+  const mounted = Promise.withResolvers<void>();
+  plugin.apply({ ...ctx, plugin(apply) {
+    const child = apply(ctx as DeletionClientContext);
+    void child.then(mounted.resolve, mounted.reject);
+    return Object.assign(child, { dispose: async () => {} });
   } });
+  return mounted.promise;
 }
 interface ClientModule { factory(require: (name: string) => unknown): ClientPlugin }
 type MenuContribution = Parameters<DeletionClientContext['contextMenus']['register']>[0];

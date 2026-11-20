@@ -118,13 +118,26 @@ try{
   errors.push((error.stack??error.message).replace(/token=[^\s&]+/g,'token=[redacted]'));
  });
  const page=await context.newPage();
+ async function checkDirectoryPicker(){
+  await page.getByRole('button',{name:'添加工作区',exact:true}).click();
+  const picker=page.getByRole('dialog',{name:'选择工作区目录'});
+  await picker.getByRole('button',{name:'打开',exact:true,disabled:false}).waitFor();
+  await picker.getByRole('button',{name:'取消'}).click();
+ }
  let receiptRequests=0;page.on('request',request=>{if(new URL(request.url()).pathname==='/session-deletion/api/receipt')receiptRequests++});
- await page.goto(url);await page.waitForTimeout(2000);
- const welcome=page.getByRole('button',{name:'继续',exact:true});if(await welcome.count())await welcome.click();
- await page.getByText('开始使用',{exact:true}).waitFor({timeout:5000});
- const onboarding=page.getByRole('dialog').filter({hasText:'开始使用'});
- await onboarding.locator('button').first().click();
- await page.addLocatorHandler(page.getByRole('dialog',{name:'开始使用'}),async dialog=>{const close=dialog.locator('button').first();if(await close.isEnabled())await close.click()},{noWaitAfter:true});
+ const releaseStatus=Promise.withResolvers<void>();
+ await page.route('**/session-deletion/api/status',async route=>{await releaseStatus.promise;await route.continue()},{times:1});
+ try {
+  await Promise.all([page.waitForRequest('**/session-deletion/api/status'),page.goto(url,{waitUntil:'domcontentloaded'})]);
+  await page.waitForTimeout(2000);
+  const welcome=page.getByRole('button',{name:'继续',exact:true});if(await welcome.count())await welcome.click();
+  await page.getByText('开始使用',{exact:true}).waitFor({timeout:5000});
+  const onboarding=page.getByRole('dialog').filter({hasText:'开始使用'});
+  await onboarding.locator('button').first().click();
+  await page.addLocatorHandler(page.getByRole('dialog',{name:'开始使用'}),async dialog=>{const close=dialog.locator('button').first();if(await close.isEnabled())await close.click()},{noWaitAfter:true});
+  await checkDirectoryPicker();
+ } finally { releaseStatus.resolve(); }
+ await waitForHost(async()=>receiptRequests>0,'the plugin did not mount after status became available');
  const getApi=(path:string)=>context.request.get(`http://127.0.0.1:${port}/session-deletion/api/${path}`,{maxRetries:1});
  const status=async()=>{const r=await getApi('status');assert.equal(r.status(),200);return r.json()};
  const receipt=async()=>{const r=await getApi('receipt');assert.equal(r.status(),200);return r.json()};
@@ -574,10 +587,7 @@ try{
    const created=await nextSession(blank);
    assert.ok(await exists(join(home,'sessions',projectKey(workspace),encodeSegment(created))));
    if(!enabled)disabledSession=created;
-   await page.getByRole('button',{name:'添加工作区',exact:true}).click();
-   const picker=page.getByRole('dialog',{name:'选择工作区目录'});
-   await picker.getByRole('button',{name:'打开',exact:true,disabled:false}).waitFor();
-   await picker.getByRole('button',{name:'取消',exact:true}).click();
+   await checkDirectoryPicker();
    await survivor.click();
    await transcript.waitFor();
    await page.reload();

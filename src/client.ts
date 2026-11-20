@@ -47,7 +47,7 @@ type Refresh = () => Promise<void>;
 
 window.__ModuleLoader__.load({ id: 'dsh-session-deletion', factory: require => ({
   inject: ['slots', 'sessions', 'uiWorkspace', 'contextMenus', 'locale'],
-  async apply(ctx: DeletionClientContext) {
+  apply(ctx: DeletionClientContext) {
     let scope: ClientScope | undefined;
     let refresh: Refresh | undefined;
     let active = true, polling = false;
@@ -75,7 +75,8 @@ window.__ModuleLoader__.load({ id: 'dsh-session-deletion', factory: require => (
       const timer = setInterval(() => { void poll(); }, 1000);
       return () => { active = false; clearInterval(timer); };
     }, 'session-deletion status');
-    await poll();
+    // DSH waits for client plugins before opening its gateway connection.
+    void poll();
   },
 }) });
 
